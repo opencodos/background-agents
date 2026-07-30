@@ -24,6 +24,7 @@ export type {
 
 export {
   githubAutofixEnvelopeSchema,
+  githubAutofixOriginSchema,
   githubAutofixSessionCommandSchema,
   githubAutofixSessionResponseSchema,
   githubReviewPublicationRequestSchema,

@@ -71,7 +71,7 @@ const openInspectReviewOriginSchema = z.object({
   feedbackUrl: z.url(),
 });
 
-const autofixFeedbackOriginSchema = z.union([
+export const githubAutofixOriginSchema = z.union([
   externalFeedbackOriginSchema,
   openInspectReviewOriginSchema,
 ]);
@@ -137,7 +137,7 @@ const enqueueFeedbackCommandSchema = z.object({
     id: z.string().min(1),
     login: z.string().min(1),
   }),
-  origin: autofixFeedbackOriginSchema,
+  origin: githubAutofixOriginSchema,
   attemptLimit: z.number().int().min(1).max(50),
 });
 
@@ -173,7 +173,7 @@ export const githubAutofixSessionResponseSchema = z.discriminatedUnion("kind", [
   }),
 ]);
 
-export type GitHubAutofixOrigin = z.infer<typeof autofixFeedbackOriginSchema>;
+export type GitHubAutofixOrigin = z.infer<typeof githubAutofixOriginSchema>;
 export type GitHubReviewTargetOrigin = z.infer<typeof githubReviewTargetOriginSchema>;
 export type OpenInspectReviewOrigin = z.infer<typeof openInspectReviewOriginSchema>;
 export type SessionMessageOrigin = z.infer<typeof sessionMessageOriginSchema>;
