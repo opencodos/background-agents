@@ -79,6 +79,10 @@ async function handlePublicationReconciliation(
   match: RegExpMatchArray,
   ctx: RequestContext
 ): Promise<Response> {
+  if (ctx.principal?.kind !== "service" || ctx.principal.service !== "web") {
+    return error("Unauthorized", 401);
+  }
+
   const publicationKey = match.groups?.key;
   if (!publicationKey) return error("Publication key required", 400);
   const parsed = reconciliationRequestSchema.safeParse(await request.json().catch(() => null));

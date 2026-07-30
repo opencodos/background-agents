@@ -43,4 +43,36 @@ describe("Autofix operator routes", () => {
 
     expect(response.status).toBe(401);
   });
+
+  it("allows the signed web service to reconcile a review publication", async () => {
+    const response = await handleRequest(
+      await signedServiceRequest(
+        "https://test.local/autofix/review-publications/publication-1/reconcile",
+        {
+          method: "POST",
+          body: JSON.stringify({ action: "search" }),
+          service: "web",
+        }
+      ),
+      createEnv() as never
+    );
+
+    expect(response.status).toBe(404);
+  });
+
+  it("rejects another authenticated service from review reconciliation", async () => {
+    const response = await handleRequest(
+      await signedServiceRequest(
+        "https://test.local/autofix/review-publications/publication-1/reconcile",
+        {
+          method: "POST",
+          body: JSON.stringify({ action: "search" }),
+          service: "github-bot",
+        }
+      ),
+      createEnv() as never
+    );
+
+    expect(response.status).toBe(401);
+  });
 });

@@ -166,7 +166,8 @@ function isWebServiceAuthRoute(method: string, path: string): boolean {
   return (
     isBrowserAuthProxyRoute(method, path) ||
     (method === "GET" &&
-      (path === "/internal/auth/sign-in-providers" || path === "/autofix/activity"))
+      (path === "/internal/auth/sign-in-providers" || path === "/autofix/activity")) ||
+    (method === "POST" && /^\/autofix\/review-publications\/[^/]+\/reconcile$/.test(path))
   );
 }
 
