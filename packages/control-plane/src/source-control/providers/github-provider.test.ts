@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { GitHubSourceControlProvider } from "./github-provider";
+import { GitHubSourceControlProvider, deriveGitHubPullRequestStatus } from "./github-provider";
 import { SourceControlProviderError } from "../errors";
 
 // Mock the upstream GitHub App auth functions
@@ -61,6 +61,138 @@ describe("GitHubSourceControlProvider", () => {
       await expect(
         provider.getBranchHead({ owner: "acme", name: "web", branch: "missing" })
       ).resolves.toBeNull();
+    });
+  });
+
+  describe("publishPullRequestReview", () => {
+    it("finds marker candidates without treating them as confirmed receipts", async () => {
+      mockGetCachedInstallationToken.mockResolvedValueOnce("app-token");
+      mockFetchWithTimeout.mockResolvedValueOnce(
+        Response.json([
+          {
+            id: 5678,
+            body: "Review\\n\\n<!-- open-inspect-review:opaque -->",
+            html_url: "https://github.com/acme/widgets/pull/42#pullrequestreview-5678",
+            state: "COMMENTED",
+            user: { id: 9, login: "open-inspect[bot]", type: "Bot" },
+          },
+          {
+            id: 5679,
+            body: "Unrelated review",
+            html_url: "https://github.com/acme/widgets/pull/42#pullrequestreview-5679",
+            state: "COMMENTED",
+            user: { id: 10, login: "alice", type: "User" },
+          },
+        ])
+      );
+      const provider = new GitHubSourceControlProvider({ appConfig: fakeAppConfig });
+
+      const candidates = await provider.findPullRequestReviewsByMarker({
+        owner: "acme",
+        name: "widgets",
+        pullRequestNumber: 42,
+        marker: "<!-- open-inspect-review:opaque -->",
+      });
+
+      expect(candidates).toEqual([
+        {
+          providerReviewId: "5678",
+          authorLogin: "open-inspect[bot]",
+          url: "https://github.com/acme/widgets/pull/42#pullrequestreview-5678",
+        },
+      ]);
+    });
+
+    it("publishes the summary and inline findings in one submitted review", async () => {
+      mockGetCachedInstallationToken.mockResolvedValueOnce("app-token");
+      mockFetchWithTimeout.mockResolvedValueOnce(
+        Response.json({
+          id: 5678,
+          html_url: "https://github.com/acme/widgets/pull/42#pullrequestreview-5678",
+        })
+      );
+      const provider = new GitHubSourceControlProvider({ appConfig: fakeAppConfig });
+
+      const result = await provider.publishPullRequestReview({
+        owner: "acme",
+        name: "widgets",
+        pullRequestNumber: 42,
+        headSha: "abc123",
+        event: "REQUEST_CHANGES",
+        body: "One issue.\\n\\n<!-- open-inspect-review:opaque -->",
+        comments: [
+          {
+            path: "src/widget.ts",
+            line: 17,
+            side: "RIGHT",
+            body: "Handle null here.",
+          },
+        ],
+      });
+
+      expect(result).toEqual({
+        providerReviewId: "5678",
+        url: "https://github.com/acme/widgets/pull/42#pullrequestreview-5678",
+      });
+      expect(mockFetchWithTimeout).toHaveBeenCalledWith(
+        "https://api.github.com/repos/acme/widgets/pulls/42/reviews",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({
+            commit_id: "abc123",
+            event: "REQUEST_CHANGES",
+            body: "One issue.\\n\\n<!-- open-inspect-review:opaque -->",
+            comments: [
+              {
+                path: "src/widget.ts",
+                line: 17,
+                side: "RIGHT",
+                body: "Handle null here.",
+              },
+            ],
+          }),
+        })
+      );
+    });
+
+    it("classifies a provider rejection as a definite publication failure", async () => {
+      mockGetCachedInstallationToken.mockResolvedValueOnce("app-token");
+      mockFetchWithTimeout.mockResolvedValueOnce(new Response("invalid line", { status: 422 }));
+      const provider = new GitHubSourceControlProvider({ appConfig: fakeAppConfig });
+
+      const error = await provider
+        .publishPullRequestReview({
+          owner: "acme",
+          name: "widgets",
+          pullRequestNumber: 42,
+          headSha: "abc123",
+          event: "COMMENT",
+          body: "Review",
+          comments: [],
+        })
+        .catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({ outcome: "definite" });
+    });
+
+    it("classifies a transport error as an uncertain publication outcome", async () => {
+      mockGetCachedInstallationToken.mockResolvedValueOnce("app-token");
+      mockFetchWithTimeout.mockRejectedValueOnce(new Error("connection reset"));
+      const provider = new GitHubSourceControlProvider({ appConfig: fakeAppConfig });
+
+      const error = await provider
+        .publishPullRequestReview({
+          owner: "acme",
+          name: "widgets",
+          pullRequestNumber: 42,
+          headSha: "abc123",
+          event: "COMMENT",
+          body: "Review",
+          comments: [],
+        })
+        .catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({ outcome: "uncertain" });
     });
   });
 
@@ -382,8 +514,6 @@ describe("GitHubSourceControlProvider", () => {
 });
 
 // ─── PR lifecycle tracking (getPullRequest + status derivation) ───────────────
-
-import { deriveGitHubPullRequestStatus } from "./github-provider";
 
 function makeJsonResponse(body: unknown, status = 200): Response {
   return {

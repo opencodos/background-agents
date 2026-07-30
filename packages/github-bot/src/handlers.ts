@@ -2,6 +2,7 @@ import {
   createSessionResponseSchema,
   escapeRegExp,
   sendPromptResponseSchema,
+  type GitHubReviewTargetOrigin,
 } from "@open-inspect/shared";
 import { resolveAppName } from "@open-inspect/shared/app-name";
 import { signedControlPlaneFetch } from "./internal-auth";
@@ -76,10 +77,14 @@ async function sendPrompt(
   env: Env,
   traceId: string,
   sessionId: string,
-  params: { content: string; authorId: string }
+  params: { content: string; authorId: string; originContext?: GitHubReviewTargetOrigin }
 ): Promise<string> {
   const url = `https://internal/sessions/${sessionId}/prompt`;
-  const bodyText = JSON.stringify({ content: params.content, source: "github" });
+  const bodyText = JSON.stringify({
+    content: params.content,
+    source: "github",
+    originContext: params.originContext,
+  });
   const response = await signedControlPlaneFetch(env, {
     method: "POST",
     url,
@@ -100,6 +105,23 @@ async function sendPrompt(
 
 function stripMention(body: string, botUsername: string): string {
   return body.replace(new RegExp(`@${escapeRegExp(botUsername)}`, "gi"), "").trim();
+}
+
+function reviewTargetOrigin(params: {
+  repositoryId: number;
+  owner: string;
+  name: string;
+  pullRequestNumber: number;
+  headSha: string;
+}): GitHubReviewTargetOrigin {
+  return {
+    kind: "github_review_request",
+    repositoryId: String(params.repositoryId),
+    repositoryOwner: params.owner,
+    repositoryName: params.name,
+    pullRequestNumber: params.pullRequestNumber,
+    headSha: params.headSha,
+  };
 }
 
 function fireAndForgetReaction(
@@ -258,6 +280,13 @@ export async function handleReviewRequested(
   const messageId = await sendPrompt(env, traceId, sessionId, {
     content: prompt,
     authorId: `github:${payload.sender.id}`,
+    originContext: reviewTargetOrigin({
+      repositoryId: repo.id,
+      owner,
+      name: repoName,
+      pullRequestNumber: pr.number,
+      headSha: pr.head.sha,
+    }),
   });
   log.info("prompt.sent", {
     ...meta,
@@ -361,6 +390,13 @@ export async function handlePullRequestOpened(
   const messageId = await sendPrompt(env, traceId, sessionId, {
     content: prompt,
     authorId: `github:${sender.id}`,
+    originContext: reviewTargetOrigin({
+      repositoryId: repo.id,
+      owner,
+      name: repoName,
+      pullRequestNumber: pr.number,
+      headSha: pr.head.sha,
+    }),
   });
   log.info("prompt.sent", {
     ...meta,

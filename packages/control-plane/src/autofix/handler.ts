@@ -9,6 +9,7 @@ import { getGitHubAppConfig } from "../auth/github-app";
 import { IntegrationSettingsStore } from "../db/integration-settings";
 import type { SqlDatabase } from "../db/sql-database";
 import { PrAutofixFeedbackStore } from "../db/pr-autofix-feedback-store";
+import { GitHubReviewPublicationStore } from "../db/github-review-publication-store";
 import { SessionPullRequestStore } from "../db/session-pull-request-store";
 import { createSessionRuntimeClient } from "../session/runtime-client";
 import { GitHubSourceControlProvider } from "../source-control/providers/github-provider";
@@ -68,6 +69,7 @@ export async function handleAutofixQueue(
     },
     github,
     sessions,
+    publications: new GitHubReviewPublicationStore(db),
     botUsername: env.GITHUB_BOT_USERNAME,
     now: () => Date.now(),
   });

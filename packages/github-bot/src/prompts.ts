@@ -107,24 +107,17 @@ ${prDescriptionBlock}
    - Performance implications
    - Code clarity and maintainability
 3. You may read individual files in the repo for additional context beyond the diff
-4. When your review is complete, submit it via:
-
-   gh api repos/${owner}/${repo}/pulls/${number}/reviews \\
-     --method POST \\
-     -f body="<your review summary>" \\
-     -f event="${reviewEvent}"
+4. Compose the complete review before publishing. Then call the \`publish-review\`
+   tool exactly once with:
+   - \`event\`: ${reviewEvent}
+   - \`summary\`: the complete review summary
+   - \`result\`: \`findings\` when any actionable findings exist, otherwise \`no_findings\`
+   - \`comments\`: every inline finding together in one array
 
    ${reviewEventGuidance}
 
-5. For inline comments on specific files:
-
-   gh api repos/${owner}/${repo}/pulls/${number}/comments \\
-     --method POST \\
-     -f body="<comment>" \\
-     -f path="<file path>" \\
-     -f commit_id="$(gh api repos/${owner}/${repo}/pulls/${number} --jq '.head.sha')" \\
-     -f line=<line number> \\
-     -f side="RIGHT"
+5. Do not publish review comments with \`gh api\`; the review tool submits the
+   summary and all inline comments as one attributable GitHub review.
 
 ${buildCustomInstructionsSection(codeReviewInstructions)}
 ${buildCommentGuidelines(isPublic)}`;

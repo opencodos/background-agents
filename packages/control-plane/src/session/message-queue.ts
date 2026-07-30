@@ -60,6 +60,7 @@ interface EnqueuePromptCoreData {
   reasoningEffort?: string;
   attachments?: SessionAttachmentReference[];
   callbackContext?: Record<string, unknown>;
+  originContext?: Record<string, unknown>;
 }
 
 interface EnqueuedPrompt {
@@ -525,6 +526,7 @@ export class SessionMessageQueue {
       reasoningEffort: data.reasoningEffort,
       attachments: data.attachments,
       callbackContext: data.callbackContext,
+      originContext: data.originContext,
     });
 
     await this.processMessageQueue();
@@ -568,6 +570,7 @@ export class SessionMessageQueue {
           reasoningEffort: messageReasoningEffort,
           attachments: attachments ? JSON.stringify(attachments) : null,
           callbackContext: data.callbackContext ? JSON.stringify(data.callbackContext) : null,
+          originContext: data.originContext ? JSON.stringify(data.originContext) : null,
           status: "pending",
           createdAt: now,
         },

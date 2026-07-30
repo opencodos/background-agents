@@ -818,6 +818,27 @@ describe("SessionRepository", () => {
       ]);
       expect(repo.getProcessingMessage()).toEqual({ id: "msg-1" });
     });
+
+    it("returns the processing message and its stored origin context", () => {
+      mock.setData(`SELECT id, origin_context FROM messages WHERE status = 'processing' LIMIT 1`, [
+        {
+          id: "msg-1",
+          origin_context: JSON.stringify({
+            kind: "github_review_request",
+            repositoryId: "99",
+            repositoryOwner: "acme",
+            repositoryName: "widgets",
+            pullRequestNumber: 42,
+            headSha: "abc123",
+          }),
+        },
+      ]);
+
+      expect(repo.getProcessingMessageOrigin()).toEqual({
+        id: "msg-1",
+        originContext: expect.stringContaining("github_review_request"),
+      });
+    });
   });
 
   describe("getNextPendingMessage", () => {

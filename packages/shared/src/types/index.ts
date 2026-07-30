@@ -26,12 +26,21 @@ export {
   githubAutofixEnvelopeSchema,
   githubAutofixSessionCommandSchema,
   githubAutofixSessionResponseSchema,
+  githubReviewPublicationRequestSchema,
+  githubReviewPublicationResponseSchema,
+  githubReviewTargetOriginSchema,
+  sessionMessageOriginSchema,
 } from "./github-autofix";
 export type {
   GitHubAutofixEnvelope,
   GitHubAutofixOrigin,
   GitHubAutofixSessionCommand,
   GitHubAutofixSessionResponse,
+  GitHubReviewPublicationRequest,
+  GitHubReviewPublicationResponse,
+  GitHubReviewTargetOrigin,
+  OpenInspectReviewOrigin,
+  SessionMessageOrigin,
 } from "./github-autofix";
 
 export { clientMessageSchema } from "./websocket";

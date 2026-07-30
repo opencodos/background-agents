@@ -11,7 +11,12 @@ import {
 } from "../src/payload-schemas";
 
 const sender = { login: "octocat", id: 123, avatar_url: "https://example.com/avatar.png" };
-const repository = { owner: { login: "open-inspect" }, name: "background-agents", private: false };
+const repository = {
+  id: 9001,
+  owner: { login: "open-inspect" },
+  name: "background-agents",
+  private: false,
+};
 const pullRequest = {
   number: 42,
   title: "Add validation",

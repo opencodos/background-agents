@@ -8,6 +8,7 @@ export const SessionInternalPaths = {
   state: "/internal/state",
   prompt: "/internal/prompt",
   autofix: "/internal/autofix",
+  githubReviewPublicationContext: "/internal/github-review-publication-context",
   stop: "/internal/stop",
   sandboxEvent: "/internal/sandbox-event",
   createMediaArtifact: "/internal/create-media-artifact",

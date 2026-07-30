@@ -2,6 +2,7 @@ import { githubAutofixEnvelopeSchema, type GitHubAutofixEnvelope } from "@open-i
 import { githubAutofixFeedbackKey } from "../db/pr-autofix-feedback-store";
 import { SourceControlProviderError } from "../source-control/errors";
 import type { AutofixProcessResult } from "./service";
+import { OwnReviewReceiptPendingError } from "./service";
 
 interface AutofixProcessor {
   process(body: GitHubAutofixEnvelope): Promise<AutofixProcessResult>;
@@ -15,6 +16,7 @@ interface FailureStore {
     error: string,
     decidedAt: number
   ): Promise<boolean>;
+  markSkipped(feedbackKey: string, reason: string, decidedAt: number): Promise<boolean>;
 }
 
 interface QueueMessage {
@@ -51,6 +53,20 @@ export class AutofixQueueConsumer {
     } catch (error) {
       const feedbackKey = githubAutofixFeedbackKey(parsed.data);
       const detail = errorMessage(error);
+      if (error instanceof OwnReviewReceiptPendingError) {
+        await this.deps.feedbackStore.recordError(feedbackKey, detail);
+        if (message.attempts >= this.deps.maxDeliveryAttempts) {
+          await this.deps.feedbackStore.markSkipped(
+            feedbackKey,
+            "own_app_unattributed",
+            this.deps.now()
+          );
+          message.ack();
+        } else {
+          message.retry();
+        }
+        return;
+      }
       if (error instanceof SourceControlProviderError && error.errorType === "permanent") {
         await this.deps.feedbackStore.markFailed(
           feedbackKey,

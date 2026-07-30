@@ -104,6 +104,7 @@ export const sendPromptRequestSchema = z.object({
   reasoningEffort: z.string().optional(),
   attachments: z.unknown().optional(),
   callbackContext: z.unknown().optional(),
+  originContext: z.unknown().optional(),
 });
 
 export type SendPromptRequest = z.infer<typeof sendPromptRequestSchema>;

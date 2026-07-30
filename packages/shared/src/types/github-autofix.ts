@@ -9,6 +9,7 @@ const repositorySchema = z.object({
 const envelopeBaseSchema = z.object({
   version: z.literal(1),
   deliveryId: z.string().min(1),
+  traceId: z.string().min(1),
   repository: repositorySchema,
   pullRequestNumber: z.number().int().positive(),
   receivedAt: z.iso.datetime(),
@@ -52,6 +53,69 @@ const externalFeedbackOriginSchema = z.discriminatedUnion("kind", [
   }),
 ]);
 
+export const githubReviewTargetOriginSchema = z.object({
+  kind: z.literal("github_review_request"),
+  repositoryId: z.string().min(1),
+  repositoryOwner: z.string().min(1),
+  repositoryName: z.string().min(1),
+  pullRequestNumber: z.number().int().positive(),
+  headSha: z.string().min(1),
+});
+
+const openInspectReviewOriginSchema = z.object({
+  kind: z.literal("open_inspect_review"),
+  sourceSessionId: z.string().min(1),
+  sourceMessageId: z.string().min(1),
+  publicationKey: z.string().min(1),
+  feedbackUrl: z.url(),
+});
+
+const autofixFeedbackOriginSchema = z.union([
+  externalFeedbackOriginSchema,
+  openInspectReviewOriginSchema,
+]);
+
+export const sessionMessageOriginSchema = z.union([
+  externalFeedbackOriginSchema,
+  githubReviewTargetOriginSchema,
+  openInspectReviewOriginSchema,
+]);
+
+export const githubReviewPublicationRequestSchema = z
+  .object({
+    event: z.enum(["COMMENT", "APPROVE", "REQUEST_CHANGES"]),
+    summary: z.string().min(1).max(65_536),
+    result: z.enum(["findings", "no_findings"]),
+    comments: z
+      .array(
+        z.object({
+          path: z.string().min(1),
+          line: z.number().int().positive(),
+          startLine: z.number().int().positive().optional(),
+          side: z.enum(["LEFT", "RIGHT"]).default("RIGHT"),
+          startSide: z.enum(["LEFT", "RIGHT"]).optional(),
+          body: z.string().min(1).max(65_536),
+        })
+      )
+      .max(100)
+      .default([]),
+  })
+  .superRefine((value, context) => {
+    if (value.result === "no_findings" && value.comments.length > 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["comments"],
+        message: "A no-findings review cannot contain inline comments",
+      });
+    }
+  });
+
+export const githubReviewPublicationResponseSchema = z.object({
+  publicationKey: z.string().min(1),
+  state: z.enum(["pending", "completed", "failed", "uncertain"]),
+  providerReviewId: z.string().min(1).nullable(),
+});
+
 const enqueueFeedbackCommandSchema = z.object({
   type: z.literal("enqueue_feedback"),
   feedbackKey: z.string().min(1),
@@ -65,7 +129,7 @@ const enqueueFeedbackCommandSchema = z.object({
     id: z.string().min(1),
     login: z.string().min(1),
   }),
-  origin: externalFeedbackOriginSchema,
+  origin: autofixFeedbackOriginSchema,
   attemptLimit: z.number().int().min(1).max(50),
 });
 
@@ -101,6 +165,11 @@ export const githubAutofixSessionResponseSchema = z.discriminatedUnion("kind", [
   }),
 ]);
 
-export type GitHubAutofixOrigin = z.infer<typeof externalFeedbackOriginSchema>;
+export type GitHubAutofixOrigin = z.infer<typeof autofixFeedbackOriginSchema>;
+export type GitHubReviewTargetOrigin = z.infer<typeof githubReviewTargetOriginSchema>;
+export type OpenInspectReviewOrigin = z.infer<typeof openInspectReviewOriginSchema>;
+export type SessionMessageOrigin = z.infer<typeof sessionMessageOriginSchema>;
+export type GitHubReviewPublicationRequest = z.infer<typeof githubReviewPublicationRequestSchema>;
+export type GitHubReviewPublicationResponse = z.infer<typeof githubReviewPublicationResponseSchema>;
 export type GitHubAutofixSessionCommand = z.infer<typeof githubAutofixSessionCommandSchema>;
 export type GitHubAutofixSessionResponse = z.infer<typeof githubAutofixSessionResponseSchema>;

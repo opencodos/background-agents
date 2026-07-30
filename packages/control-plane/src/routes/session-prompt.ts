@@ -1,6 +1,7 @@
 import {
   callbackContextSchema,
   sendPromptRequestSchema,
+  githubReviewTargetOriginSchema,
   type CallbackContext,
 } from "@open-inspect/shared";
 import {
@@ -65,6 +66,19 @@ async function handleSessionPrompt(
     return error("content is required");
   }
   const body = bodyResult.data;
+
+  let originContext;
+  if (body.originContext !== undefined) {
+    const mayAttach = ctx.principal?.kind === "service" && ctx.principal.service === "github-bot";
+    if (!mayAttach) {
+      return error("Only the GitHub bot may attach review target provenance", 403);
+    }
+    const originResult = githubReviewTargetOriginSchema.safeParse(body.originContext);
+    if (!originResult.success) {
+      return error("Invalid GitHub review target provenance", 400);
+    }
+    originContext = originResult.data;
+  }
 
   const attachments = validateAttachments(body.attachments);
   if (attachments instanceof Response) return attachments;
@@ -132,6 +146,7 @@ async function handleSessionPrompt(
     reasoningEffort: body.reasoningEffort,
     attachments,
     callbackContext,
+    originContext,
     scmEnrichment: enrichment
       ? {
           userId: enrichment.scmUserId,

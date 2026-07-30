@@ -13,6 +13,7 @@ const COMMENT_ENVELOPE: GitHubAutofixEnvelope = {
   eventType: "issue_comment",
   action: "created",
   deliveryId: "delivery-1",
+  traceId: "trace-1",
   providerObject: { kind: "pr_comment", id: "1234" },
   repository: { id: "99", owner: "acme", name: "widgets" },
   pullRequestNumber: 42,
@@ -30,7 +31,7 @@ describe("PrAutofixFeedbackStore", () => {
 
     expect(first.feedbackKey).toBe(githubAutofixFeedbackKey(COMMENT_ENVELOPE));
     expect(second).toMatchObject({
-      feedbackKey: "github:pr_comment:1234",
+      feedbackKey: "github:99:pr_comment:1234",
       deliveryId: "delivery-2",
       decision: "received",
       deliveryCount: 2,
@@ -113,11 +114,13 @@ describe("PrAutofixFeedbackStore", () => {
     );
 
     const first = await store.listActivity({ limit: 1, cursor: null });
-    expect(first.records.map((record) => record.feedbackKey)).toEqual(["github:review:5678"]);
+    expect(first.records.map((record) => record.feedbackKey)).toEqual(["github:99:review:5678"]);
     expect(first.nextCursor).not.toBeNull();
 
     const second = await store.listActivity({ limit: 1, cursor: first.nextCursor });
-    expect(second.records.map((record) => record.feedbackKey)).toEqual(["github:pr_comment:1234"]);
+    expect(second.records.map((record) => record.feedbackKey)).toEqual([
+      "github:99:pr_comment:1234",
+    ]);
     expect(second.nextCursor).toBeNull();
   });
 });

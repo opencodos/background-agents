@@ -126,7 +126,7 @@ const pullRequestOpenedPayload: PullRequestOpenedPayload = {
     base: { ref: "main" },
     draft: false,
   },
-  repository: { owner: { login: "acme" }, name: "widgets", private: false },
+  repository: { id: 9001, owner: { login: "acme" }, name: "widgets", private: false },
   sender: { login: "alice", id: 1001, avatar_url: "https://avatars.githubusercontent.com/u/1001" },
 };
 
@@ -141,7 +141,7 @@ const reviewRequestedPayload: ReviewRequestedPayload = {
     base: { ref: "main" },
   },
   requested_reviewer: { login: "test-bot[bot]" },
-  repository: { owner: { login: "acme" }, name: "widgets", private: false },
+  repository: { id: 9001, owner: { login: "acme" }, name: "widgets", private: false },
   sender: { login: "alice", id: 1001, avatar_url: "https://avatars.githubusercontent.com/u/1001" },
 };
 
@@ -157,7 +157,7 @@ const issueCommentPayload: IssueCommentPayload = {
     body: "@test-bot[bot] please fix the error handling",
     user: { login: "bob" },
   },
-  repository: { owner: { login: "acme" }, name: "widgets", private: false },
+  repository: { id: 9001, owner: { login: "acme" }, name: "widgets", private: false },
   sender: { login: "bob", id: 1002, avatar_url: "https://avatars.githubusercontent.com/u/1002" },
 };
 
@@ -177,7 +177,7 @@ const reviewCommentPayload: ReviewCommentPayload = {
     position: 5,
     user: { login: "carol" },
   },
-  repository: { owner: { login: "acme" }, name: "widgets", private: false },
+  repository: { id: 9001, owner: { login: "acme" }, name: "widgets", private: false },
   sender: { login: "carol", id: 1003, avatar_url: "https://avatars.githubusercontent.com/u/1003" },
 };
 
@@ -227,6 +227,14 @@ describe("handlePullRequestOpened", () => {
     expect(promptBody.source).toBe("github");
     expect(promptBody).not.toHaveProperty("authorId");
     expect(promptBody.content).toContain("Pull Request #42");
+    expect(promptBody.originContext).toEqual({
+      kind: "github_review_request",
+      repositoryId: "9001",
+      repositoryOwner: "acme",
+      repositoryName: "widgets",
+      pullRequestNumber: 42,
+      headSha: "abc123",
+    });
 
     expect(log.info).toHaveBeenCalledWith(
       "session.created",
@@ -302,7 +310,7 @@ describe("handlePullRequestOpened", () => {
       handler_action: "auto_review",
     });
     expect(sessionCreateBody(getControlPlaneFetch(env)).scmLogin).toBe("test-bot[bot]");
-    expect(promptSendBody(getControlPlaneFetch(env)).content).toContain('-f event="COMMENT"');
+    expect(promptSendBody(getControlPlaneFetch(env)).content).toContain("`event`: COMMENT");
   });
 
   it("rejects a bot-authored PR when the bot is not an allowed trigger user", async () => {

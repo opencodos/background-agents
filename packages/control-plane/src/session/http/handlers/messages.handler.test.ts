@@ -7,6 +7,7 @@ function createHandler() {
   const messageService = {
     enqueuePrompt: vi.fn(),
     handleAutofix: vi.fn(),
+    getGitHubReviewPublicationContext: vi.fn(),
     stop: vi.fn(),
     listEvents: vi.fn(),
     listArtifacts: vi.fn(),
@@ -32,6 +33,41 @@ function createHandler() {
 }
 
 describe("createMessagesHandler", () => {
+  it("returns server-owned provenance for the currently processing review message", async () => {
+    const { handler, messageService } = createHandler();
+    vi.mocked(messageService.getGitHubReviewPublicationContext).mockReturnValue({
+      sourceMessageId: "msg-1",
+      target: {
+        kind: "github_review_request",
+        repositoryId: "99",
+        repositoryOwner: "acme",
+        repositoryName: "widgets",
+        pullRequestNumber: 42,
+        headSha: "abc123",
+      },
+    });
+
+    const response = handler.githubReviewPublicationContext();
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      sourceMessageId: "msg-1",
+      target: { kind: "github_review_request", pullRequestNumber: 42 },
+    });
+  });
+
+  it("rejects review publication outside a processing review message", async () => {
+    const { handler, messageService } = createHandler();
+    vi.mocked(messageService.getGitHubReviewPublicationContext).mockReturnValue(null);
+
+    const response = handler.githubReviewPublicationContext();
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: "No review request is currently processing",
+    });
+  });
+
   it("validates and dispatches Autofix admission commands", async () => {
     const { handler, messageService, log } = createHandler();
     vi.mocked(messageService.handleAutofix).mockResolvedValue({

@@ -3,6 +3,7 @@ import { GITHUB_AUTOFIX_DEFAULTS } from "@open-inspect/shared";
 import { AutofixService } from "./service";
 import type { GitHubPullRequestFeedback } from "../source-control/providers/github-provider";
 import { SourceControlProviderError } from "../source-control/errors";
+import type { GitHubReviewPublicationRecord } from "../db/github-review-publication-store";
 
 function buildService() {
   const received: {
@@ -12,7 +13,7 @@ function buildService() {
     messageId: string | null;
     reason?: string | null;
   } = {
-    feedbackKey: "github:pr_comment:1234",
+    feedbackKey: "github:99:pr_comment:1234",
     decision: "received",
     dispatchAttemptedAt: null,
     messageId: null,
@@ -54,6 +55,8 @@ function buildService() {
       lifecycleState: "open" as const,
       repoOwner: "acme",
       repoName: "widgets",
+      headBranch: "feature/widgets",
+      headSha: "abc123",
     })),
     getPullRequestFeedback: vi.fn(
       async (): Promise<GitHubPullRequestFeedback> => ({
@@ -69,17 +72,21 @@ function buildService() {
   const sessions = {
     fetch: vi.fn(async () => Response.json({ kind: "enqueued", messageId: "message-1" })),
   };
+  const publications = {
+    getByProviderReviewId: vi.fn(async (): Promise<GitHubReviewPublicationRecord | null> => null),
+  };
   const service = new AutofixService({
     feedbackStore,
     pullRequests,
     settings,
     github,
     sessions,
+    publications,
     botUsername: "open-inspect[bot]",
     now: () => 2_000,
   });
 
-  return { service, feedbackStore, pullRequests, settings, github, sessions };
+  return { service, feedbackStore, pullRequests, settings, github, sessions, publications };
 }
 
 describe("AutofixService", () => {
@@ -91,6 +98,7 @@ describe("AutofixService", () => {
       eventType: "issue_comment",
       action: "created",
       deliveryId: "delivery-1",
+      traceId: "trace-1",
       providerObject: { kind: "pr_comment", id: "1234" },
       repository: { id: "99", owner: "acme", name: "widgets" },
       pullRequestNumber: 42,
@@ -117,8 +125,12 @@ describe("AutofixService", () => {
         body: expect.stringContaining("Please handle the null case."),
       })
     );
+    const dispatch = h.sessions.fetch.mock.calls[0] as unknown as [string, string, RequestInit];
+    expect(dispatch[2].body).toContain(
+      "Trusted target: acme/widgets pull request #42, branch feature/widgets, head abc123."
+    );
     expect(h.feedbackStore.markQueued).toHaveBeenCalledWith(
-      "github:pr_comment:1234",
+      "github:99:pr_comment:1234",
       "message-1",
       "enqueued",
       2_000
@@ -133,7 +145,7 @@ describe("AutofixService", () => {
     });
     h.feedbackStore.markSkipped.mockResolvedValue(false);
     h.feedbackStore.get.mockResolvedValue({
-      feedbackKey: "github:pr_comment:1234",
+      feedbackKey: "github:99:pr_comment:1234",
       decision: "queued",
       dispatchAttemptedAt: 2_000,
       messageId: "message-winner",
@@ -145,6 +157,7 @@ describe("AutofixService", () => {
       eventType: "issue_comment",
       action: "created",
       deliveryId: "delivery-1",
+      traceId: "trace-1",
       providerObject: { kind: "pr_comment", id: "1234" },
       repository: { id: "99", owner: "acme", name: "widgets" },
       pullRequestNumber: 42,
@@ -171,6 +184,7 @@ describe("AutofixService", () => {
       eventType: "issue_comment",
       action: "created",
       deliveryId: "delivery-1",
+      traceId: "trace-1",
       providerObject: { kind: "pr_comment", id: "1234" },
       repository: { id: "99", owner: "acme", name: "widgets" },
       pullRequestNumber: 42,
@@ -194,6 +208,7 @@ describe("AutofixService", () => {
       eventType: "issue_comment",
       action: "created",
       deliveryId: "delivery-1",
+      traceId: "trace-1",
       providerObject: { kind: "pr_comment", id: "1234" },
       repository: { id: "99", owner: "acme", name: "widgets" },
       pullRequestNumber: 42,
@@ -232,6 +247,7 @@ describe("AutofixService", () => {
       eventType: "pull_request_review",
       action: "submitted",
       deliveryId: "delivery-2",
+      traceId: "trace-2",
       providerObject: { kind: "review", id: "5678" },
       repository: { id: "99", owner: "acme", name: "widgets" },
       pullRequestNumber: 42,
@@ -364,8 +380,16 @@ describe("AutofixService", () => {
     expect(h.sessions.fetch).not.toHaveBeenCalled();
   });
 
-  it("fails closed on unattributed reviews from the Open Inspect App", async () => {
+  it("retries an Open Inspect review until its completed publication receipt is visible", async () => {
     const h = buildService();
+    h.settings.resolve.mockResolvedValueOnce({
+      enabledRepos: null,
+      autofix: {
+        ...GITHUB_AUTOFIX_DEFAULTS,
+        enabled: true,
+        openInspectReviewsEnabled: true,
+      },
+    });
     h.github.getPullRequestFeedback.mockResolvedValueOnce({
       kind: "review",
       id: "5678",
@@ -376,28 +400,190 @@ describe("AutofixService", () => {
       comments: [],
     });
 
+    await expect(
+      h.service.process({
+        version: 1,
+        eventType: "pull_request_review",
+        action: "submitted",
+        deliveryId: "delivery-2",
+        traceId: "trace-2",
+        providerObject: { kind: "review", id: "5678" },
+        repository: { id: "99", owner: "acme", name: "widgets" },
+        pullRequestNumber: 42,
+        receivedAt: "2026-07-30T05:00:00.000Z",
+      })
+    ).rejects.toMatchObject({ name: "OwnReviewReceiptPendingError" });
+    expect(h.sessions.fetch).not.toHaveBeenCalled();
+  });
+
+  it("does not echo an Open Inspect review back into its source session", async () => {
+    const h = buildService();
+    h.settings.resolve.mockResolvedValueOnce({
+      enabledRepos: null,
+      autofix: {
+        ...GITHUB_AUTOFIX_DEFAULTS,
+        enabled: true,
+        openInspectReviewsEnabled: true,
+      },
+    });
+    h.github.getPullRequestFeedback.mockResolvedValueOnce({
+      kind: "review",
+      id: "5678",
+      body: "Please address this.",
+      url: "https://github.com/acme/widgets/pull/42#pullrequestreview-5678",
+      state: "CHANGES_REQUESTED",
+      author: { id: "9", login: "Open-Inspect[bot]", type: "Bot" },
+      comments: [],
+    });
+    h.publications.getByProviderReviewId.mockResolvedValueOnce({
+      publicationKey: "github-review:opaque",
+      providerReviewId: "5678",
+      repositoryExternalId: "99",
+      repoOwner: "acme",
+      repoName: "widgets",
+      prNumber: 42,
+      headSha: "abc123",
+      sourceSessionId: "session-1",
+      sourceMessageId: "review-message-1",
+      result: "findings",
+      state: "completed",
+      marker: "<!-- open-inspect-review:opaque -->",
+      error: null,
+      createdAt: 1_000,
+      updatedAt: 1_001,
+    });
+
     const result = await h.service.process({
       version: 1,
       eventType: "pull_request_review",
       action: "submitted",
       deliveryId: "delivery-2",
+      traceId: "trace-2",
       providerObject: { kind: "review", id: "5678" },
       repository: { id: "99", owner: "acme", name: "widgets" },
       pullRequestNumber: 42,
       receivedAt: "2026-07-30T05:00:00.000Z",
     });
 
-    expect(result).toMatchObject({
-      decision: "skipped",
-      reason: "own_app_unattributed",
-    });
+    expect(result).toMatchObject({ decision: "skipped", reason: "own_session_review" });
     expect(h.sessions.fetch).not.toHaveBeenCalled();
+  });
+
+  it("dispatches a findings review from a different Open Inspect session", async () => {
+    const h = buildService();
+    h.settings.resolve.mockResolvedValueOnce({
+      enabledRepos: null,
+      autofix: {
+        ...GITHUB_AUTOFIX_DEFAULTS,
+        enabled: true,
+        openInspectReviewsEnabled: true,
+      },
+    });
+    h.github.getPullRequestFeedback.mockResolvedValueOnce({
+      kind: "review",
+      id: "5678",
+      body: "Please address this.",
+      url: "https://github.com/acme/widgets/pull/42#pullrequestreview-5678",
+      state: "CHANGES_REQUESTED",
+      author: { id: "9", login: "Open-Inspect[bot]", type: "Bot" },
+      comments: [],
+    });
+    h.publications.getByProviderReviewId.mockResolvedValueOnce({
+      publicationKey: "github-review:opaque",
+      providerReviewId: "5678",
+      repositoryExternalId: "99",
+      repoOwner: "acme",
+      repoName: "widgets",
+      prNumber: 42,
+      headSha: "abc123",
+      sourceSessionId: "review-session",
+      sourceMessageId: "review-message-1",
+      result: "findings",
+      state: "completed",
+      marker: "<!-- open-inspect-review:opaque -->",
+      error: null,
+      createdAt: 1_000,
+      updatedAt: 1_001,
+    });
+
+    const result = await h.service.process({
+      version: 1,
+      eventType: "pull_request_review",
+      action: "submitted",
+      deliveryId: "delivery-2",
+      traceId: "trace-2",
+      providerObject: { kind: "review", id: "5678" },
+      repository: { id: "99", owner: "acme", name: "widgets" },
+      pullRequestNumber: 42,
+      receivedAt: "2026-07-30T05:00:00.000Z",
+    });
+
+    expect(result).toMatchObject({ decision: "queued" });
+    expect(h.sessions.fetch).toHaveBeenCalledWith(
+      "session-1",
+      expect.any(String),
+      expect.objectContaining({
+        body: expect.stringContaining('"kind":"open_inspect_review"'),
+      })
+    );
+  });
+
+  it("skips a completed no-findings Open Inspect review", async () => {
+    const h = buildService();
+    h.settings.resolve.mockResolvedValueOnce({
+      enabledRepos: null,
+      autofix: {
+        ...GITHUB_AUTOFIX_DEFAULTS,
+        enabled: true,
+        openInspectReviewsEnabled: true,
+      },
+    });
+    h.github.getPullRequestFeedback.mockResolvedValueOnce({
+      kind: "review",
+      id: "5678",
+      body: "Looks good.",
+      url: "https://github.com/acme/widgets/pull/42#pullrequestreview-5678",
+      state: "COMMENTED",
+      author: { id: "9", login: "Open-Inspect[bot]", type: "Bot" },
+      comments: [],
+    });
+    h.publications.getByProviderReviewId.mockResolvedValueOnce({
+      publicationKey: "github-review:opaque",
+      providerReviewId: "5678",
+      repositoryExternalId: "99",
+      repoOwner: "acme",
+      repoName: "widgets",
+      prNumber: 42,
+      headSha: "abc123",
+      sourceSessionId: "review-session",
+      sourceMessageId: "review-message-1",
+      result: "no_findings",
+      state: "completed",
+      marker: "<!-- open-inspect-review:opaque -->",
+      error: null,
+      createdAt: 1_000,
+      updatedAt: 1_001,
+    });
+
+    const result = await h.service.process({
+      version: 1,
+      eventType: "pull_request_review",
+      action: "submitted",
+      deliveryId: "delivery-2",
+      traceId: "trace-2",
+      providerObject: { kind: "review", id: "5678" },
+      repository: { id: "99", owner: "acme", name: "widgets" },
+      pullRequestNumber: 42,
+      receivedAt: "2026-07-30T05:00:00.000Z",
+    });
+
+    expect(result).toMatchObject({ decision: "skipped", reason: "no_findings" });
   });
 
   it("recovers an ambiguous prior dispatch through the SessionDO lookup", async () => {
     const h = buildService();
     h.feedbackStore.receive.mockResolvedValueOnce({
-      feedbackKey: "github:pr_comment:1234",
+      feedbackKey: "github:99:pr_comment:1234",
       decision: "received",
       dispatchAttemptedAt: 1_500,
       messageId: null,
@@ -411,6 +597,7 @@ describe("AutofixService", () => {
       eventType: "issue_comment",
       action: "created",
       deliveryId: "delivery-1",
+      traceId: "trace-1",
       providerObject: { kind: "pr_comment", id: "1234" },
       repository: { id: "99", owner: "acme", name: "widgets" },
       pullRequestNumber: 42,

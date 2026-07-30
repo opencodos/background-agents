@@ -41,6 +41,7 @@ export interface MessagesHandlerDeps {
 export interface MessagesHandler {
   enqueuePrompt: (request: Request, log: Logger) => Promise<Response>;
   autofix: (request: Request, log: Logger) => Promise<Response>;
+  githubReviewPublicationContext: () => Response;
   stop: () => Promise<Response>;
   listEvents: (url: URL) => Response;
   listArtifacts: (url: URL) => Response;
@@ -49,6 +50,13 @@ export interface MessagesHandler {
 
 export function createMessagesHandler(deps: MessagesHandlerDeps): MessagesHandler {
   return {
+    githubReviewPublicationContext(): Response {
+      const context = deps.messageService.getGitHubReviewPublicationContext();
+      return context
+        ? Response.json(context)
+        : Response.json({ error: "No review request is currently processing" }, { status: 409 });
+    },
+
     async autofix(request: Request, log: Logger): Promise<Response> {
       try {
         const result = githubAutofixSessionCommandSchema.safeParse(await request.json());

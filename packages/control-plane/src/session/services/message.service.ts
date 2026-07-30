@@ -1,7 +1,9 @@
 import type { ArtifactRow } from "../types";
+import { githubReviewTargetOriginSchema } from "@open-inspect/shared";
 import type {
   GitHubAutofixSessionCommand,
   GitHubAutofixSessionResponse,
+  GitHubReviewTargetOrigin,
   SessionMessage,
 } from "@open-inspect/shared";
 import type { ArtifactResponse, ListEventsResponse } from "../../types";
@@ -45,6 +47,23 @@ export class MessageService {
     }
 
     return this.deps.messageQueue.lookupAutofix(command.feedbackKey);
+  }
+
+  getGitHubReviewPublicationContext(): {
+    sourceMessageId: string;
+    target: GitHubReviewTargetOrigin;
+  } | null {
+    const processing = this.deps.repository.getProcessingMessageOrigin();
+    if (!processing?.originContext) return null;
+
+    try {
+      const parsed = githubReviewTargetOriginSchema.safeParse(
+        JSON.parse(processing.originContext) as unknown
+      );
+      return parsed.success ? { sourceMessageId: processing.id, target: parsed.data } : null;
+    } catch {
+      return null;
+    }
   }
 
   async stop(): Promise<{ status: "stopping" }> {

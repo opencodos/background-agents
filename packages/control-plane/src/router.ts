@@ -85,6 +85,7 @@ const SANDBOX_AUTH_ROUTES: RegExp[] = [
   /^\/sessions\/[^/]+\/children\/[^/]+$/, // GET child detail
   /^\/sessions\/[^/]+\/children\/[^/]+\/cancel$/, // POST cancel child
   /^\/sessions\/[^/]+\/slack-notify$/, // Agent-initiated Slack notification
+  /^\/sessions\/[^/]+\/github-review$/, // One review from a processing GitHub review session
 ];
 
 /** Routes that require the session-specific sandbox token and reject internal HMAC auth. */

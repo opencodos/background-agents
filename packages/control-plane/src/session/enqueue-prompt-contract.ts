@@ -1,4 +1,7 @@
-import { messageSourceSchema } from "@open-inspect/shared";
+import {
+  messageSourceSchema,
+  sessionMessageOriginSchema,
+} from "@open-inspect/shared";
 import { sessionAttachmentReferencesSchema } from "@open-inspect/shared/types/session-attachments";
 import { z } from "zod";
 
@@ -11,6 +14,7 @@ export const enqueuePromptRequestSchema = z.object({
   reasoningEffort: z.string().optional(),
   attachments: sessionAttachmentReferencesSchema.optional(),
   callbackContext: z.record(z.string(), z.unknown()).optional(),
+  originContext: sessionMessageOriginSchema.optional(),
   // Trusted SCM enrichment resolved by the router at prompt time.
   scmEnrichment: z
     .object({

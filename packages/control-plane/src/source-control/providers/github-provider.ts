@@ -140,6 +140,38 @@ const githubCollaboratorPermissionSchema = z.object({
   permission: z.enum(["none", "read", "triage", "write", "maintain", "admin"]),
 });
 
+const githubPublishedReviewSchema = z.object({
+  id: z.number(),
+  html_url: z.url(),
+});
+
+export interface PublishGitHubReviewConfig {
+  owner: string;
+  name: string;
+  pullRequestNumber: number;
+  headSha: string;
+  event: "COMMENT" | "APPROVE" | "REQUEST_CHANGES";
+  body: string;
+  comments: Array<{
+    path: string;
+    line: number;
+    startLine?: number;
+    side: "LEFT" | "RIGHT";
+    startSide?: "LEFT" | "RIGHT";
+    body: string;
+  }>;
+}
+
+export class GitHubReviewPublicationError extends Error {
+  constructor(
+    message: string,
+    readonly outcome: "definite" | "uncertain"
+  ) {
+    super(message);
+    this.name = "GitHubReviewPublicationError";
+  }
+}
+
 interface GitHubPullRequestFeedbackLocation {
   owner: string;
   name: string;
@@ -212,6 +244,125 @@ export class GitHubSourceControlProvider implements SourceControlProvider {
     this.appConfig = config.appConfig;
     this.cacheStore = config.cacheStore;
     this.userAgent = config.userAgent || USER_AGENT;
+  }
+
+  async publishPullRequestReview(config: PublishGitHubReviewConfig): Promise<{
+    providerReviewId: string;
+    url: string;
+  }> {
+    let token: string;
+    try {
+      token = await this.getAppToken("publish pull request review");
+    } catch (error) {
+      throw new GitHubReviewPublicationError(
+        `GitHub review publication did not start: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        "definite"
+      );
+    }
+    let response: Response;
+    try {
+      response = await fetchWithTimeout(
+        `${GITHUB_API_BASE}/repos/${config.owner}/${config.name}/pulls/${config.pullRequestNumber}/reviews`,
+        {
+          method: "POST",
+          headers: {
+            ...this.appHeaders(token),
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            commit_id: config.headSha,
+            event: config.event,
+            body: config.body,
+            comments: config.comments.map((comment) => ({
+              path: comment.path,
+              line: comment.line,
+              ...(comment.startLine === undefined ? {} : { start_line: comment.startLine }),
+              side: comment.side,
+              ...(comment.startSide === undefined ? {} : { start_side: comment.startSide }),
+              body: comment.body,
+            })),
+          }),
+        }
+      );
+    } catch (error) {
+      throw new GitHubReviewPublicationError(
+        `GitHub review publication outcome is unknown: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        "uncertain"
+      );
+    }
+
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      throw new GitHubReviewPublicationError(
+        `GitHub rejected review publication: ${response.status} ${detail}`,
+        "definite"
+      );
+    }
+    try {
+      const review = await parseProviderResponse(
+        response,
+        githubPublishedReviewSchema,
+        "GitHub returned an invalid published review"
+      );
+      return {
+        providerReviewId: String(review.id),
+        url: review.html_url,
+      };
+    } catch (error) {
+      throw new GitHubReviewPublicationError(
+        `GitHub accepted a review but its identity is unknown: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        "uncertain"
+      );
+    }
+  }
+
+  async findPullRequestReviewsByMarker(config: {
+    owner: string;
+    name: string;
+    pullRequestNumber: number;
+    marker: string;
+  }): Promise<Array<{ providerReviewId: string; authorLogin: string; url: string }>> {
+    const token = await this.getAppToken("search pull request reviews");
+    const candidates: Array<{
+      providerReviewId: string;
+      authorLogin: string;
+      url: string;
+    }> = [];
+    for (let page = 1; ; page += 1) {
+      const response = await fetchWithTimeout(
+        `${GITHUB_API_BASE}/repos/${config.owner}/${config.name}/pulls/${config.pullRequestNumber}/reviews?per_page=100&page=${page}`,
+        { headers: this.appHeaders(token) }
+      );
+      if (!response.ok) {
+        const detail = await response.text();
+        throw SourceControlProviderError.fromFetchError(
+          `Failed to search pull request reviews: ${response.status} ${detail}`,
+          new Error(detail),
+          response.status
+        );
+      }
+      const reviews = await parseProviderResponse(
+        response,
+        z.array(githubPullRequestReviewSchema),
+        "Failed to search pull request reviews"
+      );
+      candidates.push(
+        ...reviews
+          .filter((review) => (review.body ?? "").includes(config.marker))
+          .map((review) => ({
+            providerReviewId: String(review.id),
+            authorLogin: review.user.login,
+            url: review.html_url,
+          }))
+      );
+      if (reviews.length < 100) return candidates;
+    }
   }
 
   async getPullRequestFeedback(

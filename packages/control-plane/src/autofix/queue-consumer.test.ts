@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { GitHubAutofixEnvelope } from "@open-inspect/shared";
 import { AutofixQueueConsumer } from "./queue-consumer";
+import { OwnReviewReceiptPendingError } from "./service";
 import { SourceControlProviderError } from "../source-control/errors";
 
 const ENVELOPE: GitHubAutofixEnvelope = {
@@ -8,6 +9,7 @@ const ENVELOPE: GitHubAutofixEnvelope = {
   eventType: "issue_comment",
   action: "created",
   deliveryId: "delivery-1",
+  traceId: "trace-1",
   providerObject: { kind: "pr_comment", id: "1234" },
   repository: { id: "99", owner: "acme", name: "widgets" },
   pullRequestNumber: 42,
@@ -51,6 +53,39 @@ describe("AutofixQueueConsumer", () => {
     expect(feedbackStore.markSkipped).not.toHaveBeenCalled();
   });
 
+  it("retries a missing own-review receipt, then skips and acknowledges at the limit", async () => {
+    const service = {
+      process: vi.fn(async () => {
+        throw new OwnReviewReceiptPendingError("5678");
+      }),
+    };
+    const feedbackStore = {
+      recordError: vi.fn(async () => undefined),
+      markFailed: vi.fn(async () => true),
+      markSkipped: vi.fn(async () => true),
+    };
+    const consumer = new AutofixQueueConsumer({
+      service,
+      feedbackStore,
+      now: () => 2_000,
+      maxDeliveryAttempts: 5,
+    });
+    const beforeLimit = message(4);
+    const atLimit = message(5);
+
+    await consumer.consume(beforeLimit);
+    await consumer.consume(atLimit);
+
+    expect(beforeLimit.retry).toHaveBeenCalledOnce();
+    expect(feedbackStore.markSkipped).toHaveBeenCalledWith(
+      "github:99:pr_comment:1234",
+      "own_app_unattributed",
+      2_000
+    );
+    expect(atLimit.ack).toHaveBeenCalledOnce();
+    expect(atLimit.retry).not.toHaveBeenCalled();
+  });
+
   it("acknowledges a completed Autofix decision", async () => {
     const service = {
       process: vi.fn(async () => ({
@@ -62,7 +97,8 @@ describe("AutofixQueueConsumer", () => {
     };
     const feedbackStore = {
       recordError: vi.fn(),
-      markFailed: vi.fn(),
+      markFailed: vi.fn(async () => true),
+      markSkipped: vi.fn(async () => true),
     };
     const consumer = new AutofixQueueConsumer({
       service,
@@ -87,6 +123,7 @@ describe("AutofixQueueConsumer", () => {
     const feedbackStore = {
       recordError: vi.fn(async () => undefined),
       markFailed: vi.fn(async () => true),
+      markSkipped: vi.fn(async () => true),
     };
     const consumer = new AutofixQueueConsumer({
       service,
@@ -99,7 +136,7 @@ describe("AutofixQueueConsumer", () => {
     await consumer.consume(input);
 
     expect(feedbackStore.recordError).toHaveBeenCalledWith(
-      "github:pr_comment:1234",
+      "github:99:pr_comment:1234",
       "GitHub rate limited"
     );
     expect(feedbackStore.markFailed).not.toHaveBeenCalled();
@@ -116,6 +153,7 @@ describe("AutofixQueueConsumer", () => {
     const feedbackStore = {
       recordError: vi.fn(async () => undefined),
       markFailed: vi.fn(async () => true),
+      markSkipped: vi.fn(async () => true),
     };
     const consumer = new AutofixQueueConsumer({
       service,
@@ -128,7 +166,7 @@ describe("AutofixQueueConsumer", () => {
     await consumer.consume(input);
 
     expect(feedbackStore.markFailed).toHaveBeenCalledWith(
-      "github:pr_comment:1234",
+      "github:99:pr_comment:1234",
       "delivery_attempts_exhausted",
       "GitHub unavailable",
       2_000
@@ -145,6 +183,7 @@ describe("AutofixQueueConsumer", () => {
     const feedbackStore = {
       recordError: vi.fn(async () => undefined),
       markFailed: vi.fn(async () => false),
+      markSkipped: vi.fn(async () => true),
     };
     const consumer = new AutofixQueueConsumer({
       service,
@@ -169,6 +208,7 @@ describe("AutofixQueueConsumer", () => {
     const feedbackStore = {
       recordError: vi.fn(async () => undefined),
       markFailed: vi.fn(async () => true),
+      markSkipped: vi.fn(async () => true),
     };
     const consumer = new AutofixQueueConsumer({
       service,
@@ -181,7 +221,7 @@ describe("AutofixQueueConsumer", () => {
     await consumer.consume(input);
 
     expect(feedbackStore.markFailed).toHaveBeenCalledWith(
-      "github:pr_comment:1234",
+      "github:99:pr_comment:1234",
       "permanent_provider_error",
       "Comment not found",
       2_000

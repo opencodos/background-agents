@@ -772,6 +772,32 @@ describe("SessionMessageQueue", () => {
   });
 
   describe("enqueuePromptFromApi", () => {
+    it("persists trusted review target provenance on the queued message", async () => {
+      const h = buildQueue();
+      const originContext = {
+        kind: "github_review_request" as const,
+        repositoryId: "99",
+        repositoryOwner: "acme",
+        repositoryName: "widgets",
+        pullRequestNumber: 42,
+        headSha: "abc123",
+      };
+
+      await h.queue.enqueuePromptFromApi({
+        content: "Review this pull request",
+        authorId: "github:1001",
+        source: "github",
+        originContext,
+      });
+
+      expect(h.repository.createMessageWithAttachments).toHaveBeenCalledWith(
+        expect.objectContaining({
+          originContext: JSON.stringify(originContext),
+        }),
+        []
+      );
+    });
+
     it("creates participant with the enriched identity name when new", async () => {
       const h = buildQueue();
       h.participantService.getByUserId.mockReturnValue(null as unknown as ParticipantRow);

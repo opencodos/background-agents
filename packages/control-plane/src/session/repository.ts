@@ -827,6 +827,18 @@ export class SessionRepository {
     return rows[0] ?? null;
   }
 
+  getProcessingMessageOrigin(): { id: string; originContext: string | null } | null {
+    const result = this.sql.exec(
+      `SELECT id, origin_context FROM messages WHERE status = 'processing' LIMIT 1`
+    );
+    const rows = result.toArray() as Array<{
+      id: string;
+      origin_context: string | null;
+    }>;
+    const row = rows[0];
+    return row ? { id: row.id, originContext: row.origin_context } : null;
+  }
+
   getProcessingMessageWithStartedAt(): { id: string; started_at: number } | null {
     const result = this.sql.exec(
       `SELECT id, started_at FROM messages WHERE status = 'processing' LIMIT 1`

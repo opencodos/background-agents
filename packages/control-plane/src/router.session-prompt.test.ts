@@ -174,4 +174,69 @@ describe("session prompt identity enrichment", () => {
     });
     expect(sessionFetch).not.toHaveBeenCalled();
   });
+
+  it("allows the GitHub bot to attach validated review target provenance", async () => {
+    vi.mocked(UserStore).mockImplementation(function () {
+      return {
+        getIdentity: async () => null,
+      } as never;
+    });
+    const sessionFetch = vi.fn(async (request: Request) => {
+      const body = (await request.json()) as Record<string, unknown>;
+      expect(body.originContext).toEqual({
+        kind: "github_review_request",
+        repositoryId: "99",
+        repositoryOwner: "acme",
+        repositoryName: "widgets",
+        pullRequestNumber: 42,
+        headSha: "abc123",
+      });
+      return Response.json({ status: "queued" });
+    });
+    const body = JSON.stringify({
+      content: "Review the pull request",
+      source: "github",
+      originContext: {
+        kind: "github_review_request",
+        repositoryId: "99",
+        repositoryOwner: "acme",
+        repositoryName: "widgets",
+        pullRequestNumber: 42,
+        headSha: "abc123",
+      },
+    });
+    const response = await handleRequest(
+      await signedServiceRequest("https://test.local/sessions/session-1/prompt", {
+        method: "POST",
+        service: "github-bot",
+        actor: "github:1001",
+        body,
+      }),
+      createEnv(sessionFetch) as never
+    );
+
+    expect(response.status).toBe(200);
+    expect(sessionFetch).toHaveBeenCalledOnce();
+  });
+
+  it("rejects review target provenance from a browser caller", async () => {
+    const sessionFetch = vi.fn(async () => Response.json({ status: "queued" }));
+    const response = await handleRequest(
+      await userPromptRequest({
+        content: "Review the pull request",
+        originContext: {
+          kind: "github_review_request",
+          repositoryId: "99",
+          repositoryOwner: "acme",
+          repositoryName: "widgets",
+          pullRequestNumber: 42,
+          headSha: "abc123",
+        },
+      }),
+      createEnv(sessionFetch) as never
+    );
+
+    expect(response.status).toBe(403);
+    expect(sessionFetch).not.toHaveBeenCalled();
+  });
 });
