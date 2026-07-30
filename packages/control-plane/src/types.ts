@@ -4,6 +4,7 @@
 
 import type {
   ArtifactType,
+  GitHubAutofixEnvelope,
   MessageSource,
   MessageStatus,
   ParticipantRole,
@@ -43,6 +44,9 @@ export interface Env {
 
   // KV Namespaces
   REPOS_CACHE: KVNamespace; // Short-lived cache for /repos listing
+
+  // Queues
+  AUTOFIX_QUEUE?: Queue<GitHubAutofixEnvelope>;
 
   // Service bindings
   SLACK_BOT?: Fetcher; // Optional - only if slack-bot is deployed

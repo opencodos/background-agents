@@ -5,7 +5,7 @@ import {
 } from "@open-inspect/shared";
 import { z } from "zod";
 import type { GitHubReviewPublicationRecord } from "../db/github-review-publication-store";
-import { GitHubReviewPublicationError } from "../source-control/github-pull-request-feedback-client";
+import type { GitHubReviewPublicationAttempt } from "../source-control/github-pull-request-feedback-client";
 import { SessionInternalPaths } from "../session/contracts";
 import type { SessionRuntimeClient } from "../session/runtime-client";
 
@@ -32,7 +32,7 @@ interface ReviewProvider {
     event: GitHubReviewPublicationRequest["event"];
     body: string;
     comments: GitHubReviewPublicationRequest["comments"];
-  }): Promise<{ providerReviewId: string; url: string }>;
+  }): Promise<GitHubReviewPublicationAttempt>;
 }
 
 interface ReviewPublisherDeps {
@@ -107,8 +107,9 @@ export class GitHubReviewPublisher {
     });
     if (!begun.created) return responseFor(begun.record);
 
+    let attempt: GitHubReviewPublicationAttempt;
     try {
-      const published = await this.deps.github.publishPullRequestReview({
+      attempt = await this.deps.github.publishPullRequestReview({
         owner: context.data.target.repositoryOwner,
         name: context.data.target.repositoryName,
         pullRequestNumber: context.data.target.pullRequestNumber,
@@ -117,24 +118,28 @@ export class GitHubReviewPublisher {
         body: `${request.summary}\n\n${marker}`,
         comments: request.comments,
       });
-      await this.deps.publications.complete(
-        publicationKey,
-        published.providerReviewId,
-        this.deps.now()
-      );
-      return {
-        publicationKey,
-        state: "completed",
-        providerReviewId: published.providerReviewId,
-      };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (error instanceof GitHubReviewPublicationError && error.outcome === "definite") {
-        await this.deps.publications.fail(publicationKey, message, this.deps.now());
-      } else {
-        await this.deps.publications.markUncertain(publicationKey, message, this.deps.now());
-      }
+      await this.deps.publications.markUncertain(publicationKey, message, this.deps.now());
       throw error;
     }
+    if (attempt.kind === "rejected") {
+      if (attempt.outcome === "definite") {
+        await this.deps.publications.fail(publicationKey, attempt.error, this.deps.now());
+      } else {
+        await this.deps.publications.markUncertain(publicationKey, attempt.error, this.deps.now());
+      }
+      throw new Error(attempt.error);
+    }
+    await this.deps.publications.complete(
+      publicationKey,
+      attempt.providerReviewId,
+      this.deps.now()
+    );
+    return {
+      publicationKey,
+      state: "completed",
+      providerReviewId: attempt.providerReviewId,
+    };
   }
 }

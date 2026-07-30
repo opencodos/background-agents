@@ -64,15 +64,17 @@ export interface PublishGitHubReviewConfig {
   }>;
 }
 
-export class GitHubReviewPublicationError extends Error {
-  constructor(
-    message: string,
-    readonly outcome: "definite" | "uncertain"
-  ) {
-    super(message);
-    this.name = "GitHubReviewPublicationError";
-  }
-}
+export type GitHubReviewPublicationAttempt =
+  | {
+      kind: "published";
+      providerReviewId: string;
+      url: string;
+    }
+  | {
+      kind: "rejected";
+      outcome: "definite" | "uncertain";
+      error: string;
+    };
 
 interface GitHubPullRequestFeedbackLocation {
   owner: string;
@@ -143,20 +145,20 @@ export class GitHubPullRequestFeedbackClient {
     this.userAgent = config.userAgent || USER_AGENT;
   }
 
-  async publishPullRequestReview(config: PublishGitHubReviewConfig): Promise<{
-    providerReviewId: string;
-    url: string;
-  }> {
+  async publishPullRequestReview(
+    config: PublishGitHubReviewConfig
+  ): Promise<GitHubReviewPublicationAttempt> {
     let token: string;
     try {
       token = await this.getAppToken("publish pull request review");
     } catch (error) {
-      throw new GitHubReviewPublicationError(
-        `GitHub review publication did not start: ${
+      return {
+        kind: "rejected",
+        outcome: "definite",
+        error: `GitHub review publication did not start: ${
           error instanceof Error ? error.message : String(error)
         }`,
-        "definite"
-      );
+      };
     }
     let response: Response;
     try {
@@ -184,20 +186,22 @@ export class GitHubPullRequestFeedbackClient {
         }
       );
     } catch (error) {
-      throw new GitHubReviewPublicationError(
-        `GitHub review publication outcome is unknown: ${
+      return {
+        kind: "rejected",
+        outcome: "uncertain",
+        error: `GitHub review publication outcome is unknown: ${
           error instanceof Error ? error.message : String(error)
         }`,
-        "uncertain"
-      );
+      };
     }
 
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
-      throw new GitHubReviewPublicationError(
-        `GitHub rejected review publication: ${response.status} ${detail}`,
-        response.status >= 500 ? "uncertain" : "definite"
-      );
+      return {
+        kind: "rejected",
+        outcome: response.status >= 500 ? "uncertain" : "definite",
+        error: `GitHub rejected review publication: ${response.status} ${detail}`,
+      };
     }
     try {
       const review = await parseProviderResponse(
@@ -206,16 +210,18 @@ export class GitHubPullRequestFeedbackClient {
         "GitHub returned an invalid published review"
       );
       return {
+        kind: "published",
         providerReviewId: String(review.id),
         url: review.html_url,
       };
     } catch (error) {
-      throw new GitHubReviewPublicationError(
-        `GitHub accepted a review but its identity is unknown: ${
+      return {
+        kind: "rejected",
+        outcome: "uncertain",
+        error: `GitHub accepted a review but its identity is unknown: ${
           error instanceof Error ? error.message : String(error)
         }`,
-        "uncertain"
-      );
+      };
     }
   }
 
@@ -224,12 +230,13 @@ export class GitHubPullRequestFeedbackClient {
     name: string;
     pullRequestNumber: number;
     marker: string;
-  }): Promise<Array<{ providerReviewId: string; authorLogin: string; url: string }>> {
+  }): Promise<Array<{ providerReviewId: string; authorLogin: string; url: string; body: string }>> {
     const token = await this.getAppToken("search pull request reviews");
     const candidates: Array<{
       providerReviewId: string;
       authorLogin: string;
       url: string;
+      body: string;
     }> = [];
     for (let page = 1; ; page += 1) {
       const response = await fetchWithTimeout(
@@ -256,6 +263,7 @@ export class GitHubPullRequestFeedbackClient {
             providerReviewId: String(review.id),
             authorLogin: review.user.login,
             url: review.html_url,
+            body: review.body ?? "",
           }))
       );
       if (reviews.length < 100) return candidates;

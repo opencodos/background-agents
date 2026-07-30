@@ -124,7 +124,7 @@ export class PrAutofixFeedbackStore {
     receivedAt: number
   ): Promise<PrAutofixFeedbackRecord> {
     const feedbackKey = githubAutofixFeedbackKey(envelope);
-    await this.db
+    const receive = this.db
       .prepare(
         `INSERT INTO pr_autofix_feedback (
            feedback_key, provider_object_kind, provider_object_id, delivery_id,
@@ -147,8 +147,42 @@ export class PrAutofixFeedbackStore {
         envelope.pullRequestNumber,
         receivedAt,
         receivedAt
-      )
-      .run();
+      );
+    if ("reconciliationPublicationKey" in envelope && envelope.reconciliationPublicationKey) {
+      await this.db.batch([
+        receive,
+        this.db
+          .prepare(
+            `UPDATE pr_autofix_feedback
+             SET decision = 'received', reason = NULL, decided_at = NULL, last_error = NULL
+             WHERE feedback_key = ?
+               AND decision = 'skipped'
+               AND reason = 'own_app_unattributed'
+               AND EXISTS (
+                 SELECT 1
+                 FROM github_review_publications
+                 WHERE publication_key = ?
+                   AND state = 'completed'
+                   AND provider_review_id = ?
+                   AND repository_external_id = ?
+                   AND repo_owner = ?
+                   AND repo_name = ?
+                   AND pr_number = ?
+               )`
+          )
+          .bind(
+            feedbackKey,
+            envelope.reconciliationPublicationKey,
+            envelope.providerObject.id,
+            envelope.repository.id,
+            envelope.repository.owner,
+            envelope.repository.name,
+            envelope.pullRequestNumber
+          ),
+      ]);
+    } else {
+      await receive.run();
+    }
 
     const record = await this.get(feedbackKey);
     if (!record) {

@@ -55,12 +55,22 @@ module "control_plane_worker" {
     }
   ]
 
-  queue_bindings = [
-    {
-      binding_name = "IMAGE_BUILD_FINALIZATION_QUEUE"
-      queue_name   = cloudflare_queue.image_build_finalization.queue_name
-    }
-  ]
+  # Reconciliation can safely re-deliver a confirmed late App review. The
+  # consumer remains the same control-plane worker and admission is idempotent.
+  queue_bindings = concat(
+    [
+      {
+        binding_name = "IMAGE_BUILD_FINALIZATION_QUEUE"
+        queue_name   = cloudflare_queue.image_build_finalization.queue_name
+      }
+    ],
+    var.enable_github_bot ? [
+      {
+        binding_name = "AUTOFIX_QUEUE"
+        queue_name   = cloudflare_queue.github_autofix[0].queue_name
+      }
+    ] : []
+  )
 
   service_bindings = concat(
     var.enable_slack_bot ? [

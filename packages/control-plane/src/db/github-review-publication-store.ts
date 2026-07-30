@@ -86,9 +86,33 @@ export class GitHubReviewPublicationStore {
         record.updatedAt
       )
       .run();
-    const stored = await this.getBySource(record.sourceSessionId, record.sourceMessageId);
+    let stored = await this.getBySource(record.sourceSessionId, record.sourceMessageId);
     if (!stored) throw new Error("GitHub review publication was not persisted");
-    return { record: stored, created: insert.meta.changes === 1 };
+    if (insert.meta.changes === 1) return { record: stored, created: true };
+    if (stored.state !== "failed") return { record: stored, created: false };
+
+    const retry = await this.db
+      .prepare(
+        `UPDATE github_review_publications
+         SET repository_external_id = ?, repo_owner = ?, repo_name = ?,
+             pr_number = ?, head_sha = ?, result = ?, marker = ?,
+             state = 'pending', provider_review_id = NULL, error = NULL, updated_at = ?
+         WHERE publication_key = ? AND state = 'failed'`
+      )
+      .bind(
+        record.repositoryExternalId,
+        record.repoOwner,
+        record.repoName,
+        record.prNumber,
+        record.headSha,
+        record.result,
+        record.marker,
+        record.updatedAt,
+        stored.publicationKey
+      )
+      .run();
+    stored = (await this.get(stored.publicationKey)) ?? stored;
+    return { record: stored, created: retry.meta.changes === 1 };
   }
 
   async get(publicationKey: string): Promise<GitHubReviewPublicationRecord | null> {
@@ -135,41 +159,23 @@ export class GitHubReviewPublicationStore {
     return this.transition(publicationKey, "uncertain", updatedAt, null, error);
   }
 
-  async reconcileCompleteAndReopenFeedback(
+  async reconcileComplete(
     publicationKey: string,
     providerReviewId: string,
     updatedAt: number
   ): Promise<void> {
-    const [publicationResult] = await this.db.batch([
-      this.db
-        .prepare(
-          `UPDATE github_review_publications
+    const publicationResult = await this.db
+      .prepare(
+        `UPDATE github_review_publications
          SET state = 'completed', provider_review_id = ?, error = NULL, updated_at = ?
          WHERE publication_key = ?
            AND (
              state IN ('pending', 'uncertain')
              OR (state = 'completed' AND provider_review_id = ?)
            )`
-        )
-        .bind(providerReviewId, updatedAt, publicationKey, providerReviewId),
-      this.db
-        .prepare(
-          `UPDATE pr_autofix_feedback
-           SET decision = 'received', reason = NULL, decided_at = NULL, last_error = NULL
-           WHERE repository_external_id = (
-                   SELECT repository_external_id
-                   FROM github_review_publications
-                   WHERE publication_key = ?
-                     AND state = 'completed'
-                     AND provider_review_id = ?
-                 )
-             AND provider_object_kind = 'review'
-             AND provider_object_id = ?
-             AND decision = 'skipped'
-             AND reason = 'own_app_unattributed'`
-        )
-        .bind(publicationKey, providerReviewId, providerReviewId),
-    ]);
+      )
+      .bind(providerReviewId, updatedAt, publicationKey, providerReviewId)
+      .run();
     if (publicationResult.meta.changes !== 1) {
       throw new Error(`GitHub review publication cannot be reconciled: ${publicationKey}`);
     }

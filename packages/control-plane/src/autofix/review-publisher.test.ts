@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { GitHubReviewPublicationError } from "../source-control/github-pull-request-feedback-client";
 import type { GitHubReviewPublicationRecord } from "../db/github-review-publication-store";
+import type { GitHubReviewPublicationAttempt } from "../source-control/github-pull-request-feedback-client";
 import { GitHubReviewPublisher } from "./review-publisher";
 
 const request = {
@@ -57,10 +57,13 @@ function buildPublisher() {
     ),
   };
   const github = {
-    publishPullRequestReview: vi.fn(async () => ({
-      providerReviewId: "5678",
-      url: "https://github.com/acme/widgets/pull/42#pullrequestreview-5678",
-    })),
+    publishPullRequestReview: vi.fn(
+      async (): Promise<GitHubReviewPublicationAttempt> => ({
+        kind: "published",
+        providerReviewId: "5678",
+        url: "https://github.com/acme/widgets/pull/42#pullrequestreview-5678",
+      })
+    ),
   };
   const publisher = new GitHubReviewPublisher({
     publications,
@@ -112,9 +115,11 @@ describe("GitHubReviewPublisher", () => {
 
   it("records a known provider rejection as failed", async () => {
     const h = buildPublisher();
-    h.github.publishPullRequestReview.mockRejectedValueOnce(
-      new GitHubReviewPublicationError("invalid line", "definite")
-    );
+    h.github.publishPullRequestReview.mockResolvedValueOnce({
+      kind: "rejected",
+      outcome: "definite",
+      error: "invalid line",
+    });
 
     await expect(h.publisher.publish("session-1", request)).rejects.toThrow("invalid line");
 
@@ -124,9 +129,11 @@ describe("GitHubReviewPublisher", () => {
 
   it("records an unknown provider outcome as uncertain and never retries", async () => {
     const h = buildPublisher();
-    h.github.publishPullRequestReview.mockRejectedValueOnce(
-      new GitHubReviewPublicationError("connection reset", "uncertain")
-    );
+    h.github.publishPullRequestReview.mockResolvedValueOnce({
+      kind: "rejected",
+      outcome: "uncertain",
+      error: "connection reset",
+    });
 
     await expect(h.publisher.publish("session-1", request)).rejects.toThrow("connection reset");
 

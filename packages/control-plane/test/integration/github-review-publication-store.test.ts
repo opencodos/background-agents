@@ -60,7 +60,37 @@ describe("GitHubReviewPublicationStore", () => {
     });
   });
 
-  it("atomically confirms a publication and reopens its unattributed feedback idempotently", async () => {
+  it("reopens a definite failed publication for one safe retry", async () => {
+    const store = new GitHubReviewPublicationStore(env.DB);
+    await store.begin(publication);
+    await store.fail(publication.publicationKey, "invalid line", 2_000);
+
+    const corrected = {
+      ...publication,
+      headSha: "def456",
+      result: "no_findings" as const,
+      updatedAt: 3_000,
+    };
+    const retried = await store.begin(corrected);
+    const concurrent = await store.begin(corrected);
+
+    expect(retried).toMatchObject({
+      created: true,
+      record: {
+        state: "pending",
+        error: null,
+        headSha: "def456",
+        result: "no_findings",
+        updatedAt: 3_000,
+      },
+    });
+    expect(concurrent).toMatchObject({
+      created: false,
+      record: { state: "pending" },
+    });
+  });
+
+  it("reopens unattributed feedback only when the confirmed queue message is received", async () => {
     const publications = new GitHubReviewPublicationStore(env.DB);
     const feedback = new PrAutofixFeedbackStore(env.DB);
     await publications.begin(publication);
@@ -80,21 +110,54 @@ describe("GitHubReviewPublicationStore", () => {
     );
     await feedback.markSkipped(receipt.feedbackKey, "own_app_unattributed", 1_500);
 
-    await publications.reconcileCompleteAndReopenFeedback(
-      publication.publicationKey,
-      "5678",
-      2_000
-    );
-    await publications.reconcileCompleteAndReopenFeedback(
-      publication.publicationKey,
-      "5678",
-      2_500
-    );
+    await publications.reconcileComplete(publication.publicationKey, "5678", 2_000);
+    await publications.reconcileComplete(publication.publicationKey, "5678", 2_500);
 
     expect(await publications.get(publication.publicationKey)).toMatchObject({
       state: "completed",
       providerReviewId: "5678",
     });
+    expect(await feedback.get(receipt.feedbackKey)).toMatchObject({
+      decision: "skipped",
+      reason: "own_app_unattributed",
+    });
+
+    await feedback.receive(
+      {
+        version: 1,
+        eventType: "pull_request_review",
+        action: "submitted",
+        reconciliationPublicationKey: "github-review:wrong",
+        deliveryId: "reconcile:github-review:wrong",
+        traceId: "reconcile:github-review:wrong",
+        providerObject: { kind: "review", id: "5678" },
+        repository: { id: "99", owner: "acme", name: "widgets" },
+        pullRequestNumber: 42,
+        receivedAt: "2026-07-30T05:01:00.000Z",
+      },
+      2_500
+    );
+    expect(await feedback.get(receipt.feedbackKey)).toMatchObject({
+      decision: "skipped",
+      reason: "own_app_unattributed",
+    });
+
+    await feedback.receive(
+      {
+        version: 1,
+        eventType: "pull_request_review",
+        action: "submitted",
+        reconciliationPublicationKey: publication.publicationKey,
+        deliveryId: "reconcile:github-review:opaque",
+        traceId: "reconcile:github-review:opaque",
+        providerObject: { kind: "review", id: "5678" },
+        repository: { id: "99", owner: "acme", name: "widgets" },
+        pullRequestNumber: 42,
+        receivedAt: "2026-07-30T05:01:00.000Z",
+      },
+      2_500
+    );
+
     expect(await feedback.get(receipt.feedbackKey)).toMatchObject({
       decision: "received",
       reason: null,

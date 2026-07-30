@@ -27,6 +27,7 @@ const pullRequestCommentEnvelopeSchema = envelopeBaseSchema.extend({
 const pullRequestReviewEnvelopeSchema = envelopeBaseSchema.extend({
   eventType: z.literal("pull_request_review"),
   action: z.literal("submitted"),
+  reconciliationPublicationKey: z.string().min(1).optional(),
   providerObject: z.object({
     kind: z.literal("review"),
     id: z.string().min(1),
@@ -106,6 +107,13 @@ export const githubReviewPublicationRequestSchema = z
         code: "custom",
         path: ["comments"],
         message: "A no-findings review cannot contain inline comments",
+      });
+    }
+    if (value.result === "no_findings" && value.event === "REQUEST_CHANGES") {
+      context.addIssue({
+        code: "custom",
+        path: ["event"],
+        message: "A no-findings review cannot request changes",
       });
     }
   });

@@ -1,8 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  GitHubPullRequestFeedbackClient,
-  GitHubReviewPublicationError,
-} from "./github-pull-request-feedback-client";
+import { GitHubPullRequestFeedbackClient } from "./github-pull-request-feedback-client";
 import { SourceControlProviderError } from "./errors";
 
 vi.mock("../auth/github-app", () => ({
@@ -70,7 +67,7 @@ describe("GitHubPullRequestFeedbackClient", () => {
       ],
     });
 
-    expect(result.providerReviewId).toBe("5678");
+    expect(result).toMatchObject({ kind: "published", providerReviewId: "5678" });
     expect(mockFetchWithTimeout).toHaveBeenCalledWith(
       "https://api.github.com/repos/acme/widgets/pulls/42/reviews",
       expect.objectContaining({
@@ -101,8 +98,8 @@ describe("GitHubPullRequestFeedbackClient", () => {
     );
     const client = new GitHubPullRequestFeedbackClient({ appConfig });
 
-    const error = await client
-      .publishPullRequestReview({
+    await expect(
+      client.publishPullRequestReview({
         owner: "acme",
         name: "widgets",
         pullRequestNumber: 42,
@@ -111,18 +108,15 @@ describe("GitHubPullRequestFeedbackClient", () => {
         body: "Review",
         comments: [],
       })
-      .catch((caught: unknown) => caught);
-
-    expect(error).toBeInstanceOf(GitHubReviewPublicationError);
-    expect(error).toMatchObject({ outcome: example.outcome });
+    ).resolves.toMatchObject({ kind: "rejected", outcome: example.outcome });
   });
 
   it("classifies a transport error as an uncertain publication outcome", async () => {
     mockFetchWithTimeout.mockRejectedValueOnce(new Error("connection reset"));
     const client = new GitHubPullRequestFeedbackClient({ appConfig });
 
-    const error = await client
-      .publishPullRequestReview({
+    await expect(
+      client.publishPullRequestReview({
         owner: "acme",
         name: "widgets",
         pullRequestNumber: 42,
@@ -131,9 +125,7 @@ describe("GitHubPullRequestFeedbackClient", () => {
         body: "Review",
         comments: [],
       })
-      .catch((caught: unknown) => caught);
-
-    expect(error).toMatchObject({ outcome: "uncertain" });
+    ).resolves.toMatchObject({ kind: "rejected", outcome: "uncertain" });
   });
 
   it("finds marker candidates without treating them as confirmed receipts", async () => {
@@ -169,6 +161,7 @@ describe("GitHubPullRequestFeedbackClient", () => {
         providerReviewId: "5678",
         authorLogin: "open-inspect[bot]",
         url: "https://github.com/acme/widgets/pull/42#pullrequestreview-5678",
+        body: "Review\n\n<!-- open-inspect-review:opaque -->",
       },
     ]);
   });

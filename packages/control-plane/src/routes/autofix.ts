@@ -1,7 +1,14 @@
-import { createKvCacheStore, resolveAppName } from "@open-inspect/shared";
+import {
+  createKvCacheStore,
+  resolveAppName,
+  type GitHubAutofixEnvelope,
+} from "@open-inspect/shared";
 import { z } from "zod";
 import { getGitHubAppConfig } from "../auth/github-app";
-import { GitHubReviewPublicationStore } from "../db/github-review-publication-store";
+import {
+  GitHubReviewPublicationStore,
+  type GitHubReviewPublicationRecord,
+} from "../db/github-review-publication-store";
 import { PrAutofixFeedbackStore } from "../db/pr-autofix-feedback-store";
 import { GitHubPullRequestFeedbackClient } from "../source-control/github-pull-request-feedback-client";
 import type { Env } from "../types";
@@ -39,6 +46,57 @@ export function isReviewReconciliationCandidate(
     review.author.login.toLowerCase() === botUsername.toLowerCase() &&
     review.body.includes(publication.marker)
   );
+}
+
+interface MarkerCandidate {
+  providerReviewId: string;
+  authorLogin: string;
+  url: string;
+  body: string;
+}
+
+export function ownedReviewCandidates(
+  publication: { marker: string },
+  candidates: MarkerCandidate[],
+  botUsername: string
+): Array<Omit<MarkerCandidate, "body">> {
+  return candidates
+    .filter((candidate) =>
+      isReviewReconciliationCandidate(
+        publication,
+        {
+          kind: "review",
+          body: candidate.body,
+          author: { login: candidate.authorLogin },
+        },
+        botUsername
+      )
+    )
+    .map(({ body: _body, ...candidate }) => candidate);
+}
+
+export function buildReconciledReviewEnvelope(
+  publication: GitHubReviewPublicationRecord,
+  providerReviewId: string,
+  now: number
+): GitHubAutofixEnvelope {
+  const reconciliationId = `reconcile:${publication.publicationKey}`;
+  return {
+    version: 1,
+    eventType: "pull_request_review",
+    action: "submitted",
+    reconciliationPublicationKey: publication.publicationKey,
+    deliveryId: reconciliationId,
+    traceId: reconciliationId,
+    providerObject: { kind: "review", id: providerReviewId },
+    repository: {
+      id: publication.repositoryExternalId,
+      owner: publication.repoOwner,
+      name: publication.repoName,
+    },
+    pullRequestNumber: publication.prNumber,
+    receivedAt: new Date(now).toISOString(),
+  };
 }
 
 async function handleActivity(
@@ -92,13 +150,17 @@ async function handlePublicationReconciliation(
   const publication = await publications.get(publicationKey);
   if (!publication) return error("Review publication not found", 404);
   const github = githubProvider(env);
-  const findCandidates = () =>
-    github.findPullRequestReviewsByMarker({
-      owner: publication.repoOwner,
-      name: publication.repoName,
-      pullRequestNumber: publication.prNumber,
-      marker: publication.marker,
-    });
+  const findCandidates = async () =>
+    ownedReviewCandidates(
+      publication,
+      await github.findPullRequestReviewsByMarker({
+        owner: publication.repoOwner,
+        name: publication.repoName,
+        pullRequestNumber: publication.prNumber,
+        marker: publication.marker,
+      }),
+      env.GITHUB_BOT_USERNAME
+    );
   if (parsed.data.action === "search") {
     return json({ candidates: await findCandidates() });
   }
@@ -127,10 +189,15 @@ async function handlePublicationReconciliation(
   if (!isOwnedCandidate) {
     return error("Review does not match the publication receipt", 409);
   }
-  await publications.reconcileCompleteAndReopenFeedback(
+  if (!env.AUTOFIX_QUEUE) return error("Autofix queue is not configured", 503);
+  const now = Date.now();
+  await publications.reconcileComplete(
     publication.publicationKey,
     parsed.data.providerReviewId,
-    Date.now()
+    now
+  );
+  await env.AUTOFIX_QUEUE.send(
+    buildReconciledReviewEnvelope(publication, parsed.data.providerReviewId, now)
   );
   return json({
     publicationKey: publication.publicationKey,
