@@ -12,6 +12,7 @@ import { PrAutofixFeedbackStore } from "../db/pr-autofix-feedback-store";
 import { GitHubReviewPublicationStore } from "../db/github-review-publication-store";
 import { SessionPullRequestStore } from "../db/session-pull-request-store";
 import { createSessionRuntimeClient } from "../session/runtime-client";
+import { GitHubPullRequestFeedbackClient } from "../source-control/github-pull-request-feedback-client";
 import { GitHubSourceControlProvider } from "../source-control/providers/github-provider";
 import type { Env } from "../types";
 import { AutofixQueueConsumer } from "./queue-consumer";
@@ -51,6 +52,11 @@ export async function handleAutofixQueue(
     cacheStore: createKvCacheStore(env.REPOS_CACHE),
     userAgent: resolveAppName(env),
   });
+  const feedbackClient = new GitHubPullRequestFeedbackClient({
+    appConfig: appConfig ?? undefined,
+    cacheStore: createKvCacheStore(env.REPOS_CACHE),
+    userAgent: resolveAppName(env),
+  });
   const sessions = createSessionRuntimeClient(env, {
     trace_id: crypto.randomUUID(),
     request_id: crypto.randomUUID(),
@@ -67,7 +73,12 @@ export async function handleAutofixQueue(
         };
       },
     },
-    github,
+    github: {
+      getPullRequest: (config) => github.getPullRequest(config),
+      getPullRequestFeedback: (config) => feedbackClient.getPullRequestFeedback(config),
+      hasPullRequestWritePermission: (config) =>
+        feedbackClient.hasPullRequestWritePermission(config),
+    },
     sessions,
     publications: new GitHubReviewPublicationStore(db),
     botUsername: env.GITHUB_BOT_USERNAME,

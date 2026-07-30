@@ -5,7 +5,7 @@ import {
 } from "@open-inspect/shared";
 import { z } from "zod";
 import type { GitHubReviewPublicationRecord } from "../db/github-review-publication-store";
-import { GitHubReviewPublicationError } from "../source-control/providers/github-provider";
+import { GitHubReviewPublicationError } from "../source-control/github-pull-request-feedback-client";
 import { SessionInternalPaths } from "../session/contracts";
 import type { SessionRuntimeClient } from "../session/runtime-client";
 

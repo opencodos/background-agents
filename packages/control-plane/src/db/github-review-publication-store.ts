@@ -135,21 +135,57 @@ export class GitHubReviewPublicationStore {
     return this.transition(publicationKey, "uncertain", updatedAt, null, error);
   }
 
-  async reconcileComplete(
+  async reconcileCompleteAndReopenFeedback(
     publicationKey: string,
     providerReviewId: string,
     updatedAt: number
   ): Promise<void> {
+    const [publicationResult] = await this.db.batch([
+      this.db
+        .prepare(
+          `UPDATE github_review_publications
+         SET state = 'completed', provider_review_id = ?, error = NULL, updated_at = ?
+         WHERE publication_key = ?
+           AND (
+             state IN ('pending', 'uncertain')
+             OR (state = 'completed' AND provider_review_id = ?)
+           )`
+        )
+        .bind(providerReviewId, updatedAt, publicationKey, providerReviewId),
+      this.db
+        .prepare(
+          `UPDATE pr_autofix_feedback
+           SET decision = 'received', reason = NULL, decided_at = NULL, last_error = NULL
+           WHERE repository_external_id = (
+                   SELECT repository_external_id
+                   FROM github_review_publications
+                   WHERE publication_key = ?
+                     AND state = 'completed'
+                     AND provider_review_id = ?
+                 )
+             AND provider_object_kind = 'review'
+             AND provider_object_id = ?
+             AND decision = 'skipped'
+             AND reason = 'own_app_unattributed'`
+        )
+        .bind(publicationKey, providerReviewId, providerReviewId),
+    ]);
+    if (publicationResult.meta.changes !== 1) {
+      throw new Error(`GitHub review publication cannot be reconciled: ${publicationKey}`);
+    }
+  }
+
+  async abandon(publicationKey: string, updatedAt: number): Promise<void> {
     const result = await this.db
       .prepare(
         `UPDATE github_review_publications
-         SET state = 'completed', provider_review_id = ?, error = NULL, updated_at = ?
+         SET state = 'failed', error = 'operator_confirmed_absent', updated_at = ?
          WHERE publication_key = ? AND state IN ('pending', 'uncertain')`
       )
-      .bind(providerReviewId, updatedAt, publicationKey)
+      .bind(updatedAt, publicationKey)
       .run();
     if (result.meta.changes !== 1) {
-      throw new Error(`GitHub review publication cannot be reconciled: ${publicationKey}`);
+      throw new Error(`GitHub review publication cannot be abandoned: ${publicationKey}`);
     }
   }
 

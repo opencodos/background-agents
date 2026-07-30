@@ -165,24 +165,6 @@ export class PrAutofixFeedbackStore {
     return row ? toRecord(row) : null;
   }
 
-  async reopenOwnAppUnattributed(config: {
-    repositoryExternalId: string;
-    providerReviewId: string;
-  }): Promise<void> {
-    await this.db
-      .prepare(
-        `UPDATE pr_autofix_feedback
-         SET decision = 'received', reason = NULL, decided_at = NULL, last_error = NULL
-         WHERE repository_external_id = ?
-           AND provider_object_kind = 'review'
-           AND provider_object_id = ?
-           AND decision = 'skipped'
-           AND reason = 'own_app_unattributed'`
-      )
-      .bind(config.repositoryExternalId, config.providerReviewId)
-      .run();
-  }
-
   async listActivity(options: {
     limit: number;
     cursor: string | null;

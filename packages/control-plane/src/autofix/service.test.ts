@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { GITHUB_AUTOFIX_DEFAULTS } from "@open-inspect/shared";
 import { AutofixService } from "./service";
-import type { GitHubPullRequestFeedback } from "../source-control/providers/github-provider";
+import type { GitHubPullRequestFeedback } from "../source-control/github-pull-request-feedback-client";
 import { SourceControlProviderError } from "../source-control/errors";
 import type { GitHubReviewPublicationRecord } from "../db/github-review-publication-store";
 
@@ -294,6 +294,7 @@ describe("AutofixService", () => {
       eventType: "pull_request_review",
       action: "submitted",
       deliveryId: "delivery-2",
+      traceId: "trace-2",
       providerObject: { kind: "review", id: "5678" },
       repository: { id: "99", owner: "acme", name: "widgets" },
       pullRequestNumber: 42,
@@ -339,6 +340,7 @@ describe("AutofixService", () => {
         eventType: "pull_request_review",
         action: "submitted",
         deliveryId: "delivery-2",
+        traceId: "trace-2",
         providerObject: { kind: "review", id: "5678" },
         repository: { id: "99", owner: "acme", name: "widgets" },
         pullRequestNumber: 42,

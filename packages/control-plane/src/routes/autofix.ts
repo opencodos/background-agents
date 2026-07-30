@@ -3,21 +3,22 @@ import { z } from "zod";
 import { getGitHubAppConfig } from "../auth/github-app";
 import { GitHubReviewPublicationStore } from "../db/github-review-publication-store";
 import { PrAutofixFeedbackStore } from "../db/pr-autofix-feedback-store";
-import { GitHubSourceControlProvider } from "../source-control/providers/github-provider";
+import { GitHubPullRequestFeedbackClient } from "../source-control/github-pull-request-feedback-client";
 import type { Env } from "../types";
 import type { Route } from "./shared";
 import { error, json, parsePattern, type RequestContext } from "./shared";
 
 const reconciliationRequestSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("search") }),
+  z.object({ action: z.literal("abandon") }),
   z.object({
     action: z.literal("confirm"),
     providerReviewId: z.string().min(1),
   }),
 ]);
 
-function githubProvider(env: Env): GitHubSourceControlProvider {
-  return new GitHubSourceControlProvider({
+function githubProvider(env: Env): GitHubPullRequestFeedbackClient {
+  return new GitHubPullRequestFeedbackClient({
     appConfig: getGitHubAppConfig(env) ?? undefined,
     cacheStore: createKvCacheStore(env.REPOS_CACHE),
     userAgent: resolveAppName(env),
@@ -87,15 +88,22 @@ async function handlePublicationReconciliation(
   const publication = await publications.get(publicationKey);
   if (!publication) return error("Review publication not found", 404);
   const github = githubProvider(env);
-  if (parsed.data.action === "search") {
-    return json({
-      candidates: await github.findPullRequestReviewsByMarker({
-        owner: publication.repoOwner,
-        name: publication.repoName,
-        pullRequestNumber: publication.prNumber,
-        marker: publication.marker,
-      }),
+  const findCandidates = () =>
+    github.findPullRequestReviewsByMarker({
+      owner: publication.repoOwner,
+      name: publication.repoName,
+      pullRequestNumber: publication.prNumber,
+      marker: publication.marker,
     });
+  if (parsed.data.action === "search") {
+    return json({ candidates: await findCandidates() });
+  }
+  if (parsed.data.action === "abandon") {
+    if ((await findCandidates()).length > 0) {
+      return error("A matching review exists and must be confirmed", 409);
+    }
+    await publications.abandon(publication.publicationKey, Date.now());
+    return json({ publicationKey: publication.publicationKey, state: "failed" });
   }
 
   const review = await github.getPullRequestFeedback({
@@ -115,15 +123,11 @@ async function handlePublicationReconciliation(
   if (!isOwnedCandidate) {
     return error("Review does not match the publication receipt", 409);
   }
-  await publications.reconcileComplete(
+  await publications.reconcileCompleteAndReopenFeedback(
     publication.publicationKey,
     parsed.data.providerReviewId,
     Date.now()
   );
-  await new PrAutofixFeedbackStore(ctx.db).reopenOwnAppUnattributed({
-    repositoryExternalId: publication.repositoryExternalId,
-    providerReviewId: parsed.data.providerReviewId,
-  });
   return json({
     publicationKey: publication.publicationKey,
     state: "completed",

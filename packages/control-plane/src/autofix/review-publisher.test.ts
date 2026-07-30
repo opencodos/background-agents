@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { GitHubReviewPublicationError } from "../source-control/providers/github-provider";
+import { GitHubReviewPublicationError } from "../source-control/github-pull-request-feedback-client";
 import type { GitHubReviewPublicationRecord } from "../db/github-review-publication-store";
 import { GitHubReviewPublisher } from "./review-publisher";
 

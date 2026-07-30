@@ -6,7 +6,7 @@ import {
 import { getGitHubAppConfig } from "../auth/github-app";
 import { GitHubReviewPublisher } from "../autofix/review-publisher";
 import { GitHubReviewPublicationStore } from "../db/github-review-publication-store";
-import { GitHubSourceControlProvider } from "../source-control/providers/github-provider";
+import { GitHubPullRequestFeedbackClient } from "../source-control/github-pull-request-feedback-client";
 import { createSessionRuntimeClient } from "../session/runtime-client";
 import type { Env } from "../types";
 import { error, json, parsePattern, type RequestContext, type Route } from "./shared";
@@ -31,7 +31,7 @@ async function handleReviewPublication(
   const publisher = new GitHubReviewPublisher({
     publications: new GitHubReviewPublicationStore(ctx.db),
     sessions: createSessionRuntimeClient(env, ctx),
-    github: new GitHubSourceControlProvider({
+    github: new GitHubPullRequestFeedbackClient({
       appConfig: appConfig ?? undefined,
       cacheStore: createKvCacheStore(env.REPOS_CACHE),
       userAgent: resolveAppName(env),

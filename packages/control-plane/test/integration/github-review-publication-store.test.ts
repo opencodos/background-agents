@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
 import { GitHubReviewPublicationStore } from "../../src/db/github-review-publication-store";
+import { PrAutofixFeedbackStore } from "../../src/db/pr-autofix-feedback-store";
 import { cleanD1Tables } from "./cleanup";
 
 const publication = {
@@ -56,6 +57,60 @@ describe("GitHubReviewPublicationStore", () => {
     expect(duplicate).toMatchObject({
       created: false,
       record: { state: "uncertain", error: "connection reset" },
+    });
+  });
+
+  it("atomically confirms a publication and reopens its unattributed feedback idempotently", async () => {
+    const publications = new GitHubReviewPublicationStore(env.DB);
+    const feedback = new PrAutofixFeedbackStore(env.DB);
+    await publications.begin(publication);
+    const receipt = await feedback.receive(
+      {
+        version: 1,
+        eventType: "pull_request_review",
+        action: "submitted",
+        deliveryId: "delivery-review",
+        traceId: "trace-review",
+        providerObject: { kind: "review", id: "5678" },
+        repository: { id: "99", owner: "acme", name: "widgets" },
+        pullRequestNumber: 42,
+        receivedAt: "2026-07-30T05:00:00.000Z",
+      },
+      1_000
+    );
+    await feedback.markSkipped(receipt.feedbackKey, "own_app_unattributed", 1_500);
+
+    await publications.reconcileCompleteAndReopenFeedback(
+      publication.publicationKey,
+      "5678",
+      2_000
+    );
+    await publications.reconcileCompleteAndReopenFeedback(
+      publication.publicationKey,
+      "5678",
+      2_500
+    );
+
+    expect(await publications.get(publication.publicationKey)).toMatchObject({
+      state: "completed",
+      providerReviewId: "5678",
+    });
+    expect(await feedback.get(receipt.feedbackKey)).toMatchObject({
+      decision: "received",
+      reason: null,
+    });
+  });
+
+  it("allows an operator to abandon a pending or uncertain publication", async () => {
+    const store = new GitHubReviewPublicationStore(env.DB);
+    await store.begin(publication);
+
+    await store.abandon(publication.publicationKey, 2_000);
+
+    expect(await store.get(publication.publicationKey)).toMatchObject({
+      state: "failed",
+      error: "operator_confirmed_absent",
+      updatedAt: 2_000,
     });
   });
 });

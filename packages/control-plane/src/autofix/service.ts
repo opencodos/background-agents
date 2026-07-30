@@ -11,7 +11,7 @@ import {
   MAX_GITHUB_AUTOFIX_REVIEW_COMMENTS,
   type GitHubPullRequestFeedback,
   type GetGitHubPullRequestFeedbackConfig,
-} from "../source-control/providers/github-provider";
+} from "../source-control/github-pull-request-feedback-client";
 import { SourceControlProviderError } from "../source-control/errors";
 import { SessionInternalPaths, type SessionInternalPath } from "../session/contracts";
 
