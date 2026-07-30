@@ -129,6 +129,10 @@ describe("AutofixService", () => {
     expect(dispatch[2].body).toContain(
       "Trusted target: acme/widgets pull request #42, branch feature/widgets, head abc123."
     );
+    expect(dispatch[2].body).toContain(
+      "Reply concisely on the originating pull request when an outcome response is warranted"
+    );
+    expect(dispatch[2].body).toContain("validation results, no-change explanation, or question");
     expect(h.feedbackStore.markQueued).toHaveBeenCalledWith(
       "github:99:pr_comment:1234",
       "message-1",
