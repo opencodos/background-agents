@@ -56,7 +56,8 @@ module "control_plane_worker" {
   ]
 
   # Reconciliation can safely re-deliver a confirmed late App review. The
-  # consumer remains the same control-plane worker and admission is idempotent.
+  # consumer remains the same control-plane worker; the DLQ binding provides
+  # the operator health endpoint with queue-level failure visibility.
   queue_bindings = concat(
     [
       {
@@ -68,6 +69,10 @@ module "control_plane_worker" {
       {
         binding_name = "AUTOFIX_QUEUE"
         queue_name   = cloudflare_queue.github_autofix[0].queue_name
+      },
+      {
+        binding_name = "AUTOFIX_DLQ"
+        queue_name   = cloudflare_queue.github_autofix_dlq[0].queue_name
       }
     ] : []
   )
