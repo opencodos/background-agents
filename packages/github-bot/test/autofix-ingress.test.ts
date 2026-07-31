@@ -25,6 +25,7 @@ function envelopeFor(body: string, botUsername: string | undefined) {
     event: "issue_comment",
     payload: issueCommentPayload(body),
     deliveryId: "delivery-1",
+    traceId: "trace-1",
     botUsername,
     receivedAt: new Date("2026-07-30T05:00:00.000Z"),
   });

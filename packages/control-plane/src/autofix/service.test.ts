@@ -369,6 +369,7 @@ describe("AutofixService", () => {
         eventType: "issue_comment",
         action: "created",
         deliveryId: "delivery-1",
+        traceId: "trace-1",
         providerObject: { kind: "pr_comment", id: "1234" },
         repository: { id: "99", owner: "acme", name: "widgets" },
         pullRequestNumber: 42,
