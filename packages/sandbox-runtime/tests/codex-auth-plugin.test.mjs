@@ -12,6 +12,7 @@ const REQUEST_INIT = {
 process.env.CONTROL_PLANE_URL = "https://control.test";
 process.env.SANDBOX_AUTH_TOKEN = "sandbox-token";
 process.env.SESSION_CONFIG = JSON.stringify({ sessionId: "session-1" });
+delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
 
 /**
  * Load a fresh copy of the plugin. The spillover latch is module state, so each
@@ -26,11 +27,11 @@ async function loadProxy(tag) {
 }
 
 /**
- * Route stubbed traffic by host: the control-plane broker always mints a token
- * unless `broker` overrides it, the Codex backend answers with `codex`, and the
- * platform API always succeeds.
+ * Route stubbed traffic by path: the control-plane broker always mints a token
+ * unless `broker` overrides it, the usage endpoint answers with `usage`, the
+ * Codex backend with `codex`, and the platform API always succeeds.
  */
-function stubFetch({ codex, broker }) {
+function stubFetch({ codex, broker, usage } = {}) {
   const calls = [];
   globalThis.fetch = async (url, init) => {
     const target = String(url);
@@ -41,11 +42,25 @@ function stubFetch({ codex, broker }) {
         Response.json({ access_token: "cp-access", account_id: "acct-1", expires_in: 3600 })
       );
     }
+    if (target.includes("/wham/usage")) {
+      return usage?.() ?? new Response("no usage stub", { status: 404 });
+    }
     if (target.startsWith("https://chatgpt.com/")) return codex(calls.length);
     return new Response("platform-ok", { status: 200 });
   };
   return calls;
 }
+
+const usageResponse = (primary, secondary) =>
+  Response.json({
+    plan_type: "pro",
+    rate_limit: {
+      allowed: true,
+      limit_reached: false,
+      primary_window: { used_percent: primary, limit_window_seconds: 18000, reset_at: 1 },
+      secondary_window: { used_percent: secondary, limit_window_seconds: 604800, reset_at: 2 },
+    },
+  });
 
 const usageLimitResponse = () =>
   new Response(JSON.stringify({ error: { message: "The usage limit has been reached" } }), {
@@ -144,4 +159,102 @@ test("latches on exhausted usage headers reported by a successful call", async (
     calls.slice(before).map((call) => call.url),
     [MODEL_REQUEST_URL]
   );
+});
+
+test("spills over before touching the subscription when usage is over the ceiling", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT = "80";
+  const calls = stubFetch({
+    codex: () => new Response("codex-should-not-be-called", { status: 200 }),
+    usage: () => usageResponse(42, 85),
+  });
+  const loaded = await loadProxy("ceiling-over");
+
+  const response = await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT);
+  assert.equal(await response.text(), "platform-ok");
+
+  const probe = calls.find((call) => call.url.includes("/wham/usage"));
+  assert.equal(probe.headers.get("authorization"), "Bearer cp-access");
+  assert.equal(probe.headers.get("chatgpt-account-id"), "acct-1");
+  assert.equal(
+    calls.filter((call) => call.url.includes("/codex/responses")).length,
+    0,
+    "no subscription turn is spent past the ceiling"
+  );
+});
+
+test("keeps the subscription while usage is under the ceiling", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT = "80";
+  const calls = stubFetch({
+    codex: () =>
+      new Response("codex-ok", {
+        status: 200,
+        headers: { "x-codex-secondary-used-percent": "50" },
+      }),
+    usage: () => usageResponse(40, 50),
+  });
+  const loaded = await loadProxy("ceiling-under");
+
+  assert.equal(await (await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT)).text(), "codex-ok");
+  assert.equal(await (await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT)).text(), "codex-ok");
+  assert.equal(
+    calls.filter((call) => call.url.includes("/wham/usage")).length,
+    1,
+    "the usage endpoint is probed once per sandbox"
+  );
+  assert.equal(calls.filter((call) => call.url === MODEL_REQUEST_URL).length, 0);
+});
+
+test("latches at the ceiling from a successful response's headers", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT = "80";
+  const calls = stubFetch({
+    codex: () =>
+      new Response("codex-ok", {
+        status: 200,
+        headers: { "x-codex-primary-used-percent": "80.4" },
+      }),
+    usage: () => usageResponse(10, 10),
+  });
+  const loaded = await loadProxy("ceiling-headers");
+
+  assert.equal(await (await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT)).text(), "codex-ok");
+  const before = calls.length;
+  assert.equal(await (await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT)).text(), "platform-ok");
+  assert.deepEqual(
+    calls.slice(before).map((call) => call.url),
+    [MODEL_REQUEST_URL]
+  );
+});
+
+test("ignores a malformed ceiling and spends the whole subscription", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT = "eighty";
+  const calls = stubFetch({
+    codex: () =>
+      new Response("codex-ok", {
+        status: 200,
+        headers: { "x-codex-secondary-used-percent": "85" },
+      }),
+    usage: () => usageResponse(85, 85),
+  });
+  const loaded = await loadProxy("ceiling-invalid");
+
+  assert.equal(await (await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT)).text(), "codex-ok");
+  assert.equal(calls.filter((call) => call.url.includes("/wham/usage")).length, 0);
+  assert.equal(await (await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT)).text(), "codex-ok");
+});
+
+test("stays on the subscription when the usage probe fails", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT = "80";
+  const calls = stubFetch({
+    codex: () => new Response("codex-ok", { status: 200 }),
+    usage: () => new Response("boom", { status: 500 }),
+  });
+  const loaded = await loadProxy("probe-failure");
+
+  assert.equal(await (await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT)).text(), "codex-ok");
+  assert.equal(calls.filter((call) => call.url.includes("/codex/responses")).length, 1);
 });
