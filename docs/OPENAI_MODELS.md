@@ -26,6 +26,13 @@ high for Codex models).
 
 ## Setup
 
+There are two ways to pay for OpenAI models. Pick one:
+
+| Credential                                    | Billing                      | Setup                                                |
+| --------------------------------------------- | ---------------------------- | ---------------------------------------------------- |
+| ChatGPT Plus/Pro subscription (managed OAuth) | Included in the subscription | [Steps 1–3](#step-1-obtain-openai-oauth-credentials) |
+| OpenAI platform API key                       | Metered, per token           | [Using an API key](#using-an-api-key)                |
+
 ### Step 1: Obtain OpenAI OAuth Credentials
 
 You'll use [OpenCode](https://opencode.ai) locally to authenticate with OpenAI and retrieve the
@@ -63,14 +70,38 @@ models will automatically use your configured credentials.
 
 ---
 
-## How It Works
+## Using an API key
+
+Instead of a ChatGPT subscription, add a single secret on the **Settings** page:
+
+| Secret Name      | Value                                                           |
+| ---------------- | --------------------------------------------------------------- |
+| `OPENAI_API_KEY` | A key from https://platform.openai.com/api-keys (`sk-proj-...`) |
+
+Global scope makes every session use it; repository or environment scope narrows it to one target.
+All OpenAI models in the dropdown — including the Codex variants — are available this way, billed to
+the key's project.
+
+**An API key wins over the managed subscription.** When a session can see `OPENAI_API_KEY`, the
+control plane skips OAuth broker mode for OpenAI, so the sandbox talks to `api.openai.com` with the
+key. The `OPENAI_OAUTH_*` secrets can stay in place; delete the `OPENAI_API_KEY` secret to switch
+back to the subscription. The same precedence applies to xAI (`XAI_API_KEY` over SuperGrok OAuth).
+
+Unlike the OAuth path, the key itself is injected into the sandbox environment, because OpenCode
+reads `OPENAI_API_KEY` directly.
+
+---
+
+## How It Works (subscription path)
 
 Your refresh token is stored securely in the control plane and is never exposed to sandboxes. When a
 sandbox needs to make an OpenAI API call, it requests a short-lived access token from the control
 plane, which handles token refresh and rotation automatically. Only the temporary access token is
 present inside the sandbox.
 
-Credentials are scoped per repository, so different repos can use different OpenAI accounts.
+Credentials are scoped per repository, so different repos can use different OpenAI accounts. When an
+API key takes precedence, none of this applies: no sentinel, no auth proxy plugin, and no token
+refresh calls.
 
 ---
 
@@ -86,6 +117,12 @@ Open-Inspect.
 Verify that both `OPENAI_OAUTH_REFRESH_TOKEN` and `OPENAI_OAUTH_ACCOUNT_ID` are set in your
 repository secrets (Settings page). The refresh token may have expired — repeat Step 1 to obtain
 fresh credentials.
+
+### "The usage limit has been reached"
+
+The ChatGPT subscription behind `OPENAI_OAUTH_REFRESH_TOKEN` hit its Codex quota. Wait for the quota
+window to reset, switch the session to a Claude model, or add an `OPENAI_API_KEY` secret
+([Using an API key](#using-an-api-key)) to bill OpenAI usage per token instead.
 
 ### "Token refresh failed" errors
 

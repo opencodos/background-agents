@@ -71,6 +71,7 @@ The most common example:
 | `ANTHROPIC_API_KEY` | Required for Claude models when using the **Daytona** or **Vercel** sandbox provider (Modal injects this automatically via its own secrets mechanism) |
 | `DEEPSEEK_API_KEY`  | Required for DeepSeek models with any sandbox provider                                                                                                |
 | `ZHIPU_API_KEY`     | Required for Z.AI Coding Plan GLM models with any sandbox provider                                                                                    |
+| `OPENAI_API_KEY`    | Bills OpenAI models to a platform API key instead of a ChatGPT subscription ([guide](OPENAI_MODELS.md#using-an-api-key))                              |
 
 > **Daytona and Vercel sandbox users**: If you plan to use Claude models, you must add
 > `ANTHROPIC_API_KEY` as a global secret after deploying. Without it, Claude sessions will fail with
@@ -171,17 +172,18 @@ from it, even after you rotate the secret. Two guidelines:
 
 ## Common Examples
 
-| Key                          | Scope  | Purpose                                                      |
-| ---------------------------- | ------ | ------------------------------------------------------------ |
-| `ANTHROPIC_API_KEY`          | Global | Claude API access (required for Daytona or Vercel sandboxes) |
-| `DEEPSEEK_API_KEY`           | Global | DeepSeek API access                                          |
-| `ZHIPU_API_KEY`              | Global | Z.AI Coding Plan GLM access                                  |
-| `OPENAI_OAUTH_REFRESH_TOKEN` | Repo   | OpenAI Codex access ([setup guide](OPENAI_MODELS.md))        |
-| `OPENAI_OAUTH_ACCOUNT_ID`    | Repo   | OpenAI Codex access ([setup guide](OPENAI_MODELS.md))        |
-| `XAI_OAUTH_REFRESH_TOKEN`    | Any    | SuperGrok access ([setup guide](GROK_MODELS.md))             |
-| `DATABASE_URL`               | Repo   | Database connection string                                   |
-| `AWS_ACCESS_KEY_ID`          | Repo   | AWS credentials for a specific project                       |
-| `STRIPE_SECRET_KEY`          | Repo   | Stripe API key for a specific project                        |
+| Key                          | Scope  | Purpose                                                                     |
+| ---------------------------- | ------ | --------------------------------------------------------------------------- |
+| `ANTHROPIC_API_KEY`          | Global | Claude API access (required for Daytona or Vercel sandboxes)                |
+| `DEEPSEEK_API_KEY`           | Global | DeepSeek API access                                                         |
+| `ZHIPU_API_KEY`              | Global | Z.AI Coding Plan GLM access                                                 |
+| `OPENAI_API_KEY`             | Any    | OpenAI models billed per token ([guide](OPENAI_MODELS.md#using-an-api-key)) |
+| `OPENAI_OAUTH_REFRESH_TOKEN` | Repo   | OpenAI Codex via ChatGPT subscription ([setup guide](OPENAI_MODELS.md))     |
+| `OPENAI_OAUTH_ACCOUNT_ID`    | Repo   | OpenAI Codex via ChatGPT subscription ([setup guide](OPENAI_MODELS.md))     |
+| `XAI_OAUTH_REFRESH_TOKEN`    | Any    | SuperGrok access ([setup guide](GROK_MODELS.md))                            |
+| `DATABASE_URL`               | Repo   | Database connection string                                                  |
+| `AWS_ACCESS_KEY_ID`          | Repo   | AWS credentials for a specific project                                      |
+| `STRIPE_SECRET_KEY`          | Repo   | Stripe API key for a specific project                                       |
 
 ---
 
