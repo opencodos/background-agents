@@ -11,8 +11,23 @@
  */
 
 const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses";
+const OPENAI_API_ENDPOINT = "https://api.openai.com/v1/responses";
 const OAUTH_DUMMY_KEY = "opencode-oauth-dummy-key";
 const REFRESH_BUFFER_MS = 5 * 60 * 1000; // 5 minutes before expiry
+
+/**
+ * Optional per-token key used only once the ChatGPT subscription cannot serve a
+ * request. Deliberately not named OPENAI_API_KEY: that name switches the whole
+ * deployment to metered billing (the control plane then never enables broker
+ * mode), whereas this one keeps the subscription first and spills over.
+ */
+const FALLBACK_KEY_ENV = "OPENAI_API_KEY_FALLBACK";
+
+/** Headers the ChatGPT backend expects that api.openai.com has no use for. */
+const CHATGPT_ONLY_HEADERS = ["chatgpt-account-id", "originator", "session_id"];
+
+/** Response headers that describe the transport, not the payload. */
+const TRANSPORT_HEADERS = ["content-encoding", "content-length"];
 
 const ALLOWED_MODELS = new Set([
   "gpt-5.1-codex-max",
@@ -31,6 +46,10 @@ const ALLOWED_MODELS = new Set([
 let cachedAccessToken = null;
 let cachedAccountId = null;
 let cachedExpiresAt = 0;
+
+// Latched for the rest of the sandbox's life once the subscription is spent, so
+// a doomed Codex call is not repeated on every later turn.
+let spilloverLatched = false;
 
 function getSessionId() {
   try {
@@ -104,6 +123,67 @@ async function ensureAccessToken(getAuth, setAuth) {
   }
 
   return { accessToken: cachedAccessToken, accountId: cachedAccountId };
+}
+
+function headersFrom(init) {
+  const headers = new Headers();
+  if (!init?.headers) return headers;
+  if (init.headers instanceof Headers) {
+    init.headers.forEach((value, key) => headers.set(key, value));
+  } else if (Array.isArray(init.headers)) {
+    for (const [key, value] of init.headers) {
+      if (value !== undefined) headers.set(key, String(value));
+    }
+  } else {
+    for (const [key, value] of Object.entries(init.headers)) {
+      if (value !== undefined) headers.set(key, String(value));
+    }
+  }
+  return headers;
+}
+
+function isModelRequest(url) {
+  return url.pathname.includes("/v1/responses") || url.pathname.includes("/chat/completions");
+}
+
+/**
+ * Whether a Codex response means the subscription's quota is gone rather than
+ * momentarily throttled. Codex reports usage through its own header family
+ * (x-codex-*), not the standard x-ratelimit-* headers.
+ */
+function subscriptionSpent(response, bodyText = "") {
+  if (response.headers.get("x-codex-rate-limit-reached-type")) return true;
+  for (const window of ["primary", "secondary"]) {
+    const used = Number.parseFloat(response.headers.get(`x-codex-${window}-used-percent`) ?? "");
+    if (Number.isFinite(used) && used >= 100) return true;
+  }
+  return /usage limit|quota/i.test(bodyText);
+}
+
+function spilloverHeaders(headers, apiKey) {
+  const next = new Headers(headers);
+  for (const name of CHATGPT_ONLY_HEADERS) next.delete(name);
+  next.set("authorization", `Bearer ${apiKey}`);
+  return next;
+}
+
+/** Re-materialize a response whose body was read to classify a 429. */
+function replayResponse(response, bodyText) {
+  const headers = new Headers(response.headers);
+  for (const name of TRANSPORT_HEADERS) headers.delete(name);
+  return new Response(bodyText, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+function latchSpillover(reason) {
+  if (spilloverLatched) return;
+  spilloverLatched = true;
+  console.error(
+    `[codex-auth-plugin] spilling OpenAI traffic over to ${FALLBACK_KEY_ENV}: ${reason}`
+  );
 }
 
 export const CodexAuthProxy = async (input) => {
@@ -183,45 +263,61 @@ export const CodexAuthProxy = async (input) => {
             const currentAuth = await getAuth();
             if (currentAuth.type !== "oauth") return fetch(requestInput, init);
 
-            // Ensure we have a valid access token
-            const { accessToken, accountId } = await ensureAccessToken(getAuth, setAuth);
-
-            // Build headers
-            const headers = new Headers();
-            if (init?.headers) {
-              if (init.headers instanceof Headers) {
-                init.headers.forEach((value, key) => headers.set(key, value));
-              } else if (Array.isArray(init.headers)) {
-                for (const [key, value] of init.headers) {
-                  if (value !== undefined) headers.set(key, String(value));
-                }
-              } else {
-                for (const [key, value] of Object.entries(init.headers)) {
-                  if (value !== undefined) headers.set(key, String(value));
-                }
-              }
-            }
-
-            // Set real authorization
-            headers.set("authorization", `Bearer ${accessToken}`);
-
-            // Set ChatGPT-Account-Id header
-            if (accountId) {
-              headers.set("ChatGPT-Account-Id", accountId);
-            }
-
-            // Rewrite URL to Codex endpoint
             const parsed =
               requestInput instanceof URL
                 ? requestInput
                 : new URL(typeof requestInput === "string" ? requestInput : requestInput.url);
-            const url =
-              parsed.pathname.includes("/v1/responses") ||
-              parsed.pathname.includes("/chat/completions")
-                ? new URL(CODEX_API_ENDPOINT)
-                : parsed;
+            const headers = headersFrom(init);
+            const modelRequest = isModelRequest(parsed);
+            const fallbackKey = (modelRequest && process.env[FALLBACK_KEY_ENV]) || "";
 
-            return fetch(url, { ...init, headers });
+            if (fallbackKey && spilloverLatched) {
+              return fetch(OPENAI_API_ENDPOINT, {
+                ...init,
+                headers: spilloverHeaders(headers, fallbackKey),
+              });
+            }
+
+            let accessToken;
+            let accountId;
+            try {
+              ({ accessToken, accountId } = await ensureAccessToken(getAuth, setAuth));
+            } catch (error) {
+              if (!fallbackKey) throw error;
+              latchSpillover(`subscription token unavailable (${error.message})`);
+              return fetch(OPENAI_API_ENDPOINT, {
+                ...init,
+                headers: spilloverHeaders(headers, fallbackKey),
+              });
+            }
+
+            headers.set("authorization", `Bearer ${accessToken}`);
+            if (accountId) headers.set("ChatGPT-Account-Id", accountId);
+
+            const response = await fetch(modelRequest ? CODEX_API_ENDPOINT : parsed, {
+              ...init,
+              headers,
+            });
+            if (!fallbackKey) return response;
+
+            // A stream that has already started cannot be replayed, so a spent
+            // window observed on a successful call only redirects the next one.
+            if (response.status !== 429) {
+              if (subscriptionSpent(response)) {
+                latchSpillover("Codex usage headers report the window is exhausted");
+              }
+              return response;
+            }
+
+            const bodyText = await response.text().catch(() => "");
+            if (!subscriptionSpent(response, bodyText) || typeof init?.body !== "string") {
+              return replayResponse(response, bodyText);
+            }
+            latchSpillover("the ChatGPT subscription reported its usage limit");
+            return fetch(OPENAI_API_ENDPOINT, {
+              ...init,
+              headers: spilloverHeaders(headers, fallbackKey),
+            });
           },
         };
       },

@@ -72,4 +72,16 @@ describe("prepareManagedProviderEnv", () => {
       })
     ).toEqual({ XAI_API_KEY: "xai-key", OPENAI_OAUTH_MANAGED: "1" });
   });
+
+  it("keeps managed OAuth alongside a spillover fallback key", () => {
+    expect(
+      prepareManagedProviderEnv({
+        exposedSecrets: {
+          OPENAI_API_KEY_FALLBACK: "sk-fallback",
+          OPENAI_OAUTH_REFRESH_TOKEN: "openai-refresh",
+        },
+        brokerSecrets: { OPENAI_OAUTH_REFRESH_TOKEN: "openai-refresh" },
+      })
+    ).toEqual({ OPENAI_API_KEY_FALLBACK: "sk-fallback", OPENAI_OAUTH_MANAGED: "1" });
+  });
 });

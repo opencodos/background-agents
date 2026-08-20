@@ -26,12 +26,13 @@ high for Codex models).
 
 ## Setup
 
-There are two ways to pay for OpenAI models. Pick one:
+There are three ways to pay for OpenAI models:
 
-| Credential                                    | Billing                      | Setup                                                |
-| --------------------------------------------- | ---------------------------- | ---------------------------------------------------- |
-| ChatGPT Plus/Pro subscription (managed OAuth) | Included in the subscription | [Steps 1–3](#step-1-obtain-openai-oauth-credentials) |
-| OpenAI platform API key                       | Metered, per token           | [Using an API key](#using-an-api-key)                |
+| Secrets                                      | Billing                                            | Setup                                                          |
+| -------------------------------------------- | -------------------------------------------------- | -------------------------------------------------------------- |
+| `OPENAI_OAUTH_*` (ChatGPT Plus/Pro)          | Included in the subscription; fails at its quota   | [Steps 1–3](#step-1-obtain-openai-oauth-credentials)           |
+| `OPENAI_API_KEY`                             | Metered, per token                                 | [Using an API key](#using-an-api-key)                          |
+| `OPENAI_OAUTH_*` + `OPENAI_API_KEY_FALLBACK` | Subscription first, metered only after it runs out | [Spilling over](#spilling-over-when-the-subscription-runs-out) |
 
 ### Step 1: Obtain OpenAI OAuth Credentials
 
@@ -89,6 +90,37 @@ back to the subscription. The same precedence applies to xAI (`XAI_API_KEY` over
 
 Unlike the OAuth path, the key itself is injected into the sandbox environment, because OpenCode
 reads `OPENAI_API_KEY` directly.
+
+---
+
+## Spilling over when the subscription runs out
+
+A ChatGPT subscription that hits its Codex quota fails the session outright:
+`Execution failed: The usage limit has been reached...`. To keep working on a per-token key without
+abandoning the subscription you already paid for, add:
+
+| Secret Name               | Value                                        |
+| ------------------------- | -------------------------------------------- |
+| `OPENAI_API_KEY_FALLBACK` | A platform API key, used only as a spillover |
+
+Keep the `OPENAI_OAUTH_*` secrets in place and do **not** set `OPENAI_API_KEY` (that would switch
+every call to metered billing). Each sandbox then sends OpenAI traffic to the subscription until one
+of these happens, after which it uses the fallback key for the rest of its life:
+
+- Codex answers `429` with a quota signal (`x-codex-rate-limit-reached-type`, a usage-limit message,
+  or a `x-codex-*-used-percent` at 100)
+- a successful Codex response reports a window at 100% used — the in-flight reply is kept and only
+  the next request moves over
+- the control plane cannot mint a subscription access token at all (revoked or expired refresh
+  token)
+
+A plain `429` with no quota signal is passed through untouched, so short-window throttling does not
+spend money. The switch is logged in the session's sandbox logs as
+`[codex-auth-plugin] spilling OpenAI traffic over to OPENAI_API_KEY_FALLBACK: <reason>`.
+
+Two caveats: the latch lasts as long as the sandbox, so a session that spills over stays on the key
+even after the subscription window resets, and OpenCode still reports OpenAI token costs as `0`
+because the Codex proxy zeroes them at startup.
 
 ---
 
