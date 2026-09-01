@@ -10,7 +10,17 @@
  * github-bot service principal.
  */
 
+import {
+  createKvCacheStore,
+  REVIEW_ABANDONED_DESCRIPTION,
+  REVIEW_STATUS_CONTEXT,
+} from "@open-inspect/shared";
 import { z } from "zod";
+import {
+  fetchWithTimeout,
+  getCachedInstallationToken,
+  getGitHubAppConfig,
+} from "../auth/github-app";
 import { SessionIndexStore } from "../db/session-index";
 import { createLogger } from "../logger";
 import { SessionInternalPaths } from "../session/contracts";
@@ -32,6 +42,8 @@ import {
 import { sessionRoute, type SessionRouteContext } from "./session-route";
 
 const logger = createLogger("router:github-reviews");
+/** Identifies this worker on the status writes it makes on a dead review's behalf. */
+const CONTROL_PLANE_USER_AGENT = "open-inspect-control-plane";
 const GITHUB_REVIEW_SANDBOX_ROUTE = {
   authentication: {
     kind: "sandbox",
@@ -421,3 +433,363 @@ export const githubReviewRoutes: Route[] = [
     },
   ]),
 ];
+
+/** A review row whose session can no longer post its own commit status. */
+interface DeadReviewSessionRow {
+  session_id: string;
+  repo_id: number;
+  pr_number: number;
+  head_sha: string;
+  created_at: number;
+  status: string;
+  repo_owner: string | null;
+  repo_name: string | null;
+}
+
+/**
+ * GitHub answers 422 for several unrelated reasons on this endpoint — a sha it
+ * cannot find, a validation failure, an abuse rejection. Only the first means
+ * there is no commit left to describe; the rest are worth retrying, and
+ * discarding the row on them would recreate the permanently-pending state this
+ * whole path exists to end.
+ */
+function isMissingCommit(status: number, body: string): boolean {
+  return status === 422 && /no commit found for sha/i.test(body);
+}
+
+/** Just the state fields of a pull request, for the "is this still live" check. */
+const pullRequestStateSchema = z.object({ state: z.string(), merged: z.boolean().optional() });
+
+/**
+ * Whether the pull request is still open.
+ *
+ * A merged or closed pull request needs no verdict, and posting `error` on one
+ * is noise on a commit nobody is waiting for. In practice this is the common
+ * case rather than an edge: a review requested seconds before its pull request
+ * merges is abandoned with nothing wrong, and several of the rows this path was
+ * built for are exactly that. `null` when the answer cannot be established, so
+ * the caller retries rather than guessing.
+ */
+async function isPullRequestOpen(
+  token: string,
+  row: DeadReviewSessionRow
+): Promise<boolean | null> {
+  const response = await fetchWithTimeout(
+    `https://api.github.com/repos/${row.repo_owner}/${row.repo_name}/pulls/${row.pr_number}`,
+    { headers: githubHeaders(token) }
+  );
+  // 410 is proof the resource is gone. 404 is not: an installation that has lost
+  // access to a private repository answers identically, and dropping the row on
+  // that strands the pending status for good even once access returns. So 404
+  // stays retryable — a row for a genuinely deleted pull request costs a request
+  // a minute, which is the cheaper of the two mistakes.
+  if (response.status === 410) return false;
+  if (!response.ok) return null;
+  const parsed = pullRequestStateSchema.safeParse(await response.json());
+  if (!parsed.success) return null;
+  return parsed.data.state === "open" && parsed.data.merged !== true;
+}
+
+/**
+ * The combined status of one commit — the *latest* status per context.
+ *
+ * Deliberately not `/statuses`, which lists every status ever posted, newest
+ * first, thirty to a page: a commit whose other contexts have reported more than
+ * thirty times since would push this one's verdict off page one, and the cleanup
+ * would read "no verdict" and post `error` over a completed review. The combined
+ * endpoint collapses to one entry per *context*, so the page holds one row per
+ * check rather than one per report — `per_page=100` covers any realistic
+ * repository, where `/statuses` could not be bounded that way at all.
+ */
+const combinedStatusSchema = z.object({
+  statuses: z.array(z.object({ context: z.string(), state: z.string() })),
+});
+
+/**
+ * Whether this commit already carries a settled `open-inspect` status.
+ *
+ * The agent posts its verdict and only then releases the lease and finishes, so
+ * a session killed in that window is `failed` with a good status already on the
+ * commit. Reading before writing is what separates the two: an abandoned review
+ * leaves `pending`, a published one does not.
+ */
+async function hasSettledReviewStatus(
+  token: string,
+  row: DeadReviewSessionRow
+): Promise<boolean | null> {
+  const response = await fetchWithTimeout(
+    `https://api.github.com/repos/${row.repo_owner}/${row.repo_name}/commits/${row.head_sha}/status?per_page=100`,
+    { headers: githubHeaders(token) }
+  );
+  // A force push can take the sha away before this runs, and 422 says so
+  // explicitly. A bare 404 does not — it is also what a lost installation
+  // answers — so it stays retryable, like the pull-request lookup above.
+  if (
+    isMissingCommit(
+      response.status,
+      await response
+        .clone()
+        .text()
+        .catch(() => "")
+    )
+  ) {
+    return true;
+  }
+  if (!response.ok) return null;
+  const parsed = combinedStatusSchema.safeParse(await response.json());
+  if (!parsed.success) return null;
+  const latest = parsed.data.statuses.find((status) => status.context === REVIEW_STATUS_CONTEXT);
+  return latest !== undefined && latest.state !== "pending";
+}
+
+function githubHeaders(token: string): Record<string, string> {
+  return {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/vnd.github+json",
+    "User-Agent": CONTROL_PLANE_USER_AGENT,
+  };
+}
+
+/**
+ * Post the abandoned status for one review, replacing the pending one the
+ * github-bot wrote when the review started.
+ *
+ * Returns false when the write did not land, so the row is retained and the
+ * next tick retries rather than leaving the PR pending with nothing tracking it.
+ */
+async function stillLatestGeneration(
+  db: RequestContext["db"],
+  row: DeadReviewSessionRow
+): Promise<boolean> {
+  const found = await db
+    .prepare(
+      `SELECT 1 FROM github_review_sessions grs
+       JOIN github_review_state st
+         ON st.repo_id = grs.repo_id AND st.pr_number = grs.pr_number
+       WHERE grs.session_id = ?1 AND grs.generation = st.latest_generation`
+    )
+    .bind(row.session_id)
+    .first();
+  return found !== null;
+}
+
+async function postAbandonedReviewStatus(
+  db: RequestContext["db"],
+  env: Env,
+  row: DeadReviewSessionRow
+): Promise<"posted" | "already-settled" | "superseded" | "retry"> {
+  const config = getGitHubAppConfig(env);
+  if (!config) return "retry";
+  const token = await getCachedInstallationToken(config, {
+    userAgent: CONTROL_PLANE_USER_AGENT,
+    // Without this the persistent cache is neither read nor written, so every
+    // close-out mints a fresh installation token instead of reusing one.
+    ...(env.REPOS_CACHE ? { cacheStore: createKvCacheStore(env.REPOS_CACHE) } : {}),
+  });
+  const open = await isPullRequestOpen(token, row);
+  if (open === null) return "retry";
+  if (!open) return "already-settled";
+  const settled = await hasSettledReviewStatus(token, row);
+  if (settled === null) return "retry";
+  if (settled) return "already-settled";
+  // Re-read the generation after the round trips above and immediately before the
+  // write. A claim taken while those were in flight means a successor review now
+  // owns this head and has posted its own `pending`; writing `error` over that
+  // would report a live review as dead.
+  //
+  // This narrows the window to the POST itself rather than closing it — a claim
+  // landing between this check and the write is still possible. What that costs
+  // is bounded and self-correcting: the successor's own agent posts its verdict
+  // at the end of its run and overwrites this status, and its row is a different
+  // generation so nothing here deletes its tracking. Closing the window entirely
+  // needs the successor's pending write to take this same lease, which is a
+  // change to the github-bot rather than to this path.
+  if (!(await stillLatestGeneration(db, row))) return "superseded";
+  const response = await fetchWithTimeout(
+    `https://api.github.com/repos/${row.repo_owner}/${row.repo_name}/statuses/${row.head_sha}`,
+    {
+      method: "POST",
+      headers: { ...githubHeaders(token), "Content-Type": "application/json" },
+      body: JSON.stringify({
+        state: "error",
+        context: REVIEW_STATUS_CONTEXT,
+        description: REVIEW_ABANDONED_DESCRIPTION,
+      }),
+    }
+  );
+  if (response.ok) return "posted";
+  return isMissingCommit(response.status, await response.text().catch(() => ""))
+    ? "already-settled"
+    : "retry";
+}
+
+/**
+ * Take the submission lease for a dead session's row, or report that something
+ * else holds it.
+ *
+ * Reading the lease columns off the earlier SELECT is not enough: an agent can
+ * acquire its lease in the window between that read and this write, and then
+ * both it and this path post to the same head with whichever lands last
+ * winning. So the close-out competes for the same lease every publisher takes,
+ * in the same single conditional statement `handleReviewOwnership` uses — the
+ * generation predicate additionally drops a row a newer claim has just
+ * superseded.
+ */
+async function claimCloseOutLease(
+  db: RequestContext["db"],
+  row: DeadReviewSessionRow,
+  attempt: string
+): Promise<boolean> {
+  const now = Date.now();
+  const result = await db
+    .prepare(
+      `UPDATE github_review_state SET lease_session_id = ?1, lease_expires_at = ?2
+       WHERE EXISTS (
+         SELECT 1 FROM github_review_sessions grs
+         WHERE grs.session_id = ?3
+           AND grs.repo_id = github_review_state.repo_id
+           AND grs.pr_number = github_review_state.pr_number
+           AND grs.generation = github_review_state.latest_generation
+       )
+       AND (lease_session_id IS NULL OR lease_expires_at < ?4)`
+    )
+    .bind(attempt, now + REVIEW_SUBMISSION_LEASE_MS, row.session_id, now)
+    .run();
+  return (result.meta?.changes ?? 0) > 0;
+}
+
+/**
+ * Hand the lease back so a retry — or a fresh review — is not made to wait it out.
+ *
+ * Matched on this attempt's own token, never on the session id: a later tick that
+ * took the lease after this one's expired must not have it released out from
+ * under it by the attempt that lost it.
+ */
+async function releaseCloseOutLease(
+  db: RequestContext["db"],
+  row: DeadReviewSessionRow,
+  attempt: string
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE github_review_state SET lease_session_id = NULL, lease_expires_at = NULL
+       WHERE repo_id = ?1 AND pr_number = ?2 AND lease_session_id = ?3`
+    )
+    .bind(row.repo_id, row.pr_number, attempt)
+    .run();
+}
+
+/**
+ * Close out reviews whose session ended without posting its own commit status.
+ *
+ * The github-bot writes `pending` when a review starts and the agent writes the
+ * terminal status when it finishes. A session killed by a supervisor timeout
+ * runs no code of its own, so it writes neither — and a pending status is
+ * indistinguishable from a review still running, so the check never resolves
+ * and any merge rule keyed on it waits forever.
+ *
+ * Keyed on the session having reached `failed` or `cancelled` — usually because
+ * the stuck-processing alarm drove it there (`failStuckProcessingMessage`) — or
+ * on the session row being gone entirely. A deleted session publishes nothing
+ * ever again, and joining it away would leave its review pending with no row
+ * left to find, so the join is outer and a missing session counts as terminal.
+ *
+ * Sessions that hang without ever reaching a terminal state exist too, and their
+ * pull requests show `pending` for days. They are deliberately **not** covered
+ * here, because nothing in the session index can currently tell one apart from a
+ * review that is simply slow: `updated_at` is not bumped per tool call, and
+ * `message_count` / `active_duration_ms` are projected only once a turn settles
+ * (`SessionStatusService`, guarded by `isTurnSettled`), so a first turn still
+ * running reads as zero activity for its whole execution. Any age-based
+ * predicate over those fields would post `error` on a healthy long review.
+ * Closing that shape needs a signal that is written when work *starts*, which is
+ * a change to what the runtime records rather than to this query.
+ *
+ * Superseded rows are `reapSupersededReviewSessions`' job and are left alone:
+ * that path cancels the session first, and cancelling then closing out in one
+ * tick would post twice for one head.
+ */
+export async function closeOutDeadReviewSessions(
+  db: RequestContext["db"],
+  env: Env
+): Promise<void> {
+  if (!getGitHubAppConfig(env)) return;
+  // Oldest first, so the batch drains in a fixed order rather than re-picking an
+  // arbitrary slice each minute. Small, because each row costs two GitHub round
+  // trips and this runs on the same cron as the automation scheduler.
+  const dead = await db
+    .prepare(
+      `SELECT grs.session_id, grs.repo_id, grs.pr_number, grs.head_sha, grs.created_at,
+              s.status, sr.repo_owner, sr.repo_name
+       FROM github_review_sessions grs
+       JOIN github_review_state st
+         ON st.repo_id = grs.repo_id AND st.pr_number = grs.pr_number
+       LEFT JOIN sessions s ON s.id = grs.session_id
+       LEFT JOIN session_repositories sr
+         ON sr.session_id = grs.session_id AND sr.repo_id = grs.repo_id
+       WHERE grs.generation = st.latest_generation
+         AND (s.status IN ('failed', 'cancelled') OR s.id IS NULL)
+       ORDER BY grs.created_at ASC
+       LIMIT 5`
+    )
+    .all<DeadReviewSessionRow>();
+
+  for (const row of dead.results) {
+    // A row with no repository identity can never be posted for, so retaining it
+    // would hold a slot in every future batch and starve the rows behind it.
+    // Dropped with a warning instead: the check stays pending, but one stuck PR
+    // is better than a queue that stops draining.
+    if (!row.repo_owner || !row.repo_name) {
+      logger.warn("review_closeout.no_repo_identity", {
+        event: "review_closeout.no_repo_identity",
+        session_id: row.session_id,
+        repo_id: row.repo_id,
+      });
+      await dropReviewRow(db, row);
+      continue;
+    }
+    // A token per attempt rather than the session id: the cron fires every
+    // minute while an attempt can span three GitHub round trips, so two ticks
+    // can overlap on one row. Keyed on the session id, the second would be
+    // allowed to reacquire and the first would then release the second's lease
+    // mid-write.
+    const attempt = crypto.randomUUID();
+    if (!(await claimCloseOutLease(db, row, attempt))) continue;
+    let outcome: "posted" | "already-settled" | "superseded" | "retry";
+    try {
+      outcome = await postAbandonedReviewStatus(db, env, row);
+    } catch (postError) {
+      logger.warn("review_closeout.post_threw", {
+        event: "review_closeout.post_threw",
+        session_id: row.session_id,
+        error: postError instanceof Error ? postError.message : String(postError),
+      });
+      await releaseCloseOutLease(db, row, attempt);
+      continue;
+    }
+    if (outcome === "retry" || outcome === "superseded") {
+      // Superseded leaves the row alone as well: the reaper owns a row a newer
+      // generation has replaced, and it cancels the session before deleting it.
+      await releaseCloseOutLease(db, row, attempt);
+      continue;
+    }
+    await dropReviewRow(db, row);
+    await releaseCloseOutLease(db, row, attempt);
+    logger.info("review_closeout.closed", {
+      event: "review_closeout.closed",
+      session_id: row.session_id,
+      repo_id: row.repo_id,
+      pull_number: row.pr_number,
+      session_status: row.status,
+      outcome,
+      age_ms: Date.now() - row.created_at,
+    });
+  }
+}
+
+async function dropReviewRow(db: RequestContext["db"], row: DeadReviewSessionRow): Promise<void> {
+  await db
+    .prepare(`DELETE FROM github_review_sessions WHERE session_id = ?`)
+    .bind(row.session_id)
+    .run();
+}

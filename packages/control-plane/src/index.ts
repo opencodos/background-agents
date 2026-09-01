@@ -12,7 +12,7 @@ import { handleAutofixQueue } from "./autofix/handler";
 import { checkAutofixQueueHealth } from "./autofix/queue-health";
 import { consumeImageBuildFinalizations } from "./image-builds/finalization-consumer";
 import { IMAGE_BUILD_SCHEDULER_CRON, runImageBuildScheduler } from "./image-builds/scheduler";
-import { reapSupersededReviewSessions } from "./routes/github-reviews";
+import { closeOutDeadReviewSessions, reapSupersededReviewSessions } from "./routes/github-reviews";
 import { createSessionRuntimeClient } from "./session/runtime-client";
 import {
   ABANDONED_DRAFT_SWEEP_CRON,
@@ -84,6 +84,18 @@ export default {
       // eslint-disable-next-line no-restricted-syntax -- scheduled composition root: cron env.DB read
       const db = instrumentD1(env.DB, cronCtx.metrics);
       await reapSupersededReviewSessions(db, createSessionRuntimeClient(env, cronCtx));
+      // Off the critical path: the close-out makes external GitHub calls, and the
+      // automation scheduler below must not wait behind a slow one. Ordered after
+      // the reaper so a superseded row is cancelled and deleted by it rather than
+      // being closed out here as well — one head, one status.
+      ctx.waitUntil(
+        closeOutDeadReviewSessions(db, env).catch((closeOutError) => {
+          logger.warn("Review close-out tick failed", {
+            event: "review_closeout.tick_failed",
+            error: closeOutError instanceof Error ? closeOutError.message : String(closeOutError),
+          });
+        })
+      );
     } catch (reaperError) {
       logger.warn("Review reaper tick failed", {
         event: "review_reaper.tick_failed",

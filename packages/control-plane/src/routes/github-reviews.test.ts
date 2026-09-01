@@ -1,10 +1,22 @@
+import type * as GitHubAppModuleNamespace from "../auth/github-app";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { REVIEW_ABANDONED_DESCRIPTION, REVIEW_STATUS_CONTEXT } from "@open-inspect/shared";
+
+type GitHubAppModule = typeof GitHubAppModuleNamespace;
+
+// The close-out mints an installation token; stubbed so these tests exercise the
+// status write and the row lifecycle rather than GitHub App JWT signing.
+vi.mock("../auth/github-app", async (importOriginal) => ({
+  ...(await importOriginal<GitHubAppModule>()),
+  getCachedInstallationToken: vi.fn(async () => "test-token"),
+}));
 import type { Principal } from "../auth/principal";
 import { SessionIndexStore } from "../db/session-index";
 import type { SqlDatabase } from "../db/sql-database";
 import type { SessionRuntimeClient } from "../session/runtime-client";
 import type { Env } from "../types";
 import {
+  closeOutDeadReviewSessions,
   githubReviewRoutes,
   handleClaimReviewGeneration,
   handleReviewLeaseRelease,
@@ -505,5 +517,373 @@ describe("sweep lease deferral", () => {
       failedSessionIds: [],
     });
     expect(deletedSessionIds).toEqual(["expired-lease"]);
+  });
+});
+
+/**
+ * Answers the close-out's SELECT and records what it wrote. The fake above is
+ * shaped for the sweep; this one models the three things the close-out's
+ * correctness rests on — which rows the query returns, whether the lease UPDATE
+ * lands, and which rows were deleted.
+ */
+/** Scripts the status GET the close-out now makes before it writes. */
+function mockGitHub(options: {
+  existing?: { context: string; state: string }[];
+  postResponse?: Response;
+  getResponse?: Response;
+  pullRequest?: { state: string; merged?: boolean };
+  pullRequestResponse?: Response;
+}) {
+  const calls: { url: string; method: string }[] = [];
+  const fetchMock = vi
+    .spyOn(globalThis, "fetch")
+    .mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ url, method: init?.method ?? "GET" });
+      if (url.includes("/pulls/")) {
+        return (
+          options.pullRequestResponse ??
+          new Response(JSON.stringify(options.pullRequest ?? { state: "open", merged: false }))
+        );
+      }
+      if (url.split("?")[0]!.endsWith("/status") && (init?.method ?? "GET") === "GET") {
+        return (
+          options.getResponse ?? new Response(JSON.stringify({ statuses: options.existing ?? [] }))
+        );
+      }
+      return options.postResponse ?? new Response("{}");
+    });
+  return { fetchMock, calls, posts: () => calls.filter((call) => call.method === "POST") };
+}
+
+function createCloseOutDb(
+  rows: Record<string, unknown>[],
+  options: { leaseAcquired?: boolean; superseded?: boolean } = {}
+): { db: SqlDatabase; deleted: string[]; leaseReleased: string[] } {
+  const deleted: string[] = [];
+  const leaseReleased: string[] = [];
+  const db = {
+    prepare(sql: string) {
+      const binds: unknown[] = [];
+      const statement = {
+        bind(...args: unknown[]) {
+          binds.push(...args);
+          return statement;
+        },
+        async all() {
+          // Mirrors the SQL's own predicate, so a row the real query would never
+          // return cannot reach the loop through the fake.
+          return {
+            results: rows.filter((row) => row.status === "failed" || row.status === "cancelled"),
+          };
+        },
+        async run() {
+          if (sql.startsWith("DELETE")) deleted.push(binds[0] as string);
+          if (sql.includes("lease_session_id = NULL")) leaseReleased.push(binds[2] as string);
+          if (sql.includes("SET lease_session_id = ?1")) {
+            return { meta: { changes: options.leaseAcquired === false ? 0 : 1 } };
+          }
+          return { meta: { changes: 1 } };
+        },
+        async first() {
+          // The generation re-check before the POST; null means superseded.
+          return options.superseded === true ? null : { 1: 1 };
+        },
+      };
+      return statement;
+    },
+  } as unknown as SqlDatabase;
+  return { db, deleted, leaseReleased };
+}
+
+function closeOutRow(overrides: Partial<Record<string, unknown>> = {}): Record<string, unknown> {
+  return {
+    session_id: "sess-dead",
+    repo_id: 42,
+    pr_number: 7,
+    head_sha: "abc123",
+    created_at: Date.now(),
+    status: "failed",
+    message_count: 1,
+    active_duration_ms: 1000,
+    repo_owner: "opencodos",
+    repo_name: "aitaas",
+    ...overrides,
+  };
+}
+
+const CLOSE_OUT_ENV = {
+  GITHUB_APP_ID: "1",
+  GITHUB_APP_PRIVATE_KEY: "key",
+  GITHUB_APP_INSTALLATION_ID: "2",
+} as unknown as Env;
+
+describe("closeOutDeadReviewSessions", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("posts the abandoned status for a session that died, and drops the row", async () => {
+    const { db, deleted } = createCloseOutDb([closeOutRow()]);
+    const { fetchMock, posts } = mockGitHub({
+      existing: [{ context: "open-inspect", state: "pending" }],
+    });
+
+    await closeOutDeadReviewSessions(db as RequestContext["db"], CLOSE_OUT_ENV);
+
+    expect(posts()).toHaveLength(1);
+    const [url, init] = fetchMock.mock.calls.find((call) => call[1]?.method === "POST")!;
+    expect(url).toBe("https://api.github.com/repos/opencodos/aitaas/statuses/abc123");
+    expect(JSON.parse((init as RequestInit).body as string)).toMatchObject({
+      state: "error",
+      context: REVIEW_STATUS_CONTEXT,
+      description: REVIEW_ABANDONED_DESCRIPTION,
+    });
+    expect(deleted).toEqual(["sess-dead"]);
+  });
+
+  it("leaves a completed review alone however old it is", async () => {
+    // A successful publication releases its lease but never deletes this row, so
+    // an age-based predicate here would post `error` over a landed verdict.
+    const { db, deleted } = createCloseOutDb([
+      closeOutRow({ status: "completed", created_at: Date.now() - 24 * 60 * 60 * 1000 }),
+    ]);
+    const { fetchMock } = mockGitHub({});
+
+    await closeOutDeadReviewSessions(db as RequestContext["db"], CLOSE_OUT_ENV);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(deleted).toEqual([]);
+  });
+
+  it("leaves a long-running active review alone", async () => {
+    const { db, deleted } = createCloseOutDb([
+      closeOutRow({ status: "active", created_at: Date.now() - 3 * 60 * 60 * 1000 }),
+    ]);
+    const { fetchMock } = mockGitHub({});
+
+    await closeOutDeadReviewSessions(db as RequestContext["db"], CLOSE_OUT_ENV);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(deleted).toEqual([]);
+  });
+
+  it("defers when the submission lease cannot be taken", async () => {
+    const { db, deleted } = createCloseOutDb([closeOutRow()], { leaseAcquired: false });
+    const { fetchMock } = mockGitHub({});
+
+    await closeOutDeadReviewSessions(db as RequestContext["db"], CLOSE_OUT_ENV);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(deleted).toEqual([]);
+  });
+
+  it("addresses the repository the review was for, not the session's first repo", async () => {
+    const { db } = createCloseOutDb([closeOutRow({ repo_owner: "opencodos", repo_name: "other" })]);
+    const { posts } = mockGitHub({ existing: [] });
+
+    await closeOutDeadReviewSessions(db as RequestContext["db"], CLOSE_OUT_ENV);
+
+    expect(posts()[0]!.url).toBe("https://api.github.com/repos/opencodos/other/statuses/abc123");
+  });
+
+  it("retains the row and hands back the lease when the status write fails", async () => {
+    const { db, deleted, leaseReleased } = createCloseOutDb([closeOutRow()]);
+    mockGitHub({ postResponse: new Response("nope", { status: 500 }) });
+
+    await closeOutDeadReviewSessions(db as RequestContext["db"], CLOSE_OUT_ENV);
+
+    expect(deleted).toEqual([]);
+    expect(leaseReleased).toHaveLength(1);
+  });
+
+  it("retries a 422 that is not a missing commit", async () => {
+    // GitHub also answers 422 for validation and abuse rejections; discarding
+    // the row on those would recreate the permanently-pending state.
+    const { db, deleted } = createCloseOutDb([closeOutRow()]);
+    mockGitHub({
+      postResponse: new Response(JSON.stringify({ message: "Validation Failed" }), { status: 422 }),
+    });
+
+    await closeOutDeadReviewSessions(db as RequestContext["db"], CLOSE_OUT_ENV);
+
+    expect(deleted).toEqual([]);
+  });
+
+  it("treats a sha GitHub cannot find as done — a force-push left nothing to describe", async () => {
+    const { db, deleted } = createCloseOutDb([closeOutRow()]);
+    mockGitHub({
+      postResponse: new Response(JSON.stringify({ message: "No commit found for SHA: abc123" }), {
+        status: 422,
+      }),
+    });
+
+    await closeOutDeadReviewSessions(db as RequestContext["db"], CLOSE_OUT_ENV);
+
+    expect(deleted).toEqual(["sess-dead"]);
+  });
+
+  it("does nothing when the GitHub App is not configured", async () => {
+    const { db, deleted } = createCloseOutDb([closeOutRow()]);
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}"));
+
+    await closeOutDeadReviewSessions(db as RequestContext["db"], {} as Env);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(deleted).toEqual([]);
+  });
+
+  it("does not overwrite a verdict the agent published just before it died", async () => {
+    // The agent posts its status, then releases the lease, then execution
+    // completion is recorded. Killed in that window the session is `failed`
+    // while a good status already sits on the commit.
+    const { db, deleted } = createCloseOutDb([closeOutRow()]);
+    const { posts } = mockGitHub({ existing: [{ context: "open-inspect", state: "success" }] });
+
+    await closeOutDeadReviewSessions(db as RequestContext["db"], CLOSE_OUT_ENV);
+
+    expect(posts()).toHaveLength(0);
+    expect(deleted).toEqual(["sess-dead"]);
+  });
+
+  it("retries when the existing status cannot be read, rather than posting blind", async () => {
+    const { db, deleted } = createCloseOutDb([closeOutRow()]);
+    const { posts } = mockGitHub({ getResponse: new Response("boom", { status: 500 }) });
+
+    await closeOutDeadReviewSessions(db as RequestContext["db"], CLOSE_OUT_ENV);
+
+    expect(posts()).toHaveLength(0);
+    expect(deleted).toEqual([]);
+  });
+
+  it("drops a row with no repository identity instead of retrying it forever", async () => {
+    // It can never be posted for, so retaining it would hold a batch slot every
+    // minute and starve every dead review behind it.
+    const { db, deleted } = createCloseOutDb([closeOutRow({ repo_owner: null, repo_name: null })]);
+    const { fetchMock } = mockGitHub({});
+
+    await closeOutDeadReviewSessions(db as RequestContext["db"], CLOSE_OUT_ENV);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(deleted).toEqual(["sess-dead"]);
+  });
+
+  it("does not post on a pull request that has already merged", async () => {
+    // The common shape: a review requested seconds before the merge, abandoned
+    // with nothing wrong. Nobody is waiting on that commit's check.
+    const { db, deleted } = createCloseOutDb([closeOutRow()]);
+    const { posts } = mockGitHub({ pullRequest: { state: "closed", merged: true } });
+
+    await closeOutDeadReviewSessions(db as RequestContext["db"], CLOSE_OUT_ENV);
+
+    expect(posts()).toHaveLength(0);
+    expect(deleted).toEqual(["sess-dead"]);
+  });
+
+  it("does not post on a pull request that was closed unmerged", async () => {
+    const { db, deleted } = createCloseOutDb([closeOutRow()]);
+    const { posts } = mockGitHub({ pullRequest: { state: "closed", merged: false } });
+
+    await closeOutDeadReviewSessions(db as RequestContext["db"], CLOSE_OUT_ENV);
+
+    expect(posts()).toHaveLength(0);
+    expect(deleted).toEqual(["sess-dead"]);
+  });
+
+  it("retries when the pull request state cannot be read", async () => {
+    const { db, deleted } = createCloseOutDb([closeOutRow()]);
+    const { posts } = mockGitHub({
+      pullRequestResponse: new Response("boom", { status: 500 }),
+    });
+
+    await closeOutDeadReviewSessions(db as RequestContext["db"], CLOSE_OUT_ENV);
+
+    expect(posts()).toHaveLength(0);
+    expect(deleted).toEqual([]);
+  });
+
+  it("keeps retrying when the status lookup 404s, which does not prove the sha is gone", async () => {
+    // An installation that lost access to a private repository answers 404 just
+    // as a deleted commit does, so discarding the row here would strand the
+    // pending status even once access returns.
+    const { db, deleted } = createCloseOutDb([closeOutRow()]);
+    const { posts } = mockGitHub({ getResponse: new Response("gone", { status: 404 }) });
+
+    await closeOutDeadReviewSessions(db as RequestContext["db"], CLOSE_OUT_ENV);
+
+    expect(posts()).toHaveLength(0);
+    expect(deleted).toEqual([]);
+  });
+
+  it("treats a sha the status lookup reports missing as settled, without posting", async () => {
+    // 422 naming the sha is proof, where a bare 404 is not.
+    const { db, deleted } = createCloseOutDb([closeOutRow()]);
+    const { posts } = mockGitHub({
+      getResponse: new Response(JSON.stringify({ message: "No commit found for SHA: abc123" }), {
+        status: 422,
+      }),
+    });
+
+    await closeOutDeadReviewSessions(db as RequestContext["db"], CLOSE_OUT_ENV);
+
+    expect(posts()).toHaveLength(0);
+    expect(deleted).toEqual(["sess-dead"]);
+  });
+
+  it("releases only its own lease, never a later attempt's", async () => {
+    // Two ticks can overlap on one row: an attempt spans three GitHub round trips
+    // while the cron fires every minute. Keyed on the session id, the loser would
+    // release the winner's lease mid-write.
+    const { db, leaseReleased } = createCloseOutDb([closeOutRow()]);
+    mockGitHub({ postResponse: new Response("nope", { status: 500 }) });
+
+    await closeOutDeadReviewSessions(db as RequestContext["db"], CLOSE_OUT_ENV);
+
+    expect(leaseReleased).toHaveLength(1);
+    expect(leaseReleased[0]).not.toBe("sess-dead");
+  });
+
+  it("does not overwrite a successor review that claimed the head mid-flight", async () => {
+    // A new generation can be claimed while the GitHub reads are in flight; its
+    // pending status must not be reported as a dead review.
+    const { db, deleted } = createCloseOutDb([closeOutRow()], { superseded: true });
+    const { posts } = mockGitHub({ existing: [{ context: "open-inspect", state: "pending" }] });
+
+    await closeOutDeadReviewSessions(db as RequestContext["db"], CLOSE_OUT_ENV);
+
+    expect(posts()).toHaveLength(0);
+    expect(deleted).toEqual([]);
+  });
+
+  it("keeps retrying a pull request GitHub answers 404 for", async () => {
+    // A lost installation answers 404 exactly like a deleted pull request, so
+    // dropping the row would strand the pending status even once access returns.
+    const { db, deleted } = createCloseOutDb([closeOutRow()]);
+    const { posts } = mockGitHub({
+      pullRequestResponse: new Response("Not Found", { status: 404 }),
+    });
+
+    await closeOutDeadReviewSessions(db as RequestContext["db"], CLOSE_OUT_ENV);
+
+    expect(posts()).toHaveLength(0);
+    expect(deleted).toEqual([]);
+  });
+
+  it("reads the latest status per context rather than a page of history", async () => {
+    // The combined endpoint collapses to one entry per context; a verdict must
+    // not be missed because other contexts reported many times since.
+    const { db, deleted } = createCloseOutDb([closeOutRow()]);
+    const { posts, calls } = mockGitHub({
+      existing: [
+        { context: "ci", state: "success" },
+        { context: "open-inspect", state: "failure" },
+      ],
+    });
+
+    await closeOutDeadReviewSessions(db as RequestContext["db"], CLOSE_OUT_ENV);
+
+    expect(calls.some((c) => c.url.split("?")[0]!.endsWith("/status"))).toBe(true);
+    expect(posts()).toHaveLength(0);
+    expect(deleted).toEqual(["sess-dead"]);
   });
 });
