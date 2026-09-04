@@ -57,7 +57,7 @@ jobs:
   lint-typescript:
     name: Lint & Format (TypeScript)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -114,7 +114,7 @@ jobs:
   typecheck-typescript:
     name: TypeCheck (TypeScript)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -160,7 +160,9 @@ jobs:
   test-cp-unit:
     name: Test (control-plane unit)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # The suite itself runs in under a minute; the budget is for a slow
+    # dependency install, which has taken over four minutes on a warm cache.
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -213,7 +215,7 @@ jobs:
   test-web:
     name: Test (web)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -236,7 +238,7 @@ jobs:
   test-bots:
     name: Test (bots)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v6

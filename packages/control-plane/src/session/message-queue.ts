@@ -39,7 +39,7 @@ import type { SessionStatusService } from "./session-status-service";
 import type { EnqueuePromptRequest } from "./enqueue-prompt-contract";
 import { getAvatarUrl } from "./participant-service";
 import { resolveParticipantName } from "./participant-name";
-import type { AlarmScheduler, BackgroundTasks } from "../platform-ports";
+import type { AlarmScheduler, BackgroundTasks, SessionWebSocket } from "../platform-ports";
 import { resolveGitAuthorIdentity } from "./identity";
 import { validateReasoningEffort } from "./reasoning-effort";
 import {
@@ -239,7 +239,7 @@ export class SessionMessageQueue {
   }
 
   async handlePromptMessage(
-    ws: WebSocket,
+    ws: SessionWebSocket,
     client: ClientInfo,
     data: PromptMessageData
   ): Promise<void> {
@@ -325,7 +325,7 @@ export class SessionMessageQueue {
   }
 
   async cancelQueuedPrompt(
-    ws: WebSocket,
+    ws: SessionWebSocket,
     data: { messageId: string; clientRequestId: string }
   ): Promise<void> {
     if (!this.messageRepository.cancelPendingMessage(data.messageId)) {
@@ -555,7 +555,13 @@ export class SessionMessageQueue {
 
   async recoverStopConfirmationTimeout(): Promise<void> {
     const awaitingStop = this.messageRepository.getMessageAwaitingStopConfirmation();
-    if (!awaitingStop || awaitingStop.deadline > Date.now()) return;
+    if (!awaitingStop) return;
+    if (awaitingStop.deadline > Date.now()) {
+      // An earlier deadline may have consumed the single alarm slot; keep
+      // this one armed so the stop cannot wait on unrelated work.
+      await this.alarmScheduler.schedule(awaitingStop.deadline);
+      return;
+    }
     this.log.warn("Sandbox did not confirm stop before deadline", {
       event: "prompt.stop_confirmation_timeout",
       message_id: awaitingStop.id,

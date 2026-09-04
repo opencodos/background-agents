@@ -104,7 +104,6 @@ function createClientInfo(overrides: Partial<ClientInfo> = {}): ClientInfo {
     lastSeen: 1000,
     clientId: "client-1",
     authorizationExpiresAt: Date.now() + 300_000,
-    ws: {} as WebSocket,
     ...overrides,
   };
 }
@@ -1354,6 +1353,20 @@ describe("SessionMessageQueue", () => {
     );
     expect(h.repository.clearMessageAwaitingStopConfirmation).not.toHaveBeenCalled();
     expect(h.repository.getNextPendingMessage).toHaveBeenCalled();
+  });
+
+  it("re-arms a future stop confirmation deadline when an earlier alarm fired", async () => {
+    const h = buildQueue();
+    const deadline = Date.now() + 10_000;
+    h.repository.getMessageAwaitingStopConfirmation.mockReturnValue({
+      id: "msg-stopped",
+      deadline,
+    });
+
+    await h.queue.recoverStopConfirmationTimeout();
+
+    expect(h.sandboxLifecycle.terminateUnresponsiveSandbox).not.toHaveBeenCalled();
+    expect(h.setAlarm).toHaveBeenCalledExactlyOnceWith(deadline);
   });
 
   it("clears the marker and resumes only after definitive sandbox termination", async () => {

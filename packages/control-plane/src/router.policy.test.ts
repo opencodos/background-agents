@@ -1,14 +1,53 @@
 import { describe, expect, it, vi } from "vitest";
-import { enforceRoutePrincipal, handleRequest, routes } from "./router";
-import { TEST_BACKGROUND_TASK_CONTEXT } from "./router.test-support";
+import { enforceRoutePrincipal } from "./routing/route-admission";
+import {
+  handleRequest,
+  matchRoute,
+  routeContracts as routes,
+  TEST_BACKGROUND_TASK_CONTEXT,
+  TEST_SERVICE_SECRETS,
+} from "./router.test-support";
 import { serviceAllowsPermission } from "./authorization/service-permissions";
 import { SCOPED_PERMISSION_PAIRS } from "@open-inspect/shared/rbac";
 
 function routeFor(method: string, path: string) {
-  return routes.find((route) => route.method === method && route.pattern.test(path));
+  return matchRoute(routes, method, path)?.route;
 }
 
 describe("route policy table", () => {
+  it("publishes the complete canonical route catalog", () => {
+    expect(routes).toHaveLength(179);
+
+    const paths = routes.map((route) => route.path);
+    expect(new Set(paths).size).toBe(136);
+    expect(new Set(routes.map((route) => `${route.method}:${route.path}`)).size).toBe(179);
+  });
+
+  it("declares every path in the literal-or-parameter grammar", () => {
+    // Hono gives `*`, `?`, `{...}` and `.` routing meaning, and raw parameters
+    // are read back from the pathname by position, so a path outside this
+    // grammar could be selected by Hono and yield the wrong parameters.
+    for (const route of routes) {
+      expect(route.path, `${route.method} ${route.path}`).toMatch(/^(\/([A-Za-z0-9_-]+|:\w+))+$/);
+    }
+  });
+
+  it.each([
+    ["GET", "/sessions/inbox", "/sessions/:id"],
+    ["GET", "/model-provider-accounts/legacy-credentials", "/model-provider-accounts/:id"],
+  ])("orders the static overlap %s %s before %s", (method, staticPath, dynamicPath) => {
+    const staticIndex = routes.findIndex(
+      (route) => route.method === method && route.path === staticPath
+    );
+    const dynamicIndex = routes.findIndex(
+      (route) => route.method === method && route.path === dynamicPath
+    );
+
+    expect(staticIndex).toBeGreaterThanOrEqual(0);
+    expect(dynamicIndex).toBeGreaterThanOrEqual(0);
+    expect(staticIndex).toBeLessThan(dynamicIndex);
+  });
+
   it("has complete metadata", () => {
     expect(routes.length).toBeGreaterThan(0);
     expect(
@@ -22,7 +61,7 @@ describe("route policy table", () => {
   });
 
   it("has no duplicate method and pattern declarations", () => {
-    const identities = routes.map((route) => `${route.method}:${route.pattern}`);
+    const identities = routes.map((route) => `${route.method}:${route.path}`);
     expect(new Set(identities).size).toBe(identities.length);
   });
 
@@ -48,13 +87,13 @@ describe("route policy table", () => {
         expect(authorization.allOf.length).toBeGreaterThan(0);
         for (const requirement of authorization.allOf) {
           if (requirement.kind === "automation") {
-            expect(route.pattern.source).toContain(`?<${requirement.automationIdParam}>`);
+            expect(route.path.split("/")).toContain(`:${requirement.automationIdParam}`);
           }
         }
         if (authorization.service.kind === "actor") {
           for (const grant of authorization.service.actorlessGrants ?? []) {
             for (const pathParam of Object.keys(grant.pathParams ?? {})) {
-              expect(route.pattern.source).toContain(`?<${pathParam}>`);
+              expect(route.path.split("/")).toContain(`:${pathParam}`);
             }
           }
         }
@@ -78,6 +117,8 @@ describe("route policy table", () => {
     ],
     ["GET", "/integration-settings/slack/watched-channels", [{ service: "slack-bot" }]],
     ["GET", "/model-preferences", [{ service: "slack-bot" }]],
+    ["GET", "/sessions/session-1/events", [{ service: "slack-bot" }, { service: "linear-bot" }]],
+    ["GET", "/sessions/session-1/artifacts", [{ service: "slack-bot" }, { service: "linear-bot" }]],
   ])("declares the exact actorless grants for %s %s", (method, path, expected) => {
     const authorization = routeFor(method, path)?.authorization;
     expect(["active-user", "active-global"]).toContain(authorization?.kind);
@@ -99,6 +140,8 @@ describe("route policy table", () => {
       routeFor("GET", "/integration-settings/github/resolved/acme/widgets"),
       routeFor("GET", "/integration-settings/slack/watched-channels"),
       routeFor("GET", "/model-preferences"),
+      routeFor("GET", "/sessions/session-1/events"),
+      routeFor("GET", "/sessions/session-1/artifacts"),
       routeFor("POST", "/sessions/session-1/stop"),
       routeFor("GET", "/sessions/session-1/media/artifact-1"),
     ]);
@@ -122,7 +165,7 @@ describe("route policy table", () => {
           if (requirement.kind === "permission") {
             expect(
               serviceAllowsPermission(grant.service, requirement.permission),
-              `${grant.service} must allow ${requirement.permission} for ${route.method} ${route.pattern}`
+              `${grant.service} must allow ${requirement.permission} for ${route.method} ${route.path}`
             ).toBe(true);
           } else if (requirement.kind === "scoped-permission") {
             expect(
@@ -137,6 +180,11 @@ describe("route policy table", () => {
   it("keeps contextual route requirements explicit", () => {
     expect(routeFor("GET", "/keyboard-shortcuts")?.authorization).toEqual({
       kind: "active-self",
+      auditAllowed: false,
+    });
+    expect(routeFor("PUT", "/keyboard-shortcuts")?.authorization).toEqual({
+      kind: "active-self",
+      auditAllowed: true,
     });
     expect(routeFor("GET", "/model-preferences")?.authorization).toMatchObject({
       kind: "active-global",
@@ -151,6 +199,16 @@ describe("route policy table", () => {
       kind: "active-user",
       allOf: [{ kind: "permission", permission: "sessions.read" }],
       service: { kind: "deny" },
+    });
+    expect(routeFor("GET", "/audit-events")).toMatchObject({
+      authentication: { kind: "user" },
+      authorization: {
+        kind: "active-user",
+        allOf: [{ kind: "permission", permission: "workspace.audit.read" }],
+        service: { kind: "deny" },
+        auditAllowed: false,
+      },
+      cacheControl: "private, no-store",
     });
     expect(routeFor("POST", "/sessions/session-1/ws-token")?.authorization).toMatchObject({
       kind: "active-user",
@@ -186,24 +244,20 @@ describe("route policy table", () => {
     });
   });
 
-  it("returns 400 for a malformed percent-encoded role ID before querying D1", async () => {
-    const path = "/roles/%E0%A4%A";
-    const route = routeFor("GET", path);
-    const match = path.match(route!.pattern)!;
+  it("refuses a malformed percent-encoded role ID before authentication or D1", async () => {
+    // Hono leaves the segment undecoded; admission refuses it before the
+    // principal is resolved, so neither authentication nor the role lookup
+    // touches D1.
     const prepare = vi.fn();
 
-    const response = await route!.handler(
-      new Request(`https://test.local${path}`),
-      {} as never,
-      match,
-      {
-        principal: { kind: "user", userId: "user-1" },
-        db: { prepare },
-      } as never
+    const response = await handleRequest(
+      new Request("https://test.local/roles/%E0%A4%A"),
+      { ...TEST_SERVICE_SECRETS, DB: { prepare } } as never,
+      TEST_BACKGROUND_TASK_CONTEXT
     );
 
     expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toEqual({ error: "Invalid role ID" });
+    await expect(response.json()).resolves.toEqual({ error: "Invalid path encoding" });
     expect(prepare).not.toHaveBeenCalled();
   });
 
@@ -259,13 +313,12 @@ describe("route policy table", () => {
     ["PUT", "/sessions/session-1/diff"],
     ["POST", "/sessions/session-1/diff/failure"],
   ])("allows user/service auth with sandbox fallback for %s %s", (method, path) => {
-    const route = routeFor(method, path);
-    const match = path.match(route!.pattern)!;
-    expect(route?.authentication.kind).toBe("user-or-service-with-sandbox-fallback");
-    if (route?.authentication.kind === "user-or-service-with-sandbox-fallback") {
-      expect(route.authentication.getSessionId(match)).toBe("session-1");
+    const { route, params } = matchRoute(routes, method, path)!;
+    expect(route.authentication.kind).toBe("user-or-service-with-sandbox-fallback");
+    if (route.authentication.kind === "user-or-service-with-sandbox-fallback") {
+      expect(route.authentication.getSessionId(params)).toBe("session-1");
     }
-    expect(route?.authorization.kind).toBe("active-user");
+    expect(route.authorization.kind).toBe("active-user");
   });
 
   it.each([
@@ -278,11 +331,10 @@ describe("route policy table", () => {
     ["GET", "/sessions/session-1/sandbox-skills"],
     ["POST", "/sessions/session-1/provider-auth/openai/access-token"],
   ])("requires the bound sandbox for %s %s", (method, path) => {
-    const route = routeFor(method, path);
-    const match = path.match(route!.pattern)!;
-    expect(route?.authentication.kind).toBe("sandbox");
-    if (route?.authentication.kind === "sandbox") {
-      expect(route.authentication.getSessionId(match)).toBe(
+    const { route, params } = matchRoute(routes, method, path)!;
+    expect(route.authentication.kind).toBe("sandbox");
+    if (route.authentication.kind === "sandbox") {
+      expect(route.authentication.getSessionId(params)).toBe(
         path.includes("/children/") ? "parent-1" : "session-1"
       );
     }
@@ -333,6 +385,7 @@ describe("route policy table", () => {
   it.each([
     ["GET", "/scm-settings"],
     ["GET", "/analytics/summary"],
+    ["GET", "/analytics/dashboard"],
     ["GET", "/skills"],
     ["GET", "/skill-profiles"],
     ["GET", "/sessions/session-1"],
@@ -479,7 +532,7 @@ describe("route principal policy", () => {
     ],
     [{ kind: "service" } as const, { kind: "user", userId: "user-1" } as const, 403],
   ])("rejects mismatched principals for %o", (authentication, principal, status) => {
-    expect(enforceRoutePrincipal(authentication, principal, "GET")?.status).toBe(status);
+    expect(enforceRoutePrincipal(authentication, principal, "GET")?.response.status).toBe(status);
   });
 
   const tokenPrincipal = {
@@ -499,14 +552,16 @@ describe("route principal policy", () => {
       // The trust boundary for the read-only claim: the route itself accepts
       // any user-or-service principal, so only this check stands between a
       // leaked token and DELETE /sessions/:id.
-      expect(enforceRoutePrincipal(readRoute, tokenPrincipal, method)?.status).toBe(403);
+      expect(enforceRoutePrincipal(readRoute, tokenPrincipal, method)?.response.status).toBe(403);
     }
   );
 
   it("keeps human-only routes human-only, so a token cannot mint another token", () => {
     // /access-tokens is a { kind: "user" } route. An access token reaching it
     // would make revocation meaningless.
-    expect(enforceRoutePrincipal({ kind: "user" }, tokenPrincipal, "GET")?.status).toBe(403);
+    expect(enforceRoutePrincipal({ kind: "user" }, tokenPrincipal, "GET")?.response.status).toBe(
+      403
+    );
   });
 
   it("leaves services unrestricted by method", () => {

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Principal } from "../auth/principal";
 import { SessionIndexStore } from "../db/session-index";
 import type { SqlDatabase } from "../db/sql-database";
+import { listRouteContracts } from "../routing/route-contracts";
 import type { SessionRuntimeClient } from "../session/runtime-client";
 import type { Env } from "../types";
 import {
@@ -12,15 +13,9 @@ import {
   handleSweepStaleReviews,
 } from "./github-reviews";
 import type { SessionRouteContext } from "./session-route";
-import { parsePattern, type RequestContext } from "./shared";
+import type { RequestContext } from "./shared";
 
 const GITHUB_BOT_PRINCIPAL: Principal = { kind: "service", service: "github-bot", actor: null };
-
-function routeMatch(path: string, pattern: string): RegExpMatchArray {
-  const match = path.match(parsePattern(pattern));
-  if (!match) throw new Error("Expected route match");
-  return match;
-}
 
 function jsonRequest(url: string, body: unknown): Request {
   return new Request(url, {
@@ -138,14 +133,17 @@ describe("auth gating", () => {
   it.each(["/internal/github-reviews/claim", "/internal/github-reviews/sweep"])(
     "declares %s as github-bot-only service authorization",
     (path) => {
-      const route = githubReviewRoutes.find((candidate) => candidate.pattern.test(path));
-      if (!route) throw new Error(`No route registered for ${path}`);
+      const contract = listRouteContracts(githubReviewRoutes).find(
+        (candidate) => candidate.method === "POST" && candidate.path === path
+      );
+      if (!contract) throw new Error(`No route registered for ${path}`);
 
-      expect(route.authentication).toEqual({ kind: "service" });
-      expect(route.authorization).toEqual({
+      expect(contract.authentication).toEqual({ kind: "service" });
+      expect(contract.authorization).toEqual({
         kind: "service",
         services: ["github-bot"],
         actor: "optional",
+        auditAllowed: true,
       });
     }
   );
@@ -161,7 +159,7 @@ describe("handleClaimReviewGeneration", () => {
         prNumber: 42,
       }),
       {} as Env,
-      routeMatch("/internal/github-reviews/claim", "/internal/github-reviews/claim"),
+      {},
       requestContext(db, GITHUB_BOT_PRINCIPAL)
     );
 
@@ -178,7 +176,7 @@ describe("handleClaimReviewGeneration", () => {
         prNumber: 0,
       }),
       {} as Env,
-      routeMatch("/internal/github-reviews/claim", "/internal/github-reviews/claim"),
+      {},
       requestContext(db, GITHUB_BOT_PRINCIPAL)
     );
 
@@ -201,7 +199,7 @@ describe("handleSweepStaleReviews", () => {
         generation: 3,
       }),
       {} as Env,
-      routeMatch("/internal/github-reviews/sweep", "/internal/github-reviews/sweep"),
+      {},
       sweepContext(db, fetch, GITHUB_BOT_PRINCIPAL)
     );
 
@@ -227,7 +225,7 @@ describe("handleSweepStaleReviews", () => {
         generation: 3,
       }),
       {} as Env,
-      routeMatch("/internal/github-reviews/sweep", "/internal/github-reviews/sweep"),
+      {},
       sweepContext(db, fetch, GITHUB_BOT_PRINCIPAL)
     );
 
@@ -255,7 +253,7 @@ describe("handleSweepStaleReviews", () => {
         generation: 3,
       }),
       {} as Env,
-      routeMatch("/internal/github-reviews/sweep", "/internal/github-reviews/sweep"),
+      {},
       sweepContext(db, fetch, GITHUB_BOT_PRINCIPAL)
     );
 
@@ -288,7 +286,7 @@ describe("handleSweepStaleReviews", () => {
         generation: 3,
       }),
       {} as Env,
-      routeMatch("/internal/github-reviews/sweep", "/internal/github-reviews/sweep"),
+      {},
       sweepContext(db, fetch, GITHUB_BOT_PRINCIPAL)
     );
 
@@ -313,7 +311,7 @@ describe("handleSweepStaleReviews", () => {
         generation: 3,
       }),
       {} as Env,
-      routeMatch("/internal/github-reviews/sweep", "/internal/github-reviews/sweep"),
+      {},
       sweepContext(db, fetch, GITHUB_BOT_PRINCIPAL)
     );
 
@@ -344,7 +342,7 @@ describe("handleSweepStaleReviews", () => {
         generation: 3,
       }),
       {} as Env,
-      routeMatch("/internal/github-reviews/sweep", "/internal/github-reviews/sweep"),
+      {},
       sweepContext(db, fetch, GITHUB_BOT_PRINCIPAL)
     );
 
@@ -365,7 +363,7 @@ describe("handleSweepStaleReviews", () => {
         generation: -1,
       }),
       {} as Env,
-      routeMatch("/internal/github-reviews/sweep", "/internal/github-reviews/sweep"),
+      {},
       sweepContext(db, vi.fn(), GITHUB_BOT_PRINCIPAL)
     );
 
@@ -375,7 +373,6 @@ describe("handleSweepStaleReviews", () => {
 
 describe("handleReviewOwnership / handleReviewLeaseRelease", () => {
   const OWNERSHIP_PATH = "/sessions/session-1/review-ownership";
-  const OWNERSHIP_PATTERN = "/sessions/:id/review-ownership";
   const SANDBOX_PRINCIPAL: Principal = { kind: "sandbox", sessionId: "session-1" };
 
   function ownershipRequest(method = "GET"): Request {
@@ -388,7 +385,7 @@ describe("handleReviewOwnership / handleReviewLeaseRelease", () => {
     const response = await handleReviewOwnership(
       ownershipRequest(),
       {} as Env,
-      routeMatch(OWNERSHIP_PATH, OWNERSHIP_PATTERN),
+      { id: "session-1" },
       requestContext(db, SANDBOX_PRINCIPAL)
     );
 
@@ -403,7 +400,7 @@ describe("handleReviewOwnership / handleReviewLeaseRelease", () => {
     const response = await handleReviewOwnership(
       ownershipRequest(),
       {} as Env,
-      routeMatch(OWNERSHIP_PATH, OWNERSHIP_PATTERN),
+      { id: "session-1" },
       requestContext(db, SANDBOX_PRINCIPAL)
     );
 
@@ -416,7 +413,7 @@ describe("handleReviewOwnership / handleReviewLeaseRelease", () => {
     const response = await handleReviewLeaseRelease(
       ownershipRequest("DELETE"),
       {} as Env,
-      routeMatch(OWNERSHIP_PATH, OWNERSHIP_PATTERN),
+      { id: "session-1" },
       requestContext(fake.db, SANDBOX_PRINCIPAL)
     );
 
@@ -433,7 +430,7 @@ describe("handleReviewOwnership / handleReviewLeaseRelease", () => {
     ["no principal", undefined],
   ])("rejects %s on acquire and release", async (_name, principal) => {
     const { db } = createFakeDb({ leaseAcquireChanges: 1 });
-    const match = routeMatch(OWNERSHIP_PATH, OWNERSHIP_PATTERN);
+    const match = { id: "session-1" };
 
     const acquire = await handleReviewOwnership(
       ownershipRequest(),
@@ -468,7 +465,7 @@ describe("sweep lease deferral", () => {
         generation: 3,
       }),
       {} as Env,
-      routeMatch("/internal/github-reviews/sweep", "/internal/github-reviews/sweep"),
+      {},
       sweepContext(db, fetch, GITHUB_BOT_PRINCIPAL)
     );
 
@@ -496,7 +493,7 @@ describe("sweep lease deferral", () => {
         generation: 3,
       }),
       {} as Env,
-      routeMatch("/internal/github-reviews/sweep", "/internal/github-reviews/sweep"),
+      {},
       sweepContext(db, fetch, GITHUB_BOT_PRINCIPAL)
     );
 

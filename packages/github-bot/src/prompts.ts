@@ -4,6 +4,7 @@ import {
   REVIEW_PENDING_DESCRIPTION,
   REVIEW_STATUS_CONTEXT,
 } from "./github-auth";
+import { encodeRepositoryPathSegments } from "@open-inspect/shared/types/repositories";
 
 function buildCustomInstructionsSection(instructions: string | null | undefined): string {
   if (!instructions?.trim()) return "";
@@ -105,10 +106,11 @@ export function buildCodeReviewPrompt(params: {
     codeReviewInstructions,
     isSelfReview = false,
   } = params;
-  const reviewEvent = isSelfReview ? "COMMENT" : "COMMENT|APPROVE|REQUEST_CHANGES";
+  const reviewEvent = isSelfReview ? "COMMENT" : "<APPROVE, REQUEST_CHANGES, or COMMENT>";
   const reviewEventGuidance = isSelfReview
     ? "Use COMMENT because GitHub does not allow pull request authors to approve their own PRs."
     : "Use APPROVE if the code looks good, REQUEST_CHANGES if changes are needed,\n   or COMMENT for general feedback.";
+  const repositoryPath = encodeRepositoryPathSegments({ repoOwner: owner, repoName: repo });
 
   const prTitleBlock = buildUntrustedUserContentBlock({
     source: "github_pr_title",
@@ -153,7 +155,9 @@ ${prDescriptionBlock}
    - Code clarity and maintainability
 3. You may read individual files in the repo for additional context beyond the diff
 4. When your review is complete, write the ENTIRE review — summary AND any inline comments —
-   to a single file /tmp/review.json:
+   to a single file /tmp/review.json. Include every inline comment in the file's \`comments\`
+   array; do not create standalone pull request comments. If there are no inline comments, use
+   an empty array:
 
    {
      "body": "<your review summary>",
@@ -179,15 +183,15 @@ ${prDescriptionBlock}
    write calls, so any guard failure mechanically prevents the POST:
 
    session_id="$(printf '%s' "$SESSION_CONFIG" | python3 -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')" && \\
-   snapshot="$(gh api repos/${owner}/${repo}/pulls/${number} --jq '.head.sha + " " + .state + " draft:" + (.draft|tostring)')" && \\
+   snapshot="$(gh api repos/${repositoryPath}/pulls/${number} --jq '.head.sha + " " + .state + " draft:" + (.draft|tostring)')" && \\
    test "$snapshot" = "${headSha} open draft:false" && \\
    curl -fsS -H "Authorization: Bearer $SANDBOX_AUTH_TOKEN" \\
      "$CONTROL_PLANE_URL/sessions/$session_id/review-ownership" && \\
-   review_url="$(gh api repos/${owner}/${repo}/pulls/${number}/reviews \\
+   review_url="$(gh api repos/${repositoryPath}/pulls/${number}/reviews \\
      --method POST \\
      --input /tmp/review.json \\
      --jq '.html_url')" && \\
-   gh api repos/${owner}/${repo}/statuses/${headSha} \\
+   gh api repos/${repositoryPath}/statuses/${headSha} \\
      --method POST \\
      -f state="success" \\
      -f context="${REVIEW_STATUS_CONTEXT}" \\
@@ -206,7 +210,7 @@ ${prDescriptionBlock}
 6. If, and only if, step 5's chain did not reach its status write, close the commit status out
    before you exit, so the review never ends leaving "${REVIEW_PENDING_DESCRIPTION}" behind:
 
-   gh api repos/${owner}/${repo}/statuses/${headSha} \\
+   gh api repos/${repositoryPath}/statuses/${headSha} \\
      --method POST \\
      -f state="error" \\
      -f context="${REVIEW_STATUS_CONTEXT}" \\
@@ -219,7 +223,6 @@ ${prDescriptionBlock}
    nothing. If the head has genuinely moved on, this status lands on the commit that was
    superseded and the newer review publishes its own — so it is safe in every case.
 ${buildSuggestionGuidelines()}
-
 ${buildCustomInstructionsSection(codeReviewInstructions)}
 ${buildCommentGuidelines(isPublic)}`;
 }

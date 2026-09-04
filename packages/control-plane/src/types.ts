@@ -112,7 +112,7 @@ export interface Env {
   LOG_LEVEL?: string; // "debug" | "info" | "warn" | "error" (default: "info")
 }
 
-/** Authenticated client state stored in Durable Object memory. */
+/** Authenticated client state stored in session-runtime memory. */
 export interface ClientInfo {
   participantId: string;
   userId: string;
@@ -123,6 +123,5 @@ export interface ClientInfo {
   clientId: string;
   /** Wall-clock time when this connection's authorization lease expires. */
   authorizationExpiresAt: number;
-  ws: WebSocket;
   lastFetchHistoryAtMs?: number;
 }

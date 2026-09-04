@@ -1,6 +1,9 @@
+import { Hono } from "hono";
 import { z } from "zod";
 import { SessionIndexStore } from "../db/session-index";
 import { createLogger } from "../logger";
+import { admit } from "../routing/admit";
+import type { ControlPlaneHonoEnv } from "../routing/hono-env";
 import {
   archiveOperatorSessionPage,
   authorizeOperatorUserId,
@@ -8,24 +11,16 @@ import {
   type VerifiedOperatorUserId,
 } from "../session/operator-archive";
 import type { Env } from "../types";
-import { sessionRoute, type SessionRouteContext } from "./session-route";
-import {
-  ACTIVE_SELF,
-  defineRoute,
-  error,
-  json,
-  parsePattern,
-  SCM_AGNOSTIC_HUMAN_USER_ROUTE,
-  type Route,
-} from "./shared";
+import { dispatchSession, type SessionRouteContext } from "./session-route";
+import { ACTIVE_SELF, error, json, SCM_AGNOSTIC_HUMAN_USER_ROUTE } from "./shared";
 
 const log = createLogger("operator-session-archive");
 const requestSchema = z.object({ cursor: z.string().nullable().optional() }).strict();
 
-async function handleOperatorSessionArchive(
+export async function handleOperatorSessionArchive(
   request: Request,
   env: Env,
-  _match: RegExpMatchArray,
+  _params: object,
   ctx: SessionRouteContext
 ): Promise<Response> {
   if (ctx.principal?.kind !== "user") return error("Operator access required", 403);
@@ -80,14 +75,10 @@ async function handleOperatorSessionArchive(
   return json(result);
 }
 
-export const sessionOperatorArchiveRoutes: Route[] = [
-  defineRoute(
-    SCM_AGNOSTIC_HUMAN_USER_ROUTE,
-    sessionRoute({
-      method: "POST",
-      pattern: parsePattern("/operator/sessions/archive"),
-      authorization: ACTIVE_SELF,
-      handler: handleOperatorSessionArchive,
-    })
-  ),
-];
+export const sessionOperatorArchiveRoutes = new Hono<ControlPlaneHonoEnv>();
+
+sessionOperatorArchiveRoutes.post(
+  "/operator/sessions/archive",
+  admit({ ...SCM_AGNOSTIC_HUMAN_USER_ROUTE, authorization: ACTIVE_SELF }),
+  (c) => dispatchSession(c, handleOperatorSessionArchive)
+);

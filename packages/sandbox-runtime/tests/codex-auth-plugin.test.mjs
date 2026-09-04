@@ -30,12 +30,25 @@ async function loadProxy(tag) {
  * Route stubbed traffic by path: the control-plane broker always mints a token
  * unless `broker` overrides it, the usage endpoint answers with `usage`, the
  * Codex backend with `codex`, and the platform API always succeeds.
+ *
+ * The plugin dispatches every outbound call as a `Request` object (so a
+ * caller's method, body, and headers survive a retarget to a different
+ * endpoint), so this reads a `Request` back out of either calling
+ * convention instead of assuming a `(url, init)` pair.
  */
 function stubFetch({ codex, broker, usage } = {}) {
   const calls = [];
-  globalThis.fetch = async (url, init) => {
-    const target = String(url);
-    calls.push({ url: target, headers: new Headers(init?.headers), body: init?.body });
+  globalThis.fetch = async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const target = request.url;
+    const body =
+      request.method === "GET" || request.method === "HEAD"
+        ? undefined
+        : await request
+            .clone()
+            .text()
+            .catch(() => undefined);
+    calls.push({ url: target, headers: request.headers, body });
     if (target.includes("/provider-auth/openai/access-token")) {
       return (
         broker?.() ??
@@ -261,4 +274,58 @@ test("stays on the subscription when the usage probe fails", async () => {
 
   assert.equal(await (await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT)).text(), "codex-ok");
   assert.equal(calls.filter((call) => call.url.includes("/codex/responses")).length, 1);
+});
+
+test("preserves a source Request while proxying Codex authentication", async () => {
+  let upstreamRequest;
+  globalThis.fetch = async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    if (request.url.startsWith("https://control.test/")) {
+      return Response.json({
+        accessToken: "access-token",
+        expiresIn: 3600,
+        providerMetadata: { accountId: "account-1" },
+      });
+    }
+    upstreamRequest = request;
+    return new Response(null, { status: 200 });
+  };
+  const loaded = await loadProxy("preserve-request");
+
+  await loaded.fetch(
+    new Request("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: { Authorization: "Bearer dummy", "X-Request-Header": "preserved" },
+      body: "request-body",
+    })
+  );
+
+  assert.equal(upstreamRequest.url, "https://chatgpt.com/backend-api/codex/responses");
+  assert.equal(upstreamRequest.method, "POST");
+  assert.equal(upstreamRequest.headers.get("authorization"), "Bearer access-token");
+  assert.equal(upstreamRequest.headers.get("chatgpt-account-id"), "account-1");
+  assert.equal(upstreamRequest.headers.get("x-request-header"), "preserved");
+  assert.equal(await upstreamRequest.text(), "request-body");
+});
+
+test("preserves caller authorization after switching away from OAuth", async () => {
+  let upstreamRequest;
+  globalThis.fetch = async (input, init) => {
+    upstreamRequest = input instanceof Request ? input : new Request(input, init);
+    return new Response(null, { status: 200 });
+  };
+  let authReadCount = 0;
+  const getAuth = async () =>
+    authReadCount++ === 0 ? { type: "oauth", refresh: "managed" } : { type: "api" };
+  const { CodexAuthProxy } = await import(`${PLUGIN_PATH}?case=switch-away`);
+  const plugin = await CodexAuthProxy({ client: { auth: { set: async () => undefined } } });
+  const loaded = await plugin.auth.loader(getAuth, { models: {} });
+
+  await loaded.fetch(
+    new Request("https://api.openai.com/v1/responses", {
+      headers: { Authorization: "Bearer caller-token" },
+    })
+  );
+
+  assert.equal(upstreamRequest.headers.get("authorization"), "Bearer caller-token");
 });

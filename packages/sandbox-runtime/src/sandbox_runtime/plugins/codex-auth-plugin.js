@@ -88,23 +88,6 @@ async function ensureAccessToken(getAuth, setAuth) {
   };
 }
 
-function headersFrom(init) {
-  const headers = new Headers();
-  if (!init?.headers) return headers;
-  if (init.headers instanceof Headers) {
-    init.headers.forEach((value, key) => headers.set(key, value));
-  } else if (Array.isArray(init.headers)) {
-    for (const [key, value] of init.headers) {
-      if (value !== undefined) headers.set(key, String(value));
-    }
-  } else {
-    for (const [key, value] of Object.entries(init.headers)) {
-      if (value !== undefined) headers.set(key, String(value));
-    }
-  }
-  return headers;
-}
-
 function isModelRequest(url) {
   return url.pathname.includes("/v1/responses") || url.pathname.includes("/chat/completions");
 }
@@ -184,11 +167,9 @@ async function probeUsedPercent(accessToken, accountId) {
   return highest;
 }
 
-function spilloverHeaders(headers, apiKey) {
-  const next = new Headers(headers);
-  for (const name of CHATGPT_ONLY_HEADERS) next.delete(name);
-  next.set("authorization", `Bearer ${apiKey}`);
-  return next;
+function applySpilloverHeaders(headers, apiKey) {
+  for (const name of CHATGPT_ONLY_HEADERS) headers.delete(name);
+  headers.set("authorization", `Bearer ${apiKey}`);
 }
 
 /** Re-materialize a response whose body was read to classify a 429. */
@@ -269,37 +250,34 @@ export const CodexAuthProxy = async (input) => {
         return {
           apiKey: OAUTH_DUMMY_KEY,
           async fetch(requestInput, init) {
-            // Remove dummy API key authorization header
-            if (init?.headers) {
-              if (init.headers instanceof Headers) {
-                init.headers.delete("authorization");
-                init.headers.delete("Authorization");
-              } else if (Array.isArray(init.headers)) {
-                init.headers = init.headers.filter(
-                  ([key]) => key.toLowerCase() !== "authorization"
-                );
-              } else {
-                delete init.headers["authorization"];
-                delete init.headers["Authorization"];
-              }
-            }
+            const request = new Request(requestInput, init);
 
             const currentAuth = await getAuth();
-            if (currentAuth.type !== "oauth") return fetch(requestInput, init);
+            if (currentAuth.type !== "oauth") return fetch(request);
 
-            const parsed =
-              requestInput instanceof URL
-                ? requestInput
-                : new URL(typeof requestInput === "string" ? requestInput : requestInput.url);
-            const headers = headersFrom(init);
+            request.headers.delete("authorization");
+
+            const parsed = new URL(request.url);
             const modelRequest = isModelRequest(parsed);
             const fallbackKey = (modelRequest && process.env[FALLBACK_KEY_ENV]) || "";
 
+            // Retarget a clone of `request` at `url`, preserving its method,
+            // body, and every other header — a bare `{ ...init, headers }`
+            // drops all of that when the caller passed a Request with no
+            // separate `init`. Cloning first, rather than passing `request`
+            // itself, keeps `request`'s body unread so a spillover retry can
+            // retarget it again after the primary attempt already consumed
+            // its own clone.
+            const requestFor = (url) => new Request(url, request.clone());
+
+            const spilloverRequest = () => {
+              const proxied = requestFor(OPENAI_API_ENDPOINT);
+              applySpilloverHeaders(proxied.headers, fallbackKey);
+              return proxied;
+            };
+
             if (fallbackKey && spilloverLatched) {
-              return fetch(OPENAI_API_ENDPOINT, {
-                ...init,
-                headers: spilloverHeaders(headers, fallbackKey),
-              });
+              return fetch(spilloverRequest());
             }
 
             let accessToken;
@@ -309,14 +287,11 @@ export const CodexAuthProxy = async (input) => {
             } catch (error) {
               if (!fallbackKey) throw error;
               latchSpillover(`subscription token unavailable (${error.message})`);
-              return fetch(OPENAI_API_ENDPOINT, {
-                ...init,
-                headers: spilloverHeaders(headers, fallbackKey),
-              });
+              return fetch(spilloverRequest());
             }
 
-            headers.set("authorization", `Bearer ${accessToken}`);
-            if (accountId) headers.set("ChatGPT-Account-Id", accountId);
+            request.headers.set("authorization", `Bearer ${accessToken}`);
+            if (accountId) request.headers.set("ChatGPT-Account-Id", accountId);
 
             const maxPercent = fallbackKey ? subscriptionMaxPercent() : 100;
 
@@ -329,10 +304,7 @@ export const CodexAuthProxy = async (input) => {
                 const used = await probeUsedPercent(accessToken, accountId);
                 if (used !== null && used >= maxPercent) {
                   latchSpillover(`subscription usage at ${used}% of the ${maxPercent}% ceiling`);
-                  return fetch(OPENAI_API_ENDPOINT, {
-                    ...init,
-                    headers: spilloverHeaders(headers, fallbackKey),
-                  });
+                  return fetch(spilloverRequest());
                 }
               } catch (error) {
                 console.error(
@@ -341,10 +313,7 @@ export const CodexAuthProxy = async (input) => {
               }
             }
 
-            const response = await fetch(modelRequest ? CODEX_API_ENDPOINT : parsed, {
-              ...init,
-              headers,
-            });
+            const response = await fetch(requestFor(modelRequest ? CODEX_API_ENDPOINT : parsed));
             if (!fallbackKey) return response;
 
             // A stream that has already started cannot be replayed, so a spent
@@ -361,10 +330,7 @@ export const CodexAuthProxy = async (input) => {
               return replayResponse(response, bodyText);
             }
             latchSpillover(reason);
-            return fetch(OPENAI_API_ENDPOINT, {
-              ...init,
-              headers: spilloverHeaders(headers, fallbackKey),
-            });
+            return fetch(spilloverRequest());
           },
         };
       },

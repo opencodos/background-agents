@@ -8,20 +8,21 @@
  * a distinct kind precisely so this policy excludes them.
  */
 
+import { Hono } from "hono";
+import { parseBody } from "./body";
 import {
   ACCESS_TOKEN_MAX_TTL_DAYS,
   createAccessTokenRequestSchema,
 } from "@open-inspect/shared/types/access-tokens";
 import { PersonalAccessTokenStore } from "../db/personal-access-tokens";
+import { admit, dispatch } from "../routing/admit";
+import type { ControlPlaneHonoEnv } from "../routing/hono-env";
 import type { Env } from "../types";
 import {
   ACTIVE_SELF,
-  defineRoutes,
   error,
   json,
-  parsePattern,
   SCM_AGNOSTIC_HUMAN_USER_ROUTE,
-  type Route,
   type UserRouteContext,
 } from "./shared";
 
@@ -30,7 +31,7 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
 async function listTokens(
   _request: Request,
   _env: Env,
-  _match: RegExpMatchArray,
+  _params: object,
   ctx: UserRouteContext
 ): Promise<Response> {
   const tokens = await new PersonalAccessTokenStore(ctx.db).list(ctx.principal.userId);
@@ -40,25 +41,17 @@ async function listTokens(
 async function createToken(
   request: Request,
   _env: Env,
-  _match: RegExpMatchArray,
+  _params: object,
   ctx: UserRouteContext
 ): Promise<Response> {
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return error("Invalid JSON body", 400);
-  }
+  const parsed = await parseBody(
+    request,
+    createAccessTokenRequestSchema,
+    `Invalid access token request: a name is required and expiresInDays must be 1-${ACCESS_TOKEN_MAX_TTL_DAYS}`
+  );
+  if (parsed instanceof Response) return parsed;
 
-  const parsed = createAccessTokenRequestSchema.safeParse(body);
-  if (!parsed.success) {
-    return error(
-      `Invalid access token request: a name is required and expiresInDays must be 1-${ACCESS_TOKEN_MAX_TTL_DAYS}`,
-      400
-    );
-  }
-
-  const { name, expiresInDays } = parsed.data;
+  const { name, expiresInDays } = parsed;
   const created = await new PersonalAccessTokenStore(ctx.db).create({
     userId: ctx.principal.userId,
     name,
@@ -75,33 +68,31 @@ async function createToken(
 async function revokeToken(
   _request: Request,
   _env: Env,
-  match: RegExpMatchArray,
+  params: { id: string },
   ctx: UserRouteContext
 ): Promise<Response> {
-  const id = match.groups?.id;
-  if (!id) return error("Invalid access token id", 400);
+  const { id } = params;
   const revoked = await new PersonalAccessTokenStore(ctx.db).revoke(ctx.principal.userId, id);
   if (!revoked) return error("Access token not found", 404);
   return json({ revoked: true });
 }
 
-export const accessTokenRoutes: Route[] = defineRoutes(SCM_AGNOSTIC_HUMAN_USER_ROUTE, [
-  {
-    method: "GET",
-    pattern: parsePattern("/access-tokens"),
-    authorization: ACTIVE_SELF,
-    handler: listTokens,
-  },
-  {
-    method: "POST",
-    pattern: parsePattern("/access-tokens"),
-    authorization: ACTIVE_SELF,
-    handler: createToken,
-  },
-  {
-    method: "DELETE",
-    pattern: parsePattern("/access-tokens/:id"),
-    authorization: ACTIVE_SELF,
-    handler: revokeToken,
-  },
-]);
+export const accessTokenRoutes = new Hono<ControlPlaneHonoEnv>();
+
+accessTokenRoutes.get(
+  "/access-tokens",
+  admit({ ...SCM_AGNOSTIC_HUMAN_USER_ROUTE, authorization: ACTIVE_SELF }),
+  (c) => dispatch(c, listTokens)
+);
+
+accessTokenRoutes.post(
+  "/access-tokens",
+  admit({ ...SCM_AGNOSTIC_HUMAN_USER_ROUTE, authorization: ACTIVE_SELF }),
+  (c) => dispatch(c, createToken)
+);
+
+accessTokenRoutes.delete(
+  "/access-tokens/:id",
+  admit({ ...SCM_AGNOSTIC_HUMAN_USER_ROUTE, authorization: ACTIVE_SELF }),
+  (c) => dispatch(c, revokeToken)
+);

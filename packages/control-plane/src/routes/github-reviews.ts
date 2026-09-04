@@ -10,35 +10,27 @@
  * github-bot service principal.
  */
 
+import { Hono } from "hono";
 import { z } from "zod";
+import { parseBody } from "./body";
 import { SessionIndexStore } from "../db/session-index";
 import { createLogger } from "../logger";
+import { admit, dispatch } from "../routing/admit";
+import type { ControlPlaneHonoEnv } from "../routing/hono-env";
 import { SessionInternalPaths } from "../session/contracts";
 import type { Env } from "../types";
 import {
-  defineRoute,
-  defineRoutes,
   error,
   GITHUB_SERVICE_ROUTE,
   json,
   NO_AUTHORIZATION,
-  parseJsonBody,
-  parsePattern,
+  SCM_AGNOSTIC_SANDBOX_ROUTE,
   serviceAuthorized,
   type RequestContext,
-  type Route,
-  type RoutePolicy,
 } from "./shared";
-import { sessionRoute, type SessionRouteContext } from "./session-route";
+import { dispatchSession, type SessionRouteContext } from "./session-route";
 
 const logger = createLogger("router:github-reviews");
-const GITHUB_REVIEW_SANDBOX_ROUTE = {
-  authentication: {
-    kind: "sandbox",
-    getSessionId: (match: RegExpMatchArray) => match.groups?.id ?? null,
-  },
-  supportedScmProviders: ["github"],
-} as const satisfies RoutePolicy;
 
 const claimRequestSchema = z.object({
   repoId: z.number().int().positive(),
@@ -92,14 +84,12 @@ export const REVIEW_SUBMISSION_LEASE_MS = 2 * 60 * 1000;
 export async function handleClaimReviewGeneration(
   request: Request,
   _env: Env,
-  _match: RegExpMatchArray,
+  _params: object,
   ctx: RequestContext
 ): Promise<Response> {
-  const rawBody = await parseJsonBody<unknown>(request);
-  if (rawBody instanceof Response) return rawBody;
-  const parsed = claimRequestSchema.safeParse(rawBody);
-  if (!parsed.success) return error("Invalid claim request body", 400);
-  const { repoId, prNumber } = parsed.data;
+  const parsed = await parseBody(request, claimRequestSchema, "Invalid claim request body");
+  if (parsed instanceof Response) return parsed;
+  const { repoId, prNumber } = parsed;
 
   const row = await ctx.db
     .prepare(
@@ -202,14 +192,12 @@ async function cancelStaleReviewSession(
 export async function handleSweepStaleReviews(
   request: Request,
   _env: Env,
-  _match: RegExpMatchArray,
+  _params: object,
   ctx: SessionRouteContext
 ): Promise<Response> {
-  const rawBody = await parseJsonBody<unknown>(request);
-  if (rawBody instanceof Response) return rawBody;
-  const parsed = sweepRequestSchema.safeParse(rawBody);
-  if (!parsed.success) return error("Invalid sweep request body", 400);
-  const { repoId, prNumber, generation } = parsed.data;
+  const parsed = await parseBody(request, sweepRequestSchema, "Invalid sweep request body");
+  if (parsed instanceof Response) return parsed;
+  const { repoId, prNumber, generation } = parsed;
 
   const stale = await ctx.db
     .prepare(
@@ -267,15 +255,19 @@ export async function handleSweepStaleReviews(
  * without posting. This is the submission-boundary fence that cancellation
  * alone cannot provide: a same-head successor passes the prompt's head-SHA
  * check, but never this one.
+ *
+ * The route policy requires a sandbox principal bound to `params.id`, but
+ * the handler re-checks it directly: this is the submission fence's own
+ * trust boundary, not incidental to it, so it does not rely solely on
+ * admission being wired correctly.
  */
 export async function handleReviewOwnership(
   _request: Request,
   _env: Env,
-  match: RegExpMatchArray,
+  params: { id: string },
   ctx: RequestContext
 ): Promise<Response> {
-  const sessionId = match.groups?.id;
-  if (!sessionId) return error("Session ID required");
+  const sessionId = params.id;
   if (ctx.principal?.kind !== "sandbox" || ctx.principal.sessionId !== sessionId) {
     return error("Unauthorized", 401);
   }
@@ -318,11 +310,10 @@ export async function handleReviewOwnership(
 export async function handleReviewLeaseRelease(
   _request: Request,
   _env: Env,
-  match: RegExpMatchArray,
+  params: { id: string },
   ctx: RequestContext
 ): Promise<Response> {
-  const sessionId = match.groups?.id;
-  if (!sessionId) return error("Session ID required");
+  const sessionId = params.id;
   if (ctx.principal?.kind !== "sandbox" || ctx.principal.sessionId !== sessionId) {
     return error("Unauthorized", 401);
   }
@@ -390,34 +381,28 @@ export async function reapSupersededReviewSessions(
   }
 }
 
-export const githubReviewRoutes: Route[] = [
-  defineRoute(GITHUB_SERVICE_ROUTE, {
-    method: "POST",
-    pattern: parsePattern("/internal/github-reviews/claim"),
-    authorization: serviceAuthorized("github-bot"),
-    handler: handleClaimReviewGeneration,
-  }),
-  defineRoute(
-    GITHUB_SERVICE_ROUTE,
-    sessionRoute({
-      method: "POST",
-      pattern: parsePattern("/internal/github-reviews/sweep"),
-      authorization: serviceAuthorized("github-bot"),
-      handler: handleSweepStaleReviews,
-    })
-  ),
-  ...defineRoutes(GITHUB_REVIEW_SANDBOX_ROUTE, [
-    {
-      method: "GET",
-      pattern: parsePattern("/sessions/:id/review-ownership"),
-      authorization: NO_AUTHORIZATION,
-      handler: handleReviewOwnership,
-    },
-    {
-      method: "DELETE",
-      pattern: parsePattern("/sessions/:id/review-ownership"),
-      authorization: NO_AUTHORIZATION,
-      handler: handleReviewLeaseRelease,
-    },
-  ]),
-];
+export const githubReviewRoutes = new Hono<ControlPlaneHonoEnv>();
+
+githubReviewRoutes.post(
+  "/internal/github-reviews/claim",
+  admit({ ...GITHUB_SERVICE_ROUTE, authorization: serviceAuthorized("github-bot") }),
+  (c) => dispatch(c, handleClaimReviewGeneration)
+);
+
+githubReviewRoutes.post(
+  "/internal/github-reviews/sweep",
+  admit({ ...GITHUB_SERVICE_ROUTE, authorization: serviceAuthorized("github-bot") }),
+  (c) => dispatchSession(c, handleSweepStaleReviews)
+);
+
+githubReviewRoutes.get(
+  "/sessions/:id/review-ownership",
+  admit({ ...SCM_AGNOSTIC_SANDBOX_ROUTE, authorization: NO_AUTHORIZATION }),
+  (c) => dispatch(c, handleReviewOwnership)
+);
+
+githubReviewRoutes.delete(
+  "/sessions/:id/review-ownership",
+  admit({ ...SCM_AGNOSTIC_SANDBOX_ROUTE, authorization: NO_AUTHORIZATION }),
+  (c) => dispatch(c, handleReviewLeaseRelease)
+);

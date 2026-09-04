@@ -1,8 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SqlDatabase } from "../db/sql-database";
+import { listRouteContracts } from "../routing/route-contracts";
 import { TEST_BACKGROUND_TASK_CONTEXT } from "../router.test-support";
 import type { Env } from "../types";
-import { sessionOperatorArchiveRoutes } from "./session-operator-archive";
+import {
+  handleOperatorSessionArchive,
+  sessionOperatorArchiveRoutes,
+} from "./session-operator-archive";
+import { withSessionRuntime } from "./session-route";
 import type { RequestContext } from "./shared";
 
 const OPERATOR_USER_ID = "0123456789abcdef0123456789abcdef";
@@ -43,32 +48,27 @@ function createEnv(operatorUserIds: string): Env {
   } as unknown as Env;
 }
 
-function getRoute() {
-  const route = sessionOperatorArchiveRoutes[0];
-  const match = "/operator/sessions/archive".match(route.pattern);
-  if (!match) throw new Error("Operator archive route did not match");
-  return { route, match };
-}
-
-async function post(body: unknown, env: Env, ctx: RequestContext): Promise<Response> {
-  const { route, match } = getRoute();
-  return route.handler(
+function post(body: unknown, env: Env, ctx: RequestContext): Promise<Response> {
+  return handleOperatorSessionArchive(
     new Request("https://control-plane.test/operator/sessions/archive", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
     env,
-    match,
-    ctx
+    {},
+    withSessionRuntime(env, ctx)
   );
 }
 
 describe("operator session archive route", () => {
   it("is restricted to authenticated human users on every SCM provider", () => {
-    const { route } = getRoute();
-    expect(route.authentication).toEqual({ kind: "user" });
-    expect(route.supportedScmProviders).toBe("all");
+    const contract = listRouteContracts(sessionOperatorArchiveRoutes).find(
+      (candidate) => candidate.method === "POST" && candidate.path === "/operator/sessions/archive"
+    );
+    if (!contract) throw new Error("Operator archive route did not match");
+    expect(contract.authentication).toEqual({ kind: "user" });
+    expect(contract.supportedScmProviders).toBe("all");
   });
 
   it("rejects an admitted user who is not an operator", async () => {

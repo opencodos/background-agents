@@ -47,6 +47,15 @@ const SESSION_ALARM_STATE_TABLE_SQL = `CREATE TABLE IF NOT EXISTS session_alarm_
   cancelled INTEGER NOT NULL DEFAULT 0
 );`;
 
+const TERMINAL_MESSAGE_PROJECTION_TABLE_SQL = `CREATE TABLE IF NOT EXISTS terminal_message_projection_pending (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  message_id TEXT NOT NULL,
+  message_created_at INTEGER NOT NULL,
+  completed_at INTEGER NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at INTEGER NOT NULL
+);`;
+
 export const SCHEMA_SQL = `
 -- Core session state
 CREATE TABLE IF NOT EXISTS session (
@@ -180,6 +189,7 @@ CREATE TABLE IF NOT EXISTS sandbox (
   tunnel_urls TEXT,                                 -- JSON mapping of port -> tunnel URL for extra ports
   ttyd_url TEXT,                                    -- ttyd proxy tunnel URL
   ttyd_token TEXT,                                  -- Encrypted JWT token for ttyd auth
+  active_socket_id TEXT,                            -- Bridge socket the session dispatches to (socket:<id> tag)
   created_at INTEGER NOT NULL
 );
 
@@ -196,6 +206,10 @@ ${SESSION_DIFF_TABLE_SQL}
 
 -- Runtime alarm recovery source for hosts that can be adopted by another process.
 ${SESSION_ALARM_STATE_TABLE_SQL}
+
+-- A terminal message whose D1 projection has not landed yet. Only the newest
+-- is kept: the projection is monotonic, so an older one would be a no-op.
+${TERMINAL_MESSAGE_PROJECTION_TABLE_SQL}
 
 -- WebSocket client mapping for hibernation recovery
 CREATE TABLE IF NOT EXISTS ws_client_mapping (
@@ -629,6 +643,16 @@ export const MIGRATIONS: readonly SchemaMigration[] = [
         `ALTER TABLE ws_client_mapping ADD COLUMN authorization_expires_at INTEGER NOT NULL DEFAULT 0`
       );
     },
+  },
+  {
+    id: 47,
+    description: "Persist terminal message projections awaiting retry",
+    run: TERMINAL_MESSAGE_PROJECTION_TABLE_SQL,
+  },
+  {
+    id: 48,
+    description: "Add active_socket_id to sandbox",
+    run: `ALTER TABLE sandbox ADD COLUMN active_socket_id TEXT`,
   },
 ];
 

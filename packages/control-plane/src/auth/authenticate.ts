@@ -13,18 +13,17 @@
 
 import { SERVICE_SIGNATURE_HEADER } from "@open-inspect/shared/service-auth";
 import { authenticateAccessToken, readAccessTokenHeader } from "./user/access-token";
-import { PersonalAccessTokenStore } from "../db/personal-access-tokens";
 import { authenticateSession, SessionIntegrityError } from "./user/session-authenticator";
 import { isAuthError, type AuthResult } from "./result";
 import { authenticateServiceRequest } from "./service/request-authenticator";
 import { createLogger } from "../logger";
-import type { RequestContext } from "../routes/shared";
+import type { AuthenticationRequestServices } from "./request-services";
 import type { Env } from "../types";
 
 const logger = createLogger("auth");
 
 export { isAuthError, type AuthResult } from "./result";
-export { SERVICE_REQUEST_MAX_BODY_BYTES } from "./service/request-authenticator";
+export { SERVICE_REQUEST_MAX_BODY_BYTES } from "@open-inspect/shared/service-auth";
 
 export interface AuthenticationRequirement {
   /**
@@ -37,7 +36,7 @@ export interface AuthenticationRequirement {
 export async function authenticate(
   request: Request,
   env: Env,
-  ctx: RequestContext,
+  ctx: AuthenticationRequestServices,
   requirement: AuthenticationRequirement = {}
 ): Promise<AuthResult> {
   const accessToken = readAccessTokenHeader(request.headers);
@@ -49,10 +48,10 @@ export async function authenticate(
     // Deliberately no `authentication`: that field is browser-session
     // provenance, and a token is not a browser session. Credential authorities
     // that require provenance must not see one here.
-    ctx.executionCtx.submit(
-      () => new PersonalAccessTokenStore(ctx.db).touchLastUsed(authenticated.tokenId, Date.now()),
-      { name: "access-token.touch-last-used", context: { token_id: authenticated.tokenId } }
-    );
+    //
+    // The last-used bookkeeping write happens in the admission layer, not
+    // here: this port is deliberately narrow, and `executionCtx` belongs to
+    // the full admission context.
     return {
       principal: {
         kind: "access-token",

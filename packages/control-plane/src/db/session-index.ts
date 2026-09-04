@@ -694,6 +694,7 @@ export class SessionIndexStore {
         outcome: "no_terminal_message",
         unread: false,
         latestMessageId: null,
+        version: currentReadState.version,
       };
     }
     const outcome =
@@ -707,6 +708,7 @@ export class SessionIndexStore {
       outcome,
       unread: currentReadState.unread,
       latestMessageId,
+      version: currentReadState.version,
     };
   }
 
@@ -717,6 +719,7 @@ export class SessionIndexStore {
     const row = await this.db
       .prepare(
         `SELECT sessions.latest_terminal_message_id,
+                sessions.latest_terminal_message_created_at,
                 ${unreadSql("sessions")} AS unread
          FROM sessions
          LEFT JOIN users viewer ON viewer.id = ?

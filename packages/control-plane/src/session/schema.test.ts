@@ -2,10 +2,11 @@
  * Unit tests for schema migration tracking.
  */
 
-import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import { DatabaseSync } from "node:sqlite";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { applyMigrations, initSchema, MIGRATIONS, SCHEMA_SQL } from "./schema";
 import type { SqlResult, SqlStorage } from "./sql-storage";
+import { createNodeSqlStorage } from "../node/sqlite-storage";
 
 /**
  * Create a mock SqlStorage that tracks calls and supports per-query data.
@@ -39,21 +40,7 @@ function createMockSql() {
 }
 
 function createDatabaseSql(db: DatabaseSync): SqlStorage {
-  return {
-    exec(query: string, ...params: unknown[]): SqlResult {
-      const sqliteParams = params as SQLInputValue[];
-      if (/^\s*(?:PRAGMA|SELECT)\b/i.test(query)) {
-        const rows = db.prepare(query).all(...sqliteParams);
-        return { toArray: () => rows, one: () => rows[0] ?? null };
-      }
-      if (params.length > 0) {
-        db.prepare(query).run(...sqliteParams);
-      } else {
-        db.exec(query);
-      }
-      return { toArray: () => [], one: () => null };
-    },
-  };
+  return createNodeSqlStorage(db).sql;
 }
 
 function expectClientRequestIdIndex(db: DatabaseSync): void {
@@ -284,6 +271,13 @@ describe("applyMigrations", () => {
         "ws_client_mapping ADD COLUMN authorization_expires_at INTEGER NOT NULL DEFAULT 0"
       ),
     ]);
+  });
+
+  it("adds sandbox.active_socket_id for fresh and migrated DOs", () => {
+    expect(SCHEMA_SQL).toContain("active_socket_id TEXT");
+
+    const migration = MIGRATIONS.find((entry) => entry.id === 48);
+    expect(migration?.run).toBe("ALTER TABLE sandbox ADD COLUMN active_socket_id TEXT");
   });
 
   it("keeps repository context consistent at the session table boundary", () => {
