@@ -30,7 +30,7 @@ function createCtx(userId: string): RequestContext {
     executionCtx: TEST_BACKGROUND_TASK_CONTEXT,
     principal: { kind: "user", userId },
     metrics: {
-      d1Queries: [],
+      sqlQueries: [],
       spans: {},
       time: async <T>(_name: string, operation: () => Promise<T>) => operation(),
       summarize: () => ({}),
