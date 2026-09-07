@@ -6,6 +6,8 @@ import {
 } from "./initialize";
 import { SessionIndexStore } from "../db/session-index";
 import { SessionInternalPaths } from "./contracts";
+import type { SqlDatabase } from "../db/sql-database";
+import { fakeSessionRuntimeDispatch } from "../router.test-support";
 
 vi.mock("../db/session-index", () => ({
   SessionIndexStore: vi.fn(),
@@ -65,15 +67,12 @@ describe("initializeSession", () => {
 
   let createMock: ReturnType<typeof vi.fn>;
   let updateStatusMock: ReturnType<typeof vi.fn>;
-  let stubFetchMock: ReturnType<typeof vi.fn>;
+  let stubFetchMock: ReturnType<typeof vi.fn<(request: Request) => Promise<Response>>>;
 
   function createEnv() {
     return {
-      DB: {} as D1Database,
-      SESSION: {
-        idFromName: (name: string) => name,
-        get: () => ({ fetch: stubFetchMock }),
-      },
+      DB: {} as SqlDatabase,
+      SESSION: fakeSessionRuntimeDispatch((request) => stubFetchMock(request)),
     } as never;
   }
 

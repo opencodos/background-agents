@@ -635,8 +635,10 @@ operators may remove legacy keys after legacy-bound sessions are no longer neede
 the session (`OPENAI_API_KEY`, `XAI_API_KEY`) disables broker mode for that provider and is injected
 into the sandbox like any other secret, because OpenCode reads those variables directly.
 
-> **Daytona and Vercel users**: LLM API keys (e.g., `ANTHROPIC_API_KEY` for Claude models) must be
-> added as global secrets. Modal injects these automatically via its own secrets mechanism.
+> **LLM API keys** (e.g., `ANTHROPIC_API_KEY` for Claude models) are added as global secrets. A
+> deployment can instead configure `anthropic_api_key` in Terraform to inject one fleet-wide key
+> into Modal session sandboxes and OpenComputer sandboxes; a global secret of the same name takes
+> precedence over it, and the other providers read only the secret store.
 >
 > **Opt-in model providers**: DeepSeek models require `DEEPSEEK_API_KEY`, and Z.AI Coding Plan
 > models require `ZHIPU_API_KEY`, as a global secret with any sandbox provider. SuperGrok models

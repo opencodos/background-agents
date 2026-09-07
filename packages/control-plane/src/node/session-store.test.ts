@@ -3,7 +3,12 @@ import { chmodSync, existsSync, mkdtempSync, rmSync, statSync, writeFileSync } f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { openSessionStore, type NodeSessionStore } from "./session-store";
+import {
+  createFileSessionStoreProvider,
+  openSessionStore,
+  type NodeSessionStore,
+} from "./session-store";
+import { BUSY_TIMEOUT_MS } from "./sqlite-file";
 
 describe("openSessionStore", () => {
   let dataDir: string;
@@ -34,7 +39,9 @@ describe("openSessionStore", () => {
     expect(store.path).toBe(join(dataDir, "sessions", "session-1.db"));
     expect(existsSync(store.path)).toBe(true);
     expect(store.storage.sql.exec("PRAGMA journal_mode").one()).toEqual({ journal_mode: "wal" });
-    expect(store.storage.sql.exec("PRAGMA busy_timeout").one()).toEqual({ timeout: 5000 });
+    expect(store.storage.sql.exec("PRAGMA busy_timeout").one()).toEqual({
+      timeout: BUSY_TIMEOUT_MS,
+    });
     expect(store.storage.sql.exec("PRAGMA foreign_keys").one()).toEqual({ foreign_keys: 1 });
     expect(
       store.storage.sql.exec("SELECT count(*) AS n FROM sqlite_master WHERE name = 'session'").one()
@@ -113,5 +120,25 @@ describe("openSessionStore", () => {
     const store = open("session-1");
     store.close();
     expect(() => store.storage.sql.exec("SELECT 1")).toThrow("not open");
+  });
+});
+
+describe("createFileSessionStoreProvider", () => {
+  it("opens the same session file openSessionStore does", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "session-store-provider-"));
+    try {
+      const provider = createFileSessionStoreProvider(dataDir);
+      const store = await provider.open("session-1");
+      store.storage.sql.exec("CREATE TABLE marker (v TEXT)");
+      store.close();
+      expect(existsSync(join(dataDir, "sessions", "session-1.db"))).toBe(true);
+
+      const direct = openSessionStore({ dataDir, sessionId: "session-1" });
+      expect(direct.storage.sql.exec("SELECT count(*) AS n FROM marker").one()).toEqual({ n: 0 });
+      direct.close();
+      await expect(provider.open("../escape")).rejects.toThrow("cannot name a session file");
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
   });
 });
