@@ -100,7 +100,7 @@ function makeEnv() {
       );
     }
 
-    return new Response(JSON.stringify({ enabledModels: ["openai/gpt-5.4"] }), {
+    return new Response(JSON.stringify({ enabledModels: ["anthropic/claude-haiku-4-5"] }), {
       status: 200,
       headers: { "Content-Type": "application/json" },
     });
@@ -117,11 +117,11 @@ function makeEnv() {
     DEPLOYMENT_NAME: "test",
     CONTROL_PLANE_URL: "https://control-plane.test",
     WEB_APP_URL: "https://app.test",
-    DEFAULT_MODEL: "openai/gpt-5.4",
-    CLASSIFICATION_MODEL: "openai/gpt-5.4",
+    DEFAULT_MODEL: "anthropic/claude-haiku-4-5",
+    CLASSIFICATION_MODEL: "anthropic/claude-haiku-4-5",
     SLACK_BOT_TOKEN: "xoxb-test",
     SLACK_SIGNING_SECRET: "signing-secret",
-    OPENAI_API_KEY: "test-key",
+    ANTHROPIC_API_KEY: "test-key",
     SERVICE_AUTH_SECRET: "test-secret",
     LOG_LEVEL: "error",
   };
@@ -163,7 +163,7 @@ function mockReposFetch(env: ReturnType<typeof makeEnv>, repos: Array<Record<str
       });
     }
 
-    return new Response(JSON.stringify({ enabledModels: ["openai/gpt-5.4"] }), {
+    return new Response(JSON.stringify({ enabledModels: ["anthropic/claude-haiku-4-5"] }), {
       status: 200,
       headers: { "Content-Type": "application/json" },
     });
@@ -249,7 +249,7 @@ function makeSessionEnv(
       });
     }
 
-    return new Response(JSON.stringify({ enabledModels: ["openai/gpt-5.4"] }), {
+    return new Response(JSON.stringify({ enabledModels: ["anthropic/claude-haiku-4-5"] }), {
       status: 200,
       headers: { "Content-Type": "application/json" },
     });
@@ -615,7 +615,7 @@ describe("POST /events", () => {
         });
       }
 
-      return new Response(JSON.stringify({ enabledModels: ["openai/gpt-5.4"] }), {
+      return new Response(JSON.stringify({ enabledModels: ["anthropic/claude-haiku-4-5"] }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
@@ -833,7 +833,7 @@ describe("POST /events", () => {
         sessionId: "session-1",
         repoId: "acme/app",
         repoFullName: "acme/app",
-        model: "openai/gpt-5.4",
+        model: "anthropic/claude-haiku-4-5",
         reasoningEffort: "max",
         createdAt: Date.now(),
       })
@@ -903,7 +903,7 @@ describe("POST /events", () => {
       sessionId: "session-1",
       repoId: "acme/app",
       repoFullName: "acme/app",
-      model: "openai/gpt-5.4",
+      model: "anthropic/claude-haiku-4-5",
       createdAt: Date.now(),
     };
     await kv.put("thread:C123:111.222", JSON.stringify(mapping));
@@ -956,7 +956,7 @@ describe("POST /events", () => {
         sessionId: "stale-session",
         repoId: "acme/app",
         repoFullName: "acme/app",
-        model: "openai/gpt-5.4",
+        model: "anthropic/claude-haiku-4-5",
         createdAt: Date.now(),
       })
     );
@@ -1024,7 +1024,7 @@ describe("POST /events", () => {
         sessionId: "session-1",
         repoId: "acme/app",
         repoFullName: "acme/app",
-        model: "openai/gpt-5.4",
+        model: "anthropic/claude-haiku-4-5",
         createdAt: Date.now(),
         lastPromptTs: "111.222",
       })
@@ -1085,7 +1085,7 @@ describe("POST /events", () => {
         sessionId: "session-1",
         repoId: "acme/app",
         repoFullName: "acme/app",
-        model: "openai/gpt-5.4",
+        model: "anthropic/claude-haiku-4-5",
         createdAt: Date.now(),
         lastPromptTs: "111.222",
       })
@@ -1168,7 +1168,7 @@ describe("POST /events", () => {
         sessionId: "session-1",
         repoId: "acme/app",
         repoFullName: "acme/app",
-        model: "openai/gpt-5.4",
+        model: "anthropic/claude-haiku-4-5",
         createdAt: Date.now(),
         lastPromptTs: "111.222",
       })
@@ -1254,7 +1254,7 @@ describe("POST /events", () => {
         sessionId: "session-1",
         repoId: "acme/app",
         repoFullName: "acme/app",
-        model: "openai/gpt-5.4",
+        model: "anthropic/claude-haiku-4-5",
         createdAt: Date.now(),
         lastPromptTs: "111.222",
       })
@@ -1306,7 +1306,7 @@ describe("POST /events", () => {
         sessionId: "session-1",
         repoId: "acme/app",
         repoFullName: "acme/app",
-        model: "openai/gpt-5.4",
+        model: "anthropic/claude-haiku-4-5",
         createdAt: Date.now(),
         lastPromptTs: "111.222",
       })
@@ -1509,7 +1509,7 @@ describe("POST /events", () => {
         sessionId: "session-1",
         repoId: "acme/app",
         repoFullName: "acme/app",
-        model: "openai/gpt-5.4",
+        model: "anthropic/claude-haiku-4-5",
         createdAt: Date.now(),
         lastPromptTs: "111.222",
       })
@@ -2067,7 +2067,7 @@ describe("POST /interactions", () => {
       "user_preferences:U123",
       JSON.stringify({
         userId: "U123",
-        model: "openai/gpt-5.4",
+        model: "anthropic/claude-haiku-4-5",
         reasoningEffort: "medium",
         branch: "global-branch",
         updatedAt: Date.now(),
@@ -2115,7 +2115,7 @@ describe("POST /interactions", () => {
         });
       }
 
-      return new Response(JSON.stringify({ enabledModels: ["openai/gpt-5.4"] }), {
+      return new Response(JSON.stringify({ enabledModels: ["anthropic/claude-haiku-4-5"] }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });

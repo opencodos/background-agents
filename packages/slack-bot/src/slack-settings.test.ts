@@ -17,13 +17,13 @@ describe("getSlackSettings", () => {
   it("returns the default model and session instructions from one fetch", async () => {
     const fetch = vi.fn().mockResolvedValue(
       settingsResponse({
-        model: "openai/gpt-5.5",
+        model: "anthropic/claude-sonnet-4-6",
         sessionInstructions: "Prefer minimal diffs.",
       })
     );
 
     await expect(getSlackSettings(makeEnv(fetch))).resolves.toEqual({
-      defaultModel: "openai/gpt-5.5",
+      defaultModel: "anthropic/claude-sonnet-4-6",
       sessionInstructions: "Prefer minimal diffs.",
     });
     expect(fetch).toHaveBeenCalledTimes(1);

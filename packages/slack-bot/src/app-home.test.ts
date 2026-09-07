@@ -23,10 +23,10 @@ describe("buildAppHomeView", () => {
       availableModels: [
         {
           label: longLabel,
-          value: "openai/gpt-5.4",
+          value: "anthropic/claude-haiku-4-5",
         },
       ],
-      currentModel: "openai/gpt-5.4",
+      currentModel: "anthropic/claude-haiku-4-5",
       currentEffort: "max",
       currentBranch: undefined,
       repos: [],
@@ -73,11 +73,11 @@ describe("buildAppHomeView", () => {
       appName: "Open-Inspect",
       availableModels: [
         {
-          label: "GPT 5.4",
-          value: "openai/gpt-5.4",
+          label: "Claude Haiku",
+          value: "anthropic/claude-haiku-4-5",
         },
       ],
-      currentModel: "openai/gpt-5.4",
+      currentModel: "anthropic/claude-haiku-4-5",
       currentEffort: "max",
       currentBranch: undefined,
       repos,

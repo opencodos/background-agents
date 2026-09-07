@@ -332,7 +332,7 @@ describe("handleAgentSessionEvent environment targets", () => {
         issueIdentifier: "ENG-42",
         repoOwner: "acme",
         repoName: "backend",
-        model: "openai/gpt-5.4",
+        model: "anthropic/claude-haiku-4-5",
         createdAt: Date.now(),
       }),
     });
@@ -719,7 +719,7 @@ describe("handleAgentSessionEvent environment targets", () => {
         issueIdentifier: "ENG-42",
         repoOwner: "acme",
         repoName: "backend",
-        model: "openai/gpt-5.4",
+        model: "anthropic/claude-haiku-4-5",
         createdAt: Date.now(),
       }),
     });
@@ -758,7 +758,7 @@ describe("handleAgentSessionEvent environment targets", () => {
         issueIdentifier: "ENG-42",
         issueUrl: "https://linear.app/acme/issue/ENG-42/wire",
         repoFullName: "acme/backend",
-        model: "openai/gpt-5.4",
+        model: "anthropic/claude-haiku-4-5",
         agentSessionId: "agent-session-1",
         organizationId: "org-1",
         appUserId: "app-user-1",
@@ -854,7 +854,7 @@ describe("handleAgentSessionEvent environment targets", () => {
         sessionId: "session-xyz",
         issueId: "issue-1",
         issueIdentifier: "ENG-42",
-        model: "openai/gpt-5.4",
+        model: "anthropic/claude-haiku-4-5",
         createdAt: Date.now(),
       }),
     });
@@ -890,7 +890,7 @@ describe("handleAgentSessionEvent environment targets", () => {
         sessionId: "session-xyz",
         issueId: "issue-1",
         issueIdentifier: "ENG-42",
-        model: "openai/gpt-5.4",
+        model: "anthropic/claude-haiku-4-5",
         createdAt: Date.now(),
       }),
     });
@@ -918,7 +918,7 @@ describe("handleAgentSessionEvent environment targets", () => {
         issueId: "issue-1",
         issueIdentifier: "ENG-42",
         environmentId: "env_abc",
-        model: "openai/gpt-5.4",
+        model: "anthropic/claude-haiku-4-5",
         createdAt: Date.now(),
       }),
     });
@@ -974,7 +974,7 @@ describe("handleAgentSessionEvent environment targets", () => {
         sessionId: "session-xyz",
         issueId: "issue-1",
         issueIdentifier: "ENG-42",
-        model: "openai/gpt-5.4",
+        model: "anthropic/claude-haiku-4-5",
         createdAt: Date.now(),
       }),
     });
@@ -1105,7 +1105,7 @@ describe("handleAgentSessionEvent auth failures", () => {
         issueIdentifier: "ORI-229",
         repoOwner: "ColeMurray",
         repoName: "background-agents",
-        model: "openai/gpt-5.4",
+        model: "anthropic/claude-haiku-4-5",
         agentSessionId: "agent-session-previous",
         createdAt: Date.now(),
       }),

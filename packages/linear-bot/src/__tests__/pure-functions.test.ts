@@ -80,22 +80,12 @@ describe("matchExplicitRepo", () => {
 // ─── extractModelFromLabels ──────────────────────────────────────────────────
 
 describe("extractModelFromLabels", () => {
-  it.each([
-    "haiku",
-    "sonnet",
-    "opus",
-    "opus-4-6",
-    "opus-4-7",
-    "opus-4-8",
-    "opus-5",
-    "fable",
-    "fable-5",
-  ])("returns null for the retired model:%s label", (key) => {
-    expect(extractModelFromLabels([{ name: `model:${key}` }])).toBeNull();
+  it("returns model for a valid label", () => {
+    expect(extractModelFromLabels([{ name: "model:opus" }])).toBe("anthropic/claude-opus-4-5");
   });
 
   it("returns model for case-insensitive label", () => {
-    expect(extractModelFromLabels([{ name: "Model:GPT-5.5" }])).toBe("openai/gpt-5.5");
+    expect(extractModelFromLabels([{ name: "Model:Sonnet" }])).toBe("anthropic/claude-sonnet-4-5");
   });
 
   it("returns GPT 5.4 for model:gpt-5.4 label", () => {
@@ -120,6 +110,18 @@ describe("extractModelFromLabels", () => {
     ["luna", "openai/gpt-5.6-luna"],
   ])("returns GPT 5.6 %s for its model label", (variant, expected) => {
     expect(extractModelFromLabels([{ name: `model:gpt-5.6-${variant}` }])).toBe(expected);
+  });
+
+  it("returns Opus 4.7 for model:opus-4-7 label", () => {
+    expect(extractModelFromLabels([{ name: "model:opus-4-7" }])).toBe("anthropic/claude-opus-4-7");
+  });
+
+  it("returns Opus 5 for model:opus-5 label", () => {
+    expect(extractModelFromLabels([{ name: "model:opus-5" }])).toBe("anthropic/claude-opus-5");
+  });
+
+  it("returns Sonnet 5 for model:sonnet-5 label", () => {
+    expect(extractModelFromLabels([{ name: "model:sonnet-5" }])).toBe("anthropic/claude-sonnet-5");
   });
 
   it("returns null for unknown model label", () => {
@@ -191,23 +193,23 @@ describe("resolveStaticTarget", () => {
 describe("resolveSessionModelSettings", () => {
   it("uses integration model when overrides are disabled", () => {
     const result = resolveSessionModelSettings({
-      envDefaultModel: "openai/gpt-5.6-terra",
-      configModel: "openai/gpt-5.4",
+      envDefaultModel: "anthropic/claude-haiku-4-5",
+      configModel: "anthropic/claude-sonnet-4-6",
       configReasoningEffort: "high",
       allowUserPreferenceOverride: false,
       allowLabelModelOverride: false,
       userModel: "openai/gpt-5.3-codex",
-      labelModel: "openai/gpt-5.6-sol",
+      labelModel: "anthropic/claude-opus-4-6",
     });
 
-    expect(result.model).toBe("openai/gpt-5.4");
+    expect(result.model).toBe("anthropic/claude-sonnet-4-6");
     expect(result.reasoningEffort).toBe("high");
   });
 
   it("applies user preference when enabled", () => {
     const result = resolveSessionModelSettings({
-      envDefaultModel: "openai/gpt-5.6-terra",
-      configModel: "openai/gpt-5.4",
+      envDefaultModel: "anthropic/claude-haiku-4-5",
+      configModel: "anthropic/claude-sonnet-4-6",
       configReasoningEffort: null,
       allowUserPreferenceOverride: true,
       allowLabelModelOverride: false,
@@ -221,8 +223,8 @@ describe("resolveSessionModelSettings", () => {
 
   it("does not let config effort override user effort when user model wins", () => {
     const result = resolveSessionModelSettings({
-      envDefaultModel: "openai/gpt-5.6-terra",
-      configModel: "openai/gpt-5.4",
+      envDefaultModel: "anthropic/claude-haiku-4-5",
+      configModel: "anthropic/claude-sonnet-4-6",
       configReasoningEffort: "low",
       allowUserPreferenceOverride: true,
       allowLabelModelOverride: false,
@@ -236,45 +238,45 @@ describe("resolveSessionModelSettings", () => {
 
   it("applies label override over user preference when enabled", () => {
     const result = resolveSessionModelSettings({
-      envDefaultModel: "openai/gpt-5.6-terra",
+      envDefaultModel: "anthropic/claude-haiku-4-5",
       configModel: null,
       configReasoningEffort: null,
       allowUserPreferenceOverride: true,
       allowLabelModelOverride: true,
-      userModel: "openai/gpt-5.4",
-      labelModel: "openai/gpt-5.3-codex",
-      userReasoningEffort: "max",
+      userModel: "openai/gpt-5.3-codex",
+      labelModel: "anthropic/claude-opus-4-6",
+      userReasoningEffort: "xhigh",
     });
 
-    expect(result.model).toBe("openai/gpt-5.3-codex");
+    expect(result.model).toBe("anthropic/claude-opus-4-6");
     expect(result.reasoningEffort).toBe("high");
   });
 
   it("falls back to model default reasoning effort when invalid", () => {
     const result = resolveSessionModelSettings({
-      envDefaultModel: "openai/gpt-5.6-terra",
-      configModel: "openai/gpt-5.3-codex",
-      configReasoningEffort: "max",
+      envDefaultModel: "anthropic/claude-haiku-4-5",
+      configModel: "anthropic/claude-opus-4-6",
+      configReasoningEffort: "xhigh",
       allowUserPreferenceOverride: true,
       allowLabelModelOverride: false,
-      userReasoningEffort: "max",
+      userReasoningEffort: "xhigh",
     });
 
-    expect(result.model).toBe("openai/gpt-5.3-codex");
+    expect(result.model).toBe("anthropic/claude-opus-4-6");
     expect(result.reasoningEffort).toBe("high");
   });
 
   it("uses config reasoning effort when config model is selected", () => {
     const result = resolveSessionModelSettings({
-      envDefaultModel: "openai/gpt-5.6-terra",
-      configModel: "openai/gpt-5.6-luna",
+      envDefaultModel: "anthropic/claude-haiku-4-5",
+      configModel: "anthropic/claude-opus-4-6",
       configReasoningEffort: "max",
       allowUserPreferenceOverride: false,
       allowLabelModelOverride: false,
       userReasoningEffort: "low",
     });
 
-    expect(result.model).toBe("openai/gpt-5.6-luna");
+    expect(result.model).toBe("anthropic/claude-opus-4-6");
     expect(result.reasoningEffort).toBe("max");
   });
 });
