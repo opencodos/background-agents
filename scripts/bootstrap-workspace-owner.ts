@@ -216,7 +216,30 @@ WHERE u.id = ${userId};
 
 interface WranglerResult {
   results?: Array<Record<string, unknown>>;
-  success?: boolean;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseWranglerResults(stdout: string): WranglerResult[] {
+  // Remote --file execution can prefix the JSON payload with progress output.
+  const jsonStart = stdout.search(/^\s*\[/m);
+  const jsonEnd = stdout.lastIndexOf("]");
+  if (jsonStart < 0 || jsonEnd < jsonStart) {
+    throw new Error("Wrangler returned a malformed JSON result");
+  }
+  const parsed: unknown = JSON.parse(stdout.slice(jsonStart, jsonEnd + 1));
+  if (!Array.isArray(parsed)) throw new Error("Wrangler returned a malformed JSON result");
+
+  return parsed.map((result) => {
+    if (!isRecord(result)) throw new Error("Wrangler returned a malformed JSON result");
+    const rows = result.results;
+    if (rows !== undefined && (!Array.isArray(rows) || !rows.every(isRecord))) {
+      throw new Error("Wrangler returned a malformed JSON result");
+    }
+    return { results: rows };
+  });
 }
 
 type WranglerRunner = (database: string, operation: readonly string[]) => string;
@@ -229,15 +252,7 @@ export interface BootstrapRunDependencies {
 }
 
 function reportRows(stdout: string): Array<Record<string, unknown>> {
-  // Wrangler emits progress lines before the JSON array for remote --file
-  // execution even when --json is set. Parse the documented JSON payload
-  // without treating that human-readable prefix as part of it.
-  const jsonStart = stdout.search(/^\s*\[/m);
-  const jsonEnd = stdout.lastIndexOf("]");
-  if (jsonStart < 0 || jsonEnd < jsonStart) {
-    throw new Error("Wrangler returned no JSON output");
-  }
-  const parsed = JSON.parse(stdout.slice(jsonStart, jsonEnd + 1)) as WranglerResult[];
+  const parsed = parseWranglerResults(stdout);
   const rows = parsed.flatMap((result) => result.results ?? []).filter((row) => row.report);
   for (const row of rows) console.log(JSON.stringify(row));
   return rows;
