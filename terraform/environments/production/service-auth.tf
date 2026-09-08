@@ -1,8 +1,8 @@
 # Per-service sig1 signing secrets.
 #
 # One secret per first-party service, generated in Terraform state — no
-# operator-supplied variables. The control plane binds one verification
-# key per service as SERVICE_AUTH_SECRET_<SERVICE>; each sender binds exactly its own as
+# operator-supplied variables. The control plane binds four verification
+# keys as SERVICE_AUTH_SECRET_<SERVICE>; each sender binds exactly its own as
 # SERVICE_AUTH_SECRET (a sender signs as itself, so naming its own service in
 # its env var adds nothing).
 
