@@ -69,7 +69,7 @@ module "slack_bot_worker" {
     { name = "WEB_APP_URL", value = local.web_app_url },
     { name = "DEPLOYMENT_NAME", value = var.deployment_name },
     { name = "APP_NAME", value = var.app_name },
-    { name = "DEFAULT_MODEL", value = "openai/gpt-5.6-sol" },
+    { name = "DEFAULT_MODEL", value = var.slack_bot_default_model },
     { name = "CLASSIFICATION_MODEL", value = var.classification_model },
   ]
 
