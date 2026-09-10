@@ -51,6 +51,19 @@ export function isReviewRequestedForBot(payload: unknown, botUsername: string): 
   return parsed.data.requested_reviewer?.login === botUsername;
 }
 
+/**
+ * The account whose token submits reviews, and whether that is a second App.
+ * `hasReviewerApp` gates the prompt's token fetch; `submittingLogin` decides
+ * whether GitHub would refuse an approval as a self-review.
+ */
+function resolveReviewIdentity(env: Env): { submittingLogin: string; hasReviewerApp: boolean } {
+  const reviewerLogin = env.GITHUB_REVIEWER_USERNAME?.trim();
+  return {
+    submittingLogin: reviewerLogin || env.GITHUB_BOT_USERNAME,
+    hasReviewerApp: Boolean(reviewerLogin),
+  };
+}
+
 async function createSession(
   env: Env,
   traceId: string,
@@ -473,6 +486,7 @@ export async function handleReviewRequested(
       );
       log.info("session.created", { ...meta, session_id: sessionId, action: "review" });
 
+      const reviewIdentity = resolveReviewIdentity(env);
       const prompt = buildCodeReviewPrompt({
         owner,
         repo: repoName,
@@ -485,6 +499,8 @@ export async function handleReviewRequested(
         headSha: pr.head.sha,
         isPublic: !repo.private,
         codeReviewInstructions: config.codeReviewInstructions,
+        isSelfReview: pr.user.login.toLowerCase() === reviewIdentity.submittingLogin.toLowerCase(),
+        hasReviewerApp: reviewIdentity.hasReviewerApp,
       });
 
       const messageId = await sendReviewPrompt(
@@ -676,6 +692,7 @@ export async function handlePullRequestReviewTrigger(
       );
       log.info("session.created", { ...meta, session_id: sessionId, action: "auto_review" });
 
+      const reviewIdentity = resolveReviewIdentity(env);
       const prompt = buildCodeReviewPrompt({
         owner,
         repo: repoName,
@@ -688,7 +705,8 @@ export async function handlePullRequestReviewTrigger(
         headSha: pr.head.sha,
         isPublic: !repo.private,
         codeReviewInstructions: config.codeReviewInstructions,
-        isSelfReview: pr.user.login.toLowerCase() === env.GITHUB_BOT_USERNAME.toLowerCase(),
+        isSelfReview: pr.user.login.toLowerCase() === reviewIdentity.submittingLogin.toLowerCase(),
+        hasReviewerApp: reviewIdentity.hasReviewerApp,
       });
 
       const messageId = await sendReviewPrompt(

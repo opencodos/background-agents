@@ -65,20 +65,21 @@ The bot is deployed via Terraform as a standalone Cloudflare Worker alongside th
 
 ### Environment Bindings
 
-| Binding                      | Type                  | Description                                                                         |
-| ---------------------------- | --------------------- | ----------------------------------------------------------------------------------- |
-| `GITHUB_KV`                  | KV namespace          | Delivery dedupe store keyed by `X-GitHub-Delivery`                                  |
-| `AUTOFIX_QUEUE`              | Queue                 | Durable handoff for pull request feedback eligible for Autofix                      |
-| `CONTROL_PLANE`              | Service binding       | Fetcher to the control plane worker                                                 |
-| `DEPLOYMENT_NAME`            | Plain text            | Deployment identifier for logging                                                   |
-| `DEFAULT_MODEL`              | Plain text            | Model ID for new sessions (e.g., `anthropic/claude-haiku-4-5`)                      |
-| `GITHUB_BOT_USERNAME`        | Plain text            | Bot's GitHub login (e.g., `my-app[bot]`) for @mention detection and loop prevention |
-| `GITHUB_APP_ID`              | Secret                | GitHub App ID for JWT generation                                                    |
-| `GITHUB_APP_PRIVATE_KEY`     | Secret                | GitHub App private key (must be PKCS#8 format)                                      |
-| `GITHUB_APP_INSTALLATION_ID` | Secret                | GitHub App installation ID for token exchange                                       |
-| `GITHUB_WEBHOOK_SECRET`      | Secret                | Shared secret for verifying webhook signatures                                      |
-| `SERVICE_AUTH_SECRET`        | Secret                | Per-service sig1 signing secret for control-plane requests                          |
-| `LOG_LEVEL`                  | Plain text (optional) | Log level override (`debug`, `info`, `warn`, `error`)                               |
+| Binding                      | Type                  | Description                                                                           |
+| ---------------------------- | --------------------- | ------------------------------------------------------------------------------------- |
+| `GITHUB_KV`                  | KV namespace          | Delivery dedupe store keyed by `X-GitHub-Delivery`                                    |
+| `AUTOFIX_QUEUE`              | Queue                 | Durable handoff for pull request feedback eligible for Autofix                        |
+| `CONTROL_PLANE`              | Service binding       | Fetcher to the control plane worker                                                   |
+| `DEPLOYMENT_NAME`            | Plain text            | Deployment identifier for logging                                                     |
+| `DEFAULT_MODEL`              | Plain text            | Model ID for new sessions (e.g., `anthropic/claude-haiku-4-5`)                        |
+| `GITHUB_BOT_USERNAME`        | Plain text            | Bot's GitHub login (e.g., `my-app[bot]`) for @mention detection and loop prevention   |
+| `GITHUB_REVIEWER_USERNAME`   | Plain text            | Reviewer App's login (e.g., `codos-reviewer[bot]`), when a second App submits reviews |
+| `GITHUB_APP_ID`              | Secret                | GitHub App ID for JWT generation                                                      |
+| `GITHUB_APP_PRIVATE_KEY`     | Secret                | GitHub App private key (must be PKCS#8 format)                                        |
+| `GITHUB_APP_INSTALLATION_ID` | Secret                | GitHub App installation ID for token exchange                                         |
+| `GITHUB_WEBHOOK_SECRET`      | Secret                | Shared secret for verifying webhook signatures                                        |
+| `SERVICE_AUTH_SECRET`        | Secret                | Per-service sig1 signing secret for control-plane requests                            |
+| `LOG_LEVEL`                  | Plain text (optional) | Log level override (`debug`, `info`, `warn`, `error`)                                 |
 
 ### GitHub App Configuration
 
@@ -138,8 +139,11 @@ All events are processed asynchronously via `executionCtx.waitUntil()`. The webh
 4. Post an eyes reaction on the PR.
 5. Create a session through the control plane.
 6. Send the code review prompt. The prompt posts the completed review, then replaces the status on
-   the same head SHA with `success` and links it to the review. Reviews of the bot's own PRs use
-   `COMMENT`, because GitHub does not allow pull request authors to approve their own PRs.
+   the same head SHA with `success` and links it to the review. The review is submitted by the
+   reviewer App when `GITHUB_REVIEWER_USERNAME` is set — its installation token comes from the
+   control plane's `/sessions/:id/review-token`, and the status writes keep the default credential.
+   Reviews of PRs opened by whichever App submits them use `COMMENT`, because GitHub does not allow
+   pull request authors to approve their own PRs.
 
 **Review Requested (compatibility path):**
 
