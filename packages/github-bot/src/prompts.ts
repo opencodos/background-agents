@@ -91,6 +91,7 @@ export function buildCodeReviewPrompt(params: {
   isPublic: boolean;
   codeReviewInstructions?: string | null;
   isSelfReview?: boolean;
+  hasReviewerApp: boolean;
 }): string {
   const {
     owner,
@@ -105,12 +106,23 @@ export function buildCodeReviewPrompt(params: {
     isPublic,
     codeReviewInstructions,
     isSelfReview = false,
+    hasReviewerApp,
   } = params;
   const reviewEvent = isSelfReview ? "COMMENT" : "<APPROVE, REQUEST_CHANGES, or COMMENT>";
   const reviewEventGuidance = isSelfReview
     ? "Use COMMENT because GitHub does not allow pull request authors to approve their own PRs."
     : "Use APPROVE if the code looks good, REQUEST_CHANGES if changes are needed,\n   or COMMENT for general feedback.";
   const repositoryPath = encodeRepositoryPathSegments({ repoOwner: owner, repoName: repo });
+  const reviewTokenFetch = hasReviewerApp
+    ? `review_token="$(curl -fsS -H "Authorization: Bearer $SANDBOX_AUTH_TOKEN" \\
+     "$CONTROL_PLANE_URL/sessions/$session_id/review-token" \\
+     | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')" && \\
+   `
+    : "";
+  const reviewTokenPrefix = hasReviewerApp ? 'GH_TOKEN="$review_token" ' : "";
+  const reviewTokenFenceClause = hasReviewerApp
+    ? "; the review token is the reviewer App's installation token, fetched from the control\n   plane and used for the review POST alone, so the status writes keep the default\n   credential"
+    : "";
 
   const prTitleBlock = buildUntrustedUserContentBlock({
     source: "github_pr_title",
@@ -187,7 +199,7 @@ ${prDescriptionBlock}
    test "$snapshot" = "${headSha} open draft:false" && \\
    curl -fsS -H "Authorization: Bearer $SANDBOX_AUTH_TOKEN" \\
      "$CONTROL_PLANE_URL/sessions/$session_id/review-ownership" && \\
-   review_url="$(gh api repos/${repositoryPath}/pulls/${number}/reviews \\
+   ${reviewTokenFetch}review_url="$(${reviewTokenPrefix}gh api repos/${repositoryPath}/pulls/${number}/reviews \\
      --method POST \\
      --input /tmp/review.json \\
      --jq '.html_url')" && \\
@@ -203,7 +215,7 @@ ${prDescriptionBlock}
    The fence: the \`test\` asserts the live head is still exactly "${headSha}", open, and not
    a draft; the GET \`curl\` acquires this session's submission lease from the control plane
    (204 = owned; 409 = a newer review session has taken over, curl exits 22); the final
-   DELETE releases the lease after the writes. If ANY part fails — missing environment
+   DELETE releases the lease after the writes${reviewTokenFenceClause}. If ANY part fails — missing environment
    variable, freshness mismatch, ownership 409, network error — the chain stops before or at
    the review POST. In that case post NO review and NO inline comment by any other means.
 

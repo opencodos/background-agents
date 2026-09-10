@@ -509,6 +509,53 @@ describe("handlePullRequestReviewTrigger", () => {
     expect(promptSendBody(getControlPlaneFetch(env)).content).toContain('"event": "COMMENT"');
   });
 
+  it("approves a bot-authored PR when a separate reviewer app submits the review", async () => {
+    // The self-review floor is GitHub's — the submitting account cannot be the PR author — so it
+    // binds to the reviewer app's login, not to this app's. Reading it off GITHUB_BOT_USERNAME
+    // held every automation-opened PR at COMMENT even with a distinct reviewer configured.
+    vi.mocked(getGitHubConfig).mockResolvedValue({
+      ...defaultConfig,
+      allowedTriggerUsers: ["test-bot[bot]"],
+    });
+    const env = { ...createMockEnv(), GITHUB_REVIEWER_USERNAME: "test-reviewer[bot]" } as Env;
+    const log = createMockLogger();
+    const payload: PullRequestReviewTriggerPayload = {
+      ...pullRequestReviewTriggerPayload,
+      pull_request: {
+        ...pullRequestReviewTriggerPayload.pull_request,
+        user: { login: "test-bot[bot]" },
+      },
+      sender: {
+        login: "test-bot[bot]",
+        id: 1004,
+        avatar_url: "https://avatars.githubusercontent.com/u/1004",
+      },
+    };
+
+    await handlePullRequestReviewTrigger(env, log, payload, "trace-0");
+
+    const content = promptSendBody(getControlPlaneFetch(env)).content;
+    expect(content).toContain('"event": "<APPROVE, REQUEST_CHANGES, or COMMENT>"');
+    expect(content).toContain("/review-token");
+    expect(content).not.toContain("does not allow pull request authors to approve their own PRs");
+  });
+
+  it("keeps a PR the reviewer app itself opened at COMMENT", async () => {
+    const env = { ...createMockEnv(), GITHUB_REVIEWER_USERNAME: "test-reviewer[bot]" } as Env;
+    const log = createMockLogger();
+    const payload: PullRequestReviewTriggerPayload = {
+      ...pullRequestReviewTriggerPayload,
+      pull_request: {
+        ...pullRequestReviewTriggerPayload.pull_request,
+        user: { login: "test-reviewer[bot]" },
+      },
+    };
+
+    await handlePullRequestReviewTrigger(env, log, payload, "trace-0");
+
+    expect(promptSendBody(getControlPlaneFetch(env)).content).toContain('"event": "COMMENT"');
+  });
+
   it("reviews a bot-opened PR even when the allowlist names only humans", async () => {
     // A PR this app opened arrives with the app itself as sender. An operator's allowlist names
     // the people who may direct the bot, so it never names the bot — reading it as a verdict on

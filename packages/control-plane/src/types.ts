@@ -45,6 +45,13 @@ export interface EnvConfig {
   GITHUB_APP_PRIVATE_KEY?: string;
   GITHUB_APP_INSTALLATION_ID?: string;
 
+  // Second GitHub App, holding only pull-request write, whose installation
+  // token submits code reviews. Absent ⇒ reviews submit as the main App and
+  // cannot approve its own pull requests.
+  GITHUB_REVIEWER_APP_ID?: string;
+  GITHUB_REVIEWER_APP_PRIVATE_KEY?: string;
+  GITHUB_REVIEWER_APP_INSTALLATION_ID?: string;
+
   // GitLab secrets (for git operations and API access when SCM_PROVIDER=gitlab)
   GITLAB_ACCESS_TOKEN?: string;
   GITLAB_NAMESPACE?: string; // Group namespace to scope repository listing

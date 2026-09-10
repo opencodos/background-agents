@@ -10,9 +10,11 @@
  * github-bot service principal.
  */
 
+import { resolveAppName } from "@open-inspect/shared";
 import { Hono } from "hono";
 import { z } from "zod";
 import { parseBody } from "./body";
+import { getCachedInstallationToken, getGitHubReviewerAppConfig } from "../auth/github-app";
 import { SessionIndexStore } from "../db/session-index";
 import { createLogger } from "../logger";
 import { admit, dispatch } from "../routing/admit";
@@ -302,6 +304,52 @@ export async function handleReviewOwnership(
 }
 
 /**
+ * GET /sessions/:id/review-token
+ * Sandbox-token-authenticated broker for the reviewer App's installation
+ * token, which the review agent uses for its `POST .../reviews` call alone —
+ * statuses and the ownership lease stay on the main App. Minted here rather
+ * than injected at sandbox launch because an installation token expires in an
+ * hour and a review session can outlive that.
+ *
+ * The route policy requires a sandbox principal bound to `params.id`; the
+ * handler re-checks it directly, as the ownership fence does, because handing
+ * out a write credential is its own trust boundary.
+ */
+export async function handleReviewerToken(
+  _request: Request,
+  env: Env,
+  params: { id: string },
+  ctx: RequestContext
+): Promise<Response> {
+  const sessionId = params.id;
+  if (ctx.principal?.kind !== "sandbox" || ctx.principal.sessionId !== sessionId) {
+    return error("Unauthorized", 401);
+  }
+
+  const reviewerAppConfig = getGitHubReviewerAppConfig(env);
+  if (!reviewerAppConfig) {
+    return error("No reviewer app configured", 404);
+  }
+
+  try {
+    const token = await getCachedInstallationToken(reviewerAppConfig, {
+      cacheStore: env.REPOS_CACHE,
+      userAgent: resolveAppName(env),
+    });
+    return json({ token });
+  } catch (tokenError) {
+    logger.error("review_token.mint_failed", {
+      event: "review_token.mint_failed",
+      session_id: sessionId,
+      request_id: ctx.request_id,
+      trace_id: ctx.trace_id,
+      error: tokenError instanceof Error ? tokenError : new Error(String(tokenError)),
+    });
+    return error("Failed to mint reviewer token", 502);
+  }
+}
+
+/**
  * DELETE /sessions/:id/review-ownership
  * Best-effort lease release right after the agent's GitHub writes, so a new
  * claim never waits out the full TTL on the happy path. Only the current
@@ -405,4 +453,10 @@ githubReviewRoutes.delete(
   "/sessions/:id/review-ownership",
   admit({ ...SCM_AGNOSTIC_SANDBOX_ROUTE, authorization: NO_AUTHORIZATION }),
   (c) => dispatch(c, handleReviewLeaseRelease)
+);
+
+githubReviewRoutes.get(
+  "/sessions/:id/review-token",
+  admit({ ...SCM_AGNOSTIC_SANDBOX_ROUTE, authorization: NO_AUTHORIZATION }),
+  (c) => dispatch(c, handleReviewerToken)
 );

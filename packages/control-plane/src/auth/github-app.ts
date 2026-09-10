@@ -669,6 +669,18 @@ export async function listRepositoryBranches(
   return branches;
 }
 
+function toGitHubAppConfig(
+  appId: string | undefined,
+  privateKey: string | undefined,
+  installationId: string | undefined
+): GitHubAppConfig | null {
+  if (!appId || !privateKey || !installationId) {
+    return null;
+  }
+
+  return { appId, privateKey, installationId };
+}
+
 /**
  * Check if GitHub App credentials are configured.
  */
@@ -677,7 +689,7 @@ export function isGitHubAppConfigured(env: {
   GITHUB_APP_PRIVATE_KEY?: string;
   GITHUB_APP_INSTALLATION_ID?: string;
 }): boolean {
-  return !!(env.GITHUB_APP_ID && env.GITHUB_APP_PRIVATE_KEY && env.GITHUB_APP_INSTALLATION_ID);
+  return getGitHubAppConfig(env) !== null;
 }
 
 /**
@@ -688,13 +700,26 @@ export function getGitHubAppConfig(env: {
   GITHUB_APP_PRIVATE_KEY?: string;
   GITHUB_APP_INSTALLATION_ID?: string;
 }): GitHubAppConfig | null {
-  if (!isGitHubAppConfigured(env)) {
-    return null;
-  }
+  return toGitHubAppConfig(
+    env.GITHUB_APP_ID,
+    env.GITHUB_APP_PRIVATE_KEY,
+    env.GITHUB_APP_INSTALLATION_ID
+  );
+}
 
-  return {
-    appId: env.GITHUB_APP_ID!,
-    privateKey: env.GITHUB_APP_PRIVATE_KEY!,
-    installationId: env.GITHUB_APP_INSTALLATION_ID!,
-  };
+/**
+ * Null when the deployment runs no separate reviewer App: github-bot then
+ * treats the main App as the reviewing identity (`resolveReviewerLogin`), so
+ * a review of the App's own PR stays a comment.
+ */
+export function getGitHubReviewerAppConfig(env: {
+  GITHUB_REVIEWER_APP_ID?: string;
+  GITHUB_REVIEWER_APP_PRIVATE_KEY?: string;
+  GITHUB_REVIEWER_APP_INSTALLATION_ID?: string;
+}): GitHubAppConfig | null {
+  return toGitHubAppConfig(
+    env.GITHUB_REVIEWER_APP_ID,
+    env.GITHUB_REVIEWER_APP_PRIVATE_KEY,
+    env.GITHUB_REVIEWER_APP_INSTALLATION_ID
+  );
 }

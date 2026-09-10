@@ -23,6 +23,7 @@ exports[`route admission matrix > admits a session-bound sandbox token on every 
   "POST /sessions/:id/commit-signing sandbox=400 wrong-token=401",
   "GET /sessions/:id/review-ownership sandbox=409 wrong-token=401",
   "DELETE /sessions/:id/review-ownership sandbox=204 wrong-token=401",
+  "GET /sessions/:id/review-token sandbox=404 wrong-token=401",
 ]
 `;
 
@@ -382,5 +383,6 @@ exports[`route admission matrix > rejects every credentialed route anonymously b
   "POST /internal/github-reviews/sweep anonymous=401",
   "GET /sessions/:id/review-ownership anonymous=401",
   "DELETE /sessions/:id/review-ownership anonymous=401",
+  "GET /sessions/:id/review-token anonymous=401",
 ]
 `;

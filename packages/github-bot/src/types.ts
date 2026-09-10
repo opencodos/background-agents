@@ -26,6 +26,13 @@ export interface Env {
   /** GitHub App bot username (e.g., "open-inspect-bot[bot]"). */
   GITHUB_BOT_USERNAME: string;
 
+  /**
+   * Login of the separate reviewer App whose token submits reviews (e.g.,
+   * "codos-reviewer[bot]"). Set together with the control plane's
+   * GITHUB_REVIEWER_APP_* secrets, or left unset on both.
+   */
+  GITHUB_REVIEWER_USERNAME?: string;
+
   /** GitHub App ID for JWT generation. */
   GITHUB_APP_ID: string;
 

@@ -13,6 +13,7 @@ describe("buildCodeReviewPrompt", () => {
     head: "feature/cache",
     headSha: "abc123",
     isPublic: true,
+    hasReviewerApp: false,
   };
 
   it("requires a terminal status when the guarded chain does not publish", () => {
@@ -122,6 +123,26 @@ describe("buildCodeReviewPrompt", () => {
     expect(prompt).toContain('"event": "COMMENT"');
     expect(prompt).toContain("GitHub does not allow pull request authors to approve their own PRs");
     expect(prompt).not.toContain("COMMENT|APPROVE|REQUEST_CHANGES");
+  });
+
+  it("submits the review with the reviewer app's token when one is configured", () => {
+    const prompt = buildCodeReviewPrompt({ ...baseParams, hasReviewerApp: true });
+
+    // The token is fetched inside the guarded chain, after the ownership lease, so a superseded
+    // session never reaches it, and it scopes the review POST alone.
+    expect(prompt).toContain("$CONTROL_PLANE_URL/sessions/$session_id/review-token");
+    expect(prompt).toContain('GH_TOKEN="$review_token" gh api repos/acme/widgets/pulls/42/reviews');
+    expect(prompt.indexOf("/review-token")).toBeGreaterThan(prompt.indexOf("/review-ownership"));
+    // Statuses stay on the default credential: the reviewer app holds no statuses permission.
+    expect(prompt).not.toContain('GH_TOKEN="$review_token" gh api repos/acme/widgets/statuses');
+  });
+
+  it("submits the review with the default credential when no reviewer app is configured", () => {
+    const prompt = buildCodeReviewPrompt(baseParams);
+
+    expect(prompt).not.toContain("review-token");
+    expect(prompt).not.toContain("review_token");
+    expect(prompt).toContain('review_url="$(gh api repos/acme/widgets/pulls/42/reviews');
   });
 
   it("includes custom instructions section when codeReviewInstructions provided", () => {

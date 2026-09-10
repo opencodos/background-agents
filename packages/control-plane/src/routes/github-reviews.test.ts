@@ -1,4 +1,6 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as GitHubAppModule from "../auth/github-app";
+import { getCachedInstallationToken } from "../auth/github-app";
 import type { Principal } from "../auth/principal";
 import { SessionIndexStore } from "../db/session-index";
 import type { SqlDatabase } from "../db/sql-database";
@@ -8,12 +10,18 @@ import type { Env } from "../types";
 import {
   githubReviewRoutes,
   handleClaimReviewGeneration,
+  handleReviewerToken,
   handleReviewLeaseRelease,
   handleReviewOwnership,
   handleSweepStaleReviews,
 } from "./github-reviews";
 import type { SessionRouteContext } from "./session-route";
 import type { RequestContext } from "./shared";
+
+vi.mock("../auth/github-app", async (importOriginal) => ({
+  ...(await importOriginal<typeof GitHubAppModule>()),
+  getCachedInstallationToken: vi.fn(),
+}));
 
 const GITHUB_BOT_PRINCIPAL: Principal = { kind: "service", service: "github-bot", actor: null };
 
@@ -447,6 +455,92 @@ describe("handleReviewOwnership / handleReviewLeaseRelease", () => {
 
     expect(acquire.status).toBe(401);
     expect(release.status).toBe(401);
+  });
+});
+
+describe("handleReviewerToken", () => {
+  const SANDBOX_PRINCIPAL: Principal = { kind: "sandbox", sessionId: "session-1" };
+  const REVIEWER_ENV = {
+    GITHUB_REVIEWER_APP_ID: "999",
+    GITHUB_REVIEWER_APP_PRIVATE_KEY: "reviewer-key",
+    GITHUB_REVIEWER_APP_INSTALLATION_ID: "888",
+  } as unknown as Env;
+
+  function tokenRequest(): Request {
+    return new Request("https://test.local/sessions/session-1/review-token");
+  }
+
+  beforeEach(() => vi.mocked(getCachedInstallationToken).mockClear());
+
+  it("mints the reviewer app's installation token for the session's own sandbox", async () => {
+    vi.mocked(getCachedInstallationToken).mockResolvedValue("ghs_reviewer");
+    const { db } = createFakeDb();
+
+    const response = await handleReviewerToken(
+      tokenRequest(),
+      REVIEWER_ENV,
+      { id: "session-1" },
+      requestContext(db, SANDBOX_PRINCIPAL)
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ token: "ghs_reviewer" });
+    expect(getCachedInstallationToken).toHaveBeenCalledWith(
+      { appId: "999", privateKey: "reviewer-key", installationId: "888" },
+      expect.anything()
+    );
+  });
+
+  it("returns 404 when the deployment runs no reviewer app", async () => {
+    const { db } = createFakeDb();
+
+    const response = await handleReviewerToken(
+      tokenRequest(),
+      {} as Env,
+      { id: "session-1" },
+      requestContext(db, SANDBOX_PRINCIPAL)
+    );
+
+    expect(response.status).toBe(404);
+    expect(getCachedInstallationToken).not.toHaveBeenCalled();
+  });
+
+  it("returns 502 rather than a body when minting fails", async () => {
+    vi.mocked(getCachedInstallationToken).mockImplementationOnce(() => {
+      throw new Error("GitHub 401");
+    });
+    const { db } = createFakeDb();
+
+    const response = await handleReviewerToken(
+      tokenRequest(),
+      REVIEWER_ENV,
+      { id: "session-1" },
+      requestContext(db, SANDBOX_PRINCIPAL)
+    );
+
+    expect(response.status).toBe(502);
+  });
+
+  it.each([
+    ["a service principal", GITHUB_BOT_PRINCIPAL],
+    [
+      "a sandbox principal for a different session",
+      { kind: "sandbox", sessionId: "other" } as Principal,
+    ],
+    ["no principal", undefined],
+  ])("refuses to hand a write credential to %s", async (_name, principal) => {
+    vi.mocked(getCachedInstallationToken).mockResolvedValue("ghs_reviewer");
+    const { db } = createFakeDb();
+
+    const response = await handleReviewerToken(
+      tokenRequest(),
+      REVIEWER_ENV,
+      { id: "session-1" },
+      requestContext(db, principal)
+    );
+
+    expect(response.status).toBe(401);
+    expect(getCachedInstallationToken).not.toHaveBeenCalled();
   });
 });
 
