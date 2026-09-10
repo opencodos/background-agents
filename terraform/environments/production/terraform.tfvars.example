@@ -148,6 +148,23 @@ EOF
 
 github_app_installation_id = ""
 
+# Reviewer App (Optional) — a second GitHub App, holding only
+# "Pull requests: Read & write", whose installation token submits code reviews.
+# Without it a review of a pull request the main App opened can only comment,
+# because GitHub refuses to let a pull request's author approve it.
+# Set these three together with github_reviewer_username below, or leave all
+# four empty.
+github_reviewer_app_id = ""
+
+# Private key in PKCS#8 format, as with github_app_private_key above.
+# github_reviewer_app_private_key = <<-EOF
+# -----BEGIN PRIVATE KEY-----
+# ... your reviewer app private key here ...
+# -----END PRIVATE KEY-----
+# EOF
+
+github_reviewer_app_installation_id = ""
+
 # GitHub Bot (Optional)
 # Set enable_github_bot = true to deploy the GitHub bot worker for PR reviews
 # and @mention commands. Requires github_webhook_secret and github_bot_username.
@@ -168,6 +185,11 @@ github_webhook_secret = ""
 #   App named "Acme Code Review" -> slug "acme-code-review" -> "acme-code-review[bot]"
 # The webhook handler uses this to detect @mentions of the bot in PRs/issues.
 github_bot_username = ""
+
+# Login of the reviewer App, derived from its slug the same way as
+# github_bot_username. Set together with the three github_reviewer_app_*
+# values above, or leave all four empty.
+github_reviewer_username = ""
 
 # Model the GitHub bot uses for a repository that does not pin one in its own
 # integration config. Accepts a canonical "provider/model" id or a bare

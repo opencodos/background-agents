@@ -1037,6 +1037,9 @@ GH_OAUTH_CLIENT_ID
 GOOGLE_CLIENT_ID
 GH_APP_ID
 GH_APP_INSTALLATION_ID
+GH_REVIEWER_APP_ID
+GH_REVIEWER_APP_INSTALLATION_ID
+GH_REVIEWER_USERNAME
 ENABLE_SLACK_BOT
 ENABLE_GITHUB_BOT
 GH_BOT_USERNAME
@@ -1127,6 +1130,9 @@ Secrets for credentials:
 | `GH_APP_ID`                        | Required GitHub App repository-access ID                                                    |
 | `GH_APP_PRIVATE_KEY`               | Required GitHub App repository-access private key (PKCS#8 format)                           |
 | `GH_APP_INSTALLATION_ID`           | Required GitHub App repository-access installation ID                                       |
+| `GH_REVIEWER_APP_ID`               | Optional reviewer App ID; set with the three values below                                   |
+| `GH_REVIEWER_APP_PRIVATE_KEY`      | Optional reviewer App private key (PKCS#8 format)                                           |
+| `GH_REVIEWER_APP_INSTALLATION_ID`  | Optional reviewer App installation ID                                                       |
 | `ENABLE_SLACK_BOT`                 | `true` to deploy Slack bot, `false` to skip (default: `true`)                               |
 | `SLACK_BOT_TOKEN`                  | Slack bot token (required if enabled)                                                       |
 | `SLACK_SIGNING_SECRET`             | Slack signing secret (required if enabled)                                                  |
@@ -1152,6 +1158,7 @@ Secrets for credentials:
 | `ENABLE_GITHUB_BOT`                | `true` to deploy GitHub bot worker (or empty to skip)                                       |
 | `GH_WEBHOOK_SECRET`                | GitHub webhook secret (required if GitHub bot enabled)                                      |
 | `GH_BOT_USERNAME`                  | GitHub App bot username, e.g., `my-app[bot]` (required if GitHub bot enabled)               |
+| `GH_REVIEWER_USERNAME`             | Reviewer App login, e.g., `my-reviewer[bot]`; set with the three `GH_REVIEWER_APP_*` values |
 | `APP_NAME`                         | Optional display name for whitelabeling (default: `Open-Inspect`)                           |
 | `APP_ICON_URL`                     | Optional URL to a custom logo/favicon (default: built-in icon)                              |
 
