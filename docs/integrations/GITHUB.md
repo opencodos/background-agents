@@ -52,10 +52,12 @@ non-draft PRs in enabled repositories. The agent inspects the PR diff and posts 
 Auto-review is skipped when:
 
 - The PR is a draft
-- The PR was opened by the GitHub App bot itself
 - The repository is outside the configured GitHub Bot scope
 - The PR opener is not allowed to trigger the bot
 - Auto-review is disabled globally or for that repository
+
+A PR opened by the GitHub App itself is the App acting rather than a third party asking it to act,
+so it bypasses both caller gates and is reviewed.
 
 Converting a draft PR to ready for review does not start the same auto-review path. If you need a
 follow-up after a draft becomes ready, mention the bot in a PR comment.
@@ -63,7 +65,9 @@ follow-up after a draft becomes ready, mention the bot in a PR comment.
 ### What It Posts
 
 The agent can submit a general review comment, approve the PR, request changes, or add inline review
-comments when useful.
+comments when useful. Where the deployment configures a reviewer App, the review is submitted under
+that App's identity, so a pull request the main App opened can be approved rather than only
+commented on.
 
 ---
 
@@ -239,8 +243,9 @@ Important limitations:
 
 ### Bot Behavior
 
-- Auto-review skips draft PRs and PRs opened by the GitHub App bot. Manual `@mention` triggers are
-  still evaluated through the normal repository and user gates.
+- Auto-review skips draft PRs. A PR the GitHub App opened is still reviewed — it bypasses the caller
+  gates rather than being skipped by them. Manual `@mention` triggers are still evaluated through
+  the normal repository and user gates.
 - The bot ignores bot-authored comments, ordinary issue comments, and comments that do not mention
   the bot.
 - If the bot cannot load its GitHub integration settings, it fails closed and does not start direct
@@ -271,8 +276,9 @@ list.
 
 ### Auto-review did not run
 
-Auto-review only runs for newly opened, non-draft PRs. It is skipped for draft PRs, bot-authored
-PRs, disabled repositories, and users who are not allowed to trigger the bot.
+Auto-review only runs for newly opened, non-draft PRs. It is skipped for draft PRs, disabled
+repositories, and users who are not allowed to trigger the bot. A PR the GitHub App itself opened is
+not skipped.
 
 If a PR was converted from draft to ready for review, mention the bot in a PR comment instead.
 
