@@ -15,11 +15,11 @@ function routeFor(method: string, path: string) {
 
 describe("route policy table", () => {
   it("publishes the complete canonical route catalog", () => {
-    expect(routes).toHaveLength(182);
+    expect(routes).toHaveLength(186);
 
     const paths = routes.map((route) => route.path);
-    expect(new Set(paths).size).toBe(139);
-    expect(new Set(routes.map((route) => `${route.method}:${route.path}`)).size).toBe(182);
+    expect(new Set(paths).size).toBe(142);
+    expect(new Set(routes.map((route) => `${route.method}:${route.path}`)).size).toBe(186);
   });
 
   it("declares every path in the literal-or-parameter grammar", () => {
@@ -288,6 +288,14 @@ describe("route policy table", () => {
       "user",
     ],
     ["DELETE", `/model-provider-accounts/openai/device-authorizations/${"0".repeat(64)}`, "user"],
+    ["POST", "/model-provider-accounts/anthropic/authorization-codes", "user"],
+    ["GET", `/model-provider-accounts/anthropic/authorization-codes/${"0".repeat(64)}`, "user"],
+    [
+      "POST",
+      `/model-provider-accounts/anthropic/authorization-codes/${"0".repeat(64)}/complete`,
+      "user",
+    ],
+    ["DELETE", `/model-provider-accounts/anthropic/authorization-codes/${"0".repeat(64)}`, "user"],
     ["GET", "/model-provider-accounts/legacy-credentials", "user"],
     ["GET", "/model-provider-account-defaults", "user"],
     ["PUT", "/model-provider-account-defaults/openai", "user"],
@@ -372,6 +380,9 @@ describe("route policy table", () => {
     expect(routeFor("GET", "/model-provider-accounts")?.cacheControl).toBe("private, no-store");
     expect(
       routeFor("POST", "/model-provider-accounts/openai/device-authorizations")?.cacheControl
+    ).toBe("private, no-store");
+    expect(
+      routeFor("POST", "/model-provider-accounts/anthropic/authorization-codes")?.cacheControl
     ).toBe("private, no-store");
     expect(
       routeFor("POST", "/sessions/session-1/provider-auth/openai/access-token")?.cacheControl
