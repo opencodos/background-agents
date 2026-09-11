@@ -6,9 +6,10 @@
  * attributable to a person and revocable by them.
  *
  * Reads go anywhere the owner's role allows. Writes reach only the routes that
- * declare `accessTokenWrites` — skill import and re-import — because the
- * control plane refuses an access-token principal every other mutating method
- * whatever this client sends.
+ * declare `accessTokenWrites` — skill import and re-import, automation create,
+ * and manual automation trigger — because the control plane refuses an
+ * access-token principal every other mutating method whatever this client
+ * sends.
  */
 
 /** Longest control-plane response this client will buffer. */

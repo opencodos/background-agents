@@ -8,6 +8,7 @@ import {
 import { authenticate, isAuthError } from "../auth/authenticate";
 import {
   canonicalUserIdOf,
+  isSelfActingPrincipal,
   principalMayUseMethod,
   type AccessTokenWrites,
   type Principal,
@@ -431,9 +432,7 @@ async function finalizeServiceActor(
 function authorizationUserId(ctx: RequestContext): string | null {
   // An access token authorizes as its owner, exactly as `enforceActiveUser`
   // loaded it. Returning null here would skip the permission check instead.
-  if (ctx.principal?.kind === "user" || ctx.principal?.kind === "access-token") {
-    return ctx.principal.userId;
-  }
+  if (isSelfActingPrincipal(ctx.principal)) return ctx.principal.userId;
   if (ctx.principal?.kind === "service") {
     return ctx.principal.actor?.canonicalUserId ?? ctx.authorization?.userId ?? null;
   }
@@ -557,10 +556,14 @@ async function enforceAutomationRequirement(
   ctx: RequestContext,
   evidence: AuthorizationEvidence
 ): Promise<AuthorizationFailure | null> {
-  if (ctx.principal?.kind !== "user") {
-    // Ownership is defined for canonical human users only. Service policy
-    // normally rejects bots earlier; this keeps a future `requireAll`
-    // composition from skipping the ownership check.
+  const principal = ctx.principal;
+  if (!isSelfActingPrincipal(principal)) {
+    // Ownership is defined for a principal that is a canonical user: a browser
+    // user, or an access token, which is its owner. Service policy normally
+    // rejects bots earlier; this keeps a future `requireAll` composition from
+    // skipping the ownership check. Admitting a token here decides only whose
+    // automations it owns — whether it may write to one is the route's own
+    // `accessTokenWrites` declaration, which most automation routes withhold.
     return authorizationDenial(
       json({ error: "Forbidden", code: "service_capability_required" }, 403),
       evidence,
@@ -582,7 +585,7 @@ async function enforceAutomationRequirement(
 
     const permissionStem = `automations.${requirement.operation}` as const;
     const pair = SCOPED_PERMISSION_PAIRS[permissionStem];
-    const isOwner = automation.user_id === ctx.principal.userId;
+    const isOwner = automation.user_id === principal.userId;
     const scope = resolveScopedPermission(permissionStem, authorization.permissions);
     if (!scope || (scope === "own" && !isOwner)) {
       return authorizationDenial(
