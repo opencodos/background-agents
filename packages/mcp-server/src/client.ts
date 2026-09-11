@@ -1,10 +1,14 @@
 /**
- * Read-only control-plane client.
+ * Control-plane client for the MCP server.
  *
  * Authenticates with a personal access token the user issued to themselves in
  * the web UI. The control plane resolves it to that user, so requests are
- * attributable to a person and revocable by them — and, being an access-token
- * principal, refused every mutating method.
+ * attributable to a person and revocable by them.
+ *
+ * Reads go anywhere the owner's role allows. Writes reach only the routes that
+ * declare `accessTokenWrites` — skill import and re-import — because the
+ * control plane refuses an access-token principal every other mutating method
+ * whatever this client sends.
  */
 
 /** Longest control-plane response this client will buffer. */
@@ -39,23 +43,47 @@ export class ControlPlaneClient {
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   }
 
+  /** GET a control-plane path and parse the JSON body. */
+  get(path: string, query?: Record<string, string | number | undefined>): Promise<unknown> {
+    return this.send("GET", path, { query });
+  }
+
   /**
-   * GET a control-plane path and parse the JSON body.
+   * POST a JSON body to a control-plane path and parse the JSON response.
    *
-   * Only GET is exposed, but that is ergonomics rather than the security
-   * boundary: the control plane refuses every mutating method from an
-   * access-token principal, so a `DELETE` bearing this token is rejected
-   * whether or not it came from this class (`principalMayUseMethod` in the
-   * control plane's `auth/principal.ts`).
+   * Reaches only the routes that opted an access token into writing; anywhere
+   * else the control plane answers 403 whatever this client sends
+   * (`principalMayUseMethod` in the control plane's `auth/principal.ts`).
    */
-  async get(path: string, query?: Record<string, string | number | undefined>): Promise<unknown> {
+  post(
+    path: string,
+    body: unknown,
+    options?: { headers?: Record<string, string> }
+  ): Promise<unknown> {
+    return this.send("POST", path, { body, headers: options?.headers });
+  }
+
+  private async send(
+    method: "GET" | "POST",
+    path: string,
+    options: {
+      query?: Record<string, string | number | undefined>;
+      body?: unknown;
+      headers?: Record<string, string>;
+    }
+  ): Promise<unknown> {
     const url = new URL(`${this.baseUrl}${path}`);
-    for (const [key, value] of Object.entries(query ?? {})) {
+    for (const [key, value] of Object.entries(options.query ?? {})) {
       if (value !== undefined) url.searchParams.set(key, String(value));
     }
 
-    const request = { method: "GET", url: url.toString() };
-    const headers = { Authorization: `Bearer ${this.token}` };
+    const request = { method, url: url.toString() };
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${this.token}`,
+      Accept: "application/json",
+      ...options.headers,
+    };
+    if (options.body !== undefined) headers["Content-Type"] = "application/json";
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -63,8 +91,9 @@ export class ControlPlaneClient {
     let body: string;
     try {
       response = await fetch(request.url, {
-        method: "GET",
-        headers: { ...headers, Accept: "application/json" },
+        method,
+        headers,
+        ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
         signal: controller.signal,
       });
       // Inside the same timer as the fetch: `fetch` resolves on headers, so a

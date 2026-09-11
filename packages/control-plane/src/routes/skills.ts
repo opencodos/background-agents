@@ -615,6 +615,21 @@ const SKILLS_MANAGE = admit({
   ...SCM_AGNOSTIC_HUMAN_USER_ROUTE,
   authorization: requirePermission("skills.manage"),
 });
+/**
+ * Import and re-import, which additionally admit a personal access token so
+ * the MCP server can create and update skills as its owner.
+ *
+ * Scoped to these four routes rather than to `SKILLS_MANAGE` as a whole: they
+ * add and revise content under a name, and a mistaken one is recoverable from
+ * the revision history, while `DELETE /skills/:id` and the hand-edit routes
+ * are not. `skills.manage` is still required, so the exception widens which
+ * credential may act, never which user may.
+ */
+const SKILLS_IMPORT = admit({
+  ...SCM_AGNOSTIC_HUMAN_USER_ROUTE,
+  authorization: requirePermission("skills.manage"),
+  accessTokenWrites: "allow",
+});
 const PROFILES_MANAGE_OWN = admit({
   ...SCM_AGNOSTIC_HUMAN_USER_ROUTE,
   authorization: requirePermission("skill_profiles.manage_own"),
@@ -635,14 +650,14 @@ skillRoutes.post("/skills/resolve-preview", SKILLS_READ, (c) => dispatch(c, hand
 skillRoutes.get("/skills/:id", SKILLS_READ, (c) => dispatch(c, handleGetSkill));
 
 skillRoutes.post("/skills", SKILLS_MANAGE, (c) => dispatch(c, handleCreateSkill));
-skillRoutes.post("/skills/import/preview", SKILLS_MANAGE, (c) =>
+skillRoutes.post("/skills/import/preview", SKILLS_IMPORT, (c) =>
   dispatch(c, handlePreviewSkillImport)
 );
-skillRoutes.post("/skills/import", SKILLS_MANAGE, (c) => dispatch(c, handleImportSkill));
-skillRoutes.post("/skills/:id/reimport/preview", SKILLS_MANAGE, (c) =>
+skillRoutes.post("/skills/import", SKILLS_IMPORT, (c) => dispatch(c, handleImportSkill));
+skillRoutes.post("/skills/:id/reimport/preview", SKILLS_IMPORT, (c) =>
   dispatch(c, handlePreviewSkillReimport)
 );
-skillRoutes.post("/skills/:id/reimport", SKILLS_MANAGE, (c) => dispatch(c, handleReimportSkill));
+skillRoutes.post("/skills/:id/reimport", SKILLS_IMPORT, (c) => dispatch(c, handleReimportSkill));
 skillRoutes.patch("/skills/:id", SKILLS_MANAGE, (c) => dispatch(c, handleSetSkillEnabled));
 skillRoutes.put("/skills/:id", SKILLS_MANAGE, (c) =>
   dispatch(c, handleReplaceSkillContentAndAssignments)

@@ -1,10 +1,11 @@
 /**
- * Read-only MCP server over the Open-Inspect control plane.
+ * MCP server over the Open-Inspect control plane.
  *
  * Runs locally over stdio and authenticates with a personal access token, so
- * every request is attributable to the user who issued it. Read-only by
- * construction: the client exposes GET only, and the control plane refuses an
- * access-token principal any mutating method regardless.
+ * every request is attributable to the user who issued it. Reads are bounded
+ * by that user's role; the only writes are skill import and re-import, whose
+ * routes opt a token in explicitly. The control plane refuses an access-token
+ * principal every other mutating method, whatever this server sends.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -33,7 +34,14 @@ export function createServer(client: ControlPlaneClient): McpServer {
         title: tool.title,
         description: tool.description,
         inputSchema: tool.inputSchema,
-        annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+        annotations: {
+          readOnlyHint: tool.readOnly,
+          // Additive unless the tool says otherwise: a client uses this to
+          // decide how hard to prompt, so a write that replaces what future
+          // readers act on has to declare itself even when it is recoverable.
+          destructiveHint: tool.destructive ?? false,
+          openWorldHint: true,
+        },
       },
       async (args: Record<string, unknown>) => {
         try {
