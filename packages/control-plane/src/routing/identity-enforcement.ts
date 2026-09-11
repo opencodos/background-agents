@@ -102,9 +102,11 @@ export function deriveIdentity(principal: Principal | undefined): DerivedIdentit
   if (!principal) return null;
   switch (principal.kind) {
     // An access token is its owner: it carries the same canonical user id a
-    // browser session would. It cannot reach the spawn routes at all — those
-    // are writes, and the credential is read-only — so deriving `user` here
-    // describes the identity without widening what the token can do.
+    // browser session would. Of the routes here it reaches only automation
+    // create, whose policy opts the credential into writing; session create
+    // and the ws-token route declare nothing and stay refused, so deriving
+    // `user` here describes the identity without widening what the token can
+    // do.
     case "user":
     case "access-token":
       return {

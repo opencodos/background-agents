@@ -3,9 +3,10 @@
  *
  * Runs locally over stdio and authenticates with a personal access token, so
  * every request is attributable to the user who issued it. Reads are bounded
- * by that user's role; the only writes are skill import and re-import, whose
- * routes opt a token in explicitly. The control plane refuses an access-token
- * principal every other mutating method, whatever this server sends.
+ * by that user's role; the writes are skill import and re-import, automation
+ * create, and manual automation trigger, whose routes opt a token in
+ * explicitly. The control plane refuses an access-token principal every other
+ * mutating method, whatever this server sends.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";

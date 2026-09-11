@@ -72,6 +72,19 @@ export function canonicalUserIdOf(principal: Principal | undefined): string | nu
   }
 }
 
+/**
+ * Whether this principal acts as a canonical user in its own right: a browser
+ * user, or an access token, which is its owner. Both carry `users.id`
+ * directly, so ownership and self-scoped permission checks are defined for
+ * them. A service principal acts for an asserted actor and a sandbox for no
+ * one, which is why neither is included.
+ */
+export function isSelfActingPrincipal(
+  principal: Principal | undefined
+): principal is Extract<Principal, { kind: "user" | "access-token" }> {
+  return principal?.kind === "user" || principal?.kind === "access-token";
+}
+
 /** Methods a read-only credential may use. */
 const READ_ONLY_METHODS: ReadonlySet<string> = new Set(["GET", "HEAD"]);
 
@@ -99,11 +112,14 @@ export type AccessTokenWrites = "allow" | "deny";
  * Safe methods are the default rather than a route allowlist because every
  * mutating route is already a non-GET, and an allowlist silently fails open
  * for each read route added later. Routes that want a token to write — skill
- * import, so the MCP server can create and update skills — opt in one at a
- * time through their own policy, which keeps the exceptions enumerable and
- * states them next to the permission the write already demands. The opt-in
- * narrows what a leaked token reaches to those routes; everything else stays
- * refused whoever built the request.
+ * import, automation create, and manual automation trigger, so the MCP server
+ * can manage and run its owner's automations — opt in one at a time through
+ * their own policy, which keeps the exceptions enumerable and states them next
+ * to the permission the write already demands. Every opt-in so far is
+ * additive: it adds a skill revision, an automation, or a run, and destroys
+ * nothing, which is the bar a new one has to clear. The opt-in narrows what a
+ * leaked token reaches to those routes; everything else stays refused whoever
+ * built the request.
  */
 export function principalMayUseMethod(
   principal: Principal,

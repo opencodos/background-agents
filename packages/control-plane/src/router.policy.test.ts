@@ -606,20 +606,58 @@ describe("route principal policy", () => {
 });
 
 describe("access-token write declarations", () => {
-  it("is declared by the skill import routes and nothing else", () => {
+  it("is declared by the skill import and additive automation routes and nothing else", () => {
     // The read-only claim is only as good as this list is short. A new route
     // opting in has to change this test, which is where the reviewer looks.
+    // Every entry is additive — it adds a skill revision, an automation, or a
+    // run — which is the bar for joining it.
     const declared = routes
       .filter((route) => route.accessTokenWrites === "allow")
       .map((route) => `${route.method} ${route.path}`)
       .sort();
 
     expect(declared).toEqual([
+      "POST /automations",
+      "POST /automations/:id/trigger",
       "POST /skills/:id/reimport",
       "POST /skills/:id/reimport/preview",
       "POST /skills/import",
       "POST /skills/import/preview",
     ]);
+  });
+
+  it("still requires the automation permissions, so the token widens the credential and not the user", () => {
+    expect(
+      routes.find((entry) => entry.method === "POST" && entry.path === "/automations")
+        ?.authorization
+    ).toMatchObject({
+      kind: "active-user",
+      allOf: [{ kind: "permission", permission: "automations.create" }],
+    });
+    expect(
+      routes.find((entry) => entry.method === "POST" && entry.path === "/automations/:id/trigger")
+        ?.authorization
+    ).toMatchObject({
+      kind: "active-user",
+      allOf: [{ kind: "automation", operation: "trigger" }],
+    });
+  });
+
+  it("leaves the automation routes that rewrite or silence one human-only", () => {
+    // Delete and update replace an automation other people may depend on;
+    // pause and resume decide whether its schedule fires at all. None of the
+    // four is recoverable from a run history the way an added row is.
+    for (const [method, path] of [
+      ["PUT", "/automations/:id"],
+      ["DELETE", "/automations/:id"],
+      ["POST", "/automations/:id/pause"],
+      ["POST", "/automations/:id/resume"],
+      ["POST", "/automations/:id/regenerate-key"],
+    ] as const) {
+      const route = routes.find((entry) => entry.method === method && entry.path === path);
+      expect(route, `${method} ${path}`).toBeDefined();
+      expect(route?.accessTokenWrites, `${method} ${path}`).toBeUndefined();
+    }
   });
 
   it("still requires skills.manage, so the token widens the credential and not the user", () => {

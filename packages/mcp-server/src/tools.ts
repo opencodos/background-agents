@@ -2,11 +2,20 @@
  * The tool surface.
  *
  * Reads are one GET each against a route whose policy already accepts an
- * access-token principal. The two skill-writing tools are the only mutations,
- * and they reach only the import routes that opted a token into writing; the
- * control plane refuses this credential every other mutating method.
+ * access-token principal. The writes — skill import and re-import, automation
+ * create, and manual automation trigger — reach only the routes that opted a
+ * token into writing, each of them additive; the control plane refuses this
+ * credential every other mutating method, so there is no tool here that
+ * deletes an automation, rewrites one, or pauses its schedule.
  */
 
+import { harnessIdSchema } from "@open-inspect/shared/harnesses";
+import { automationTriggerTypeSchema, triggerConfigSchema } from "@open-inspect/shared/triggers";
+import {
+  MAX_AUTOMATION_INSTRUCTIONS_LENGTH,
+  MAX_AUTOMATION_REPOSITORIES,
+  sentryClientSecretSchema,
+} from "@open-inspect/shared/types/automations";
 import { SKILL_LIST_PAGE_SIZE } from "@open-inspect/shared/types/skills";
 import { z } from "zod";
 import type { ControlPlaneClient } from "./client";
@@ -47,6 +56,11 @@ export interface ToolDefinition {
 }
 
 const sessionId = z.string().min(1).describe("Session id, as returned by list_sessions");
+
+const automationId = z
+  .string()
+  .min(1)
+  .describe("Automation id, as returned by create_automation or shown in the web UI");
 
 /**
  * The preview fields a confirmation needs, read leniently.
@@ -147,6 +161,13 @@ function importReport(
   };
 }
 
+/** One entry of create_automation's repository list, before camel-casing. */
+interface AutomationRepositoryArg {
+  repo_owner: string;
+  repo_name: string;
+  base_branch?: string;
+}
+
 const repoOwner = z
   .string()
   .min(1)
@@ -236,7 +257,7 @@ export const TOOLS: ToolDefinition[] = [
       "List one automation's recent invocations with their status. Use to check whether a " +
       "scheduled automation fired, skipped, or failed.",
     inputSchema: {
-      automation_id: z.string().min(1),
+      automation_id: automationId,
       limit: z.number().int().min(1).max(MAX_SESSION_LIMIT).optional(),
     },
     run: (client, args) =>
@@ -252,14 +273,158 @@ export const TOOLS: ToolDefinition[] = [
       "Read a single automation invocation, including the child sessions it launched. Pair " +
       "with get_session_events on a child id to see what that run actually did.",
     inputSchema: {
-      automation_id: z.string().min(1),
-      run_id: z.string().min(1),
+      automation_id: automationId,
+      run_id: z.string().min(1).describe("Run id, as returned by list_automation_runs"),
     },
     run: (client, args) =>
       client.get(
         `/automations/${encodeURIComponent(args.automation_id as string)}` +
           `/runs/${encodeURIComponent(args.run_id as string)}`
       ),
+  },
+  {
+    name: "create_automation",
+    title: "Create an automation",
+    readOnly: false,
+    description:
+      "Create an automation: saved instructions the installation runs on a cron schedule, or " +
+      "when a GitHub, Linear, Slack, Sentry, or webhook event arrives — a sentry trigger " +
+      "additionally needs the sentry_client_secret. It is created enabled, " +
+      "so a schedule automation starts firing at the next occurrence of its cron — give it the " +
+      "schedule it should keep rather than creating it and fixing the cron afterwards, which " +
+      "this credential cannot do. Returns the stored automation, whose id trigger_automation " +
+      "takes, and for a webhook trigger the key that calls it, which is shown this once only. " +
+      "Targets have to be repositories and environments the owner may already use.",
+    inputSchema: {
+      name: z.string().min(1).describe("Display name, as the dashboard lists it"),
+      instructions: z
+        .string()
+        .min(1)
+        .max(MAX_AUTOMATION_INSTRUCTIONS_LENGTH)
+        .describe("The prompt every run of this automation executes"),
+      trigger_type: automationTriggerTypeSchema
+        .optional()
+        .describe("What starts a run. Defaults to schedule."),
+      schedule_cron: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Five-field cron expression. Required by a schedule trigger and refused on every other."
+        ),
+      schedule_tz: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "IANA timezone the cron is read in, such as Europe/Berlin. Defaults to UTC, which is " +
+            "rarely the hour a person means — pass the owner's timezone when the run time matters."
+        ),
+      event_type: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Event that starts a run, such as pull_request.opened. Required by the event-driven " +
+            "trigger types, which name the events they accept when one is wrong."
+        ),
+      trigger_config: triggerConfigSchema
+        .optional()
+        .describe("Conditions an event must match to start a run. Event-driven triggers only."),
+      sentry_client_secret: sentryClientSecretSchema
+        .optional()
+        .describe(
+          "Sentry's client secret for the webhook it will call, from the Sentry integration " +
+            "that sends the events. A sentry trigger is refused without it; every other trigger " +
+            "ignores it. Stored encrypted and never read back."
+        ),
+      repositories: z
+        .array(
+          z.object({
+            repo_owner: repoOwner,
+            repo_name: repoName,
+            base_branch: z
+              .string()
+              .min(1)
+              .optional()
+              .describe("Branch each run starts from. Defaults to the repository's own default."),
+          })
+        )
+        .max(MAX_AUTOMATION_REPOSITORIES)
+        .optional()
+        .describe(
+          "Repositories to run against, one session each. A repository-scoped event trigger " +
+            "takes exactly one; fanning out over several requires a schedule trigger."
+        ),
+      environment_ids: z
+        .array(z.string().min(1))
+        .optional()
+        .describe("Environments (env_…) to fan out over, one workspace session each"),
+      harness: harnessIdSchema
+        .optional()
+        .describe("Agent harness each run uses. Defaults to the installation's built-in harness."),
+      model: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Model each run uses. Defaults to the installation's default model."),
+      reasoning_effort: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Reasoning effort, where the selected model takes one"),
+    },
+    run: (client, args) => {
+      const triggerType = args.trigger_type as string | undefined;
+      const scheduleCron = args.schedule_cron as string | undefined;
+      // The control plane demands a timezone alongside a cron and refuses both
+      // on an event trigger, so the default applies only where one is required
+      // — defaulting unconditionally would turn a missing field into a 400.
+      const scheduleTz =
+        (args.schedule_tz as string | undefined) ??
+        ((triggerType ?? "schedule") === "schedule" && scheduleCron !== undefined
+          ? "UTC"
+          : undefined);
+      const repositories = (args.repositories as AutomationRepositoryArg[] | undefined)?.map(
+        (repository) => ({
+          repoOwner: repository.repo_owner,
+          repoName: repository.repo_name,
+          baseBranch: repository.base_branch ?? null,
+        })
+      );
+
+      // Undefined fields drop out of the serialized body, which is what keeps
+      // an omitted argument an omission rather than an explicitly empty value.
+      return client.post("/automations", {
+        name: args.name,
+        instructions: args.instructions,
+        triggerType,
+        scheduleCron,
+        scheduleTz,
+        eventType: args.event_type,
+        triggerConfig: args.trigger_config,
+        sentryClientSecret: args.sentry_client_secret,
+        repositories,
+        environmentIds: args.environment_ids,
+        harness: args.harness,
+        model: args.model,
+        reasoningEffort: args.reasoning_effort,
+      });
+    },
+  },
+  {
+    name: "trigger_automation",
+    title: "Run an automation now",
+    readOnly: false,
+    description:
+      "Start one run of an automation immediately, outside its schedule. Returns the invocation " +
+      "id and the sessions it launched; follow those with get_automation_run, or with " +
+      "get_session_events on a session id. The schedule is untouched — a manual run is an extra " +
+      "run, not a replacement for the next scheduled one. Fails with 409 while a run of this " +
+      "automation is already active, and does not queue behind it.",
+    inputSchema: { automation_id: automationId },
+    run: (client, args) =>
+      client.post(`/automations/${encodeURIComponent(args.automation_id as string)}/trigger`, {}),
   },
   {
     name: "list_skills",

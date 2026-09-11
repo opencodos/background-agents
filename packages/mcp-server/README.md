@@ -1,7 +1,8 @@
 # @open-inspect/mcp-server
 
 MCP server over the Open-Inspect control plane. Runs locally over stdio so an MCP client — Claude
-Code, an IDE — can inspect sessions and automation runs, and manage skills, without the web UI.
+Code, an IDE — can inspect sessions, create and run automations, and manage skills, without the web
+UI.
 
 ## Security model
 
@@ -15,21 +16,27 @@ properties make this safe to keep on a laptop:
 - **It reads anywhere your role allows, and writes only where a route invites it.** An access-token
   principal is refused every method but `GET`/`HEAD` unless the route declares `accessTokenWrites`
   in its own policy, whatever else that route allows (`principalMayUseMethod` in control-plane
-  `auth/principal.ts`). Four routes declare it — skill import and re-import, plus their previews —
-  so the tools below can create and update skills. A leaked token still cannot issue a
-  `DELETE /sessions/:id`, a `PUT /secrets`, or a `DELETE /skills/:id`.
+  `auth/principal.ts`). Six routes declare it — skill import and re-import plus their previews,
+  automation create, and manual automation trigger — so the tools below can create and update
+  skills, and create and run automations. Every one of the six is additive: it adds a skill
+  revision, an automation, or a run. A leaked token still cannot issue a `DELETE /sessions/:id`, a
+  `PUT /secrets`, a `DELETE /skills/:id`, or a `DELETE /automations/:id`, and cannot rewrite, pause,
+  or resume an automation that already exists.
 
   Safe methods are the default rather than a route allowlist because every mutating route is already
   a non-GET, while an allowlist would fail open for each read route added later. The exceptions are
   declared one route at a time and enumerated by a test in `router.policy.test.ts`, so adding a
-  fifth is a visible change rather than a quiet one.
+  seventh is a visible change rather than a quiet one.
 
 - **You can revoke it yourself, immediately.** Settings → Access Tokens → Revoke. No deploy, no
   Terraform apply. A token also cannot mint another token: `/access-tokens` is a human-only route,
   so a leaked credential cannot issue itself a successor to survive its own revocation.
 
 Importing a skill needs `skills.manage`, which is an administrator or owner grant. A token whose
-owner holds a lesser role reads fine and is refused the import with `permission_required`.
+owner holds a lesser role reads fine and is refused the import with `permission_required`. Creating
+an automation needs `automations.create`, and triggering one `automations.trigger` — scoped, so a
+token reaches the automations its owner may run and no others. An automation targeting repositories
+or environments faces the same `repositories.use` and `environments.use` checks its owner would.
 
 The control plane stores only a SHA-256 hash of the token, so a database read cannot recover a
 working credential.
@@ -37,8 +44,13 @@ working credential.
 Two limits worth knowing. Human-only routes — `GET /sessions/:id` and `sandbox-access`, the latter
 of which mints credentials — are deliberately out of reach; a token that could reach them would be a
 larger credential than the one it replaces. And the token sits in plaintext in your MCP client
-config, like any local API key. That is the reason its writes are confined to four declared routes,
+config, like any local API key. That is the reason its writes are confined to six declared routes,
 its reads and writes alike are bounded by your role, and it is revocable in one click.
+
+One consequence worth weighing before you issue a token to a machine you do not control: an
+automation is instructions that run later, in a sandbox, as you. A token that can create and trigger
+one can therefore schedule work in your name — bounded by your role and your targets, visible in the
+dashboard, and stoppable by deleting the automation, which the token itself cannot do.
 
 ## Setup
 
@@ -83,12 +95,37 @@ from a command, check that the command actually printed something first.
 | `get_session_diff`      | `GET /sessions/:id/diff`           | the changes a session produced                  |
 | `list_automation_runs`  | `GET /automations/:id/invocations` | did a scheduled automation fire, skip, or fail  |
 | `get_automation_run`    | `GET /automations/:id/runs/:runId` | one run and the sessions it launched            |
+| `create_automation`     | `POST /automations`                | schedule or wire up new recurring work          |
+| `trigger_automation`    | `POST /automations/:id/trigger`    | run one now, outside its schedule               |
 | `list_skills`           | `GET /skills`                      | find a skill id, and where it was imported from |
 | `import_skill_from_git` | `POST /skills/import`              | create a skill from a repository                |
 | `update_skill_from_git` | `POST /skills/:id/reimport`        | re-import a skill from its recorded source      |
 
 `get_session_events`, `get_session_messages` and `list_skills` are paged — pass the cursor from a
 response back to continue.
+
+There is no `list_automations`: `GET /automations` is a read this credential may make, but no tool
+wraps it yet, so an automation id comes from `create_automation` or from the dashboard.
+
+### The two automation writes
+
+- `create_automation` takes a name, instructions, and a trigger. The default trigger is `schedule`,
+  which wants a `schedule_cron` and the `schedule_tz` it is read in — the timezone defaults to UTC,
+  which is rarely the hour anyone means, so pass your own. Event-driven triggers (`github_event`,
+  `linear_event`, `slack_event`, `sentry`, `webhook`) want an `event_type` and usually a
+  `trigger_config` of conditions; that argument reuses the control plane's own condition schema, so
+  the client shows the real shape. A `sentry` trigger additionally needs `sentry_client_secret` —
+  Sentry's own secret for the webhook it will call — and is refused without one. A `webhook`
+  automation returns the key that calls it, shown this once and never again.
+
+  The automation is created **enabled**, so a schedule starts firing at the next occurrence of its
+  cron. This credential cannot edit or pause one afterwards, so create it with the schedule it
+  should keep; a mistake is corrected in the web UI, or by creating a replacement.
+
+- `trigger_automation` runs one now, outside its schedule, and returns the invocation id and the
+  sessions it launched — follow those with `get_automation_run` or `get_session_events`. It leaves
+  the schedule alone: a manual run is an extra run, not a replacement for the next one. It fails
+  with 409 while a run of that automation is already active, and does not queue behind it.
 
 ### The two skill writes
 
@@ -122,9 +159,10 @@ along with the commit that revision was recorded at, and reports `revisionCreate
 Neither tool deletes anything: a re-import adds a revision, and the previous content stays in the
 skill's history.
 
-The read routes already carried a policy that accepts this credential. The four import routes are
-the only ones this package's writes required a policy change for; see `SKILLS_IMPORT` in
-control-plane `routes/skills.ts`.
+The read routes already carried a policy that accepts this credential. The routes this package's
+writes required a policy change for are the four skill imports (`SKILLS_IMPORT` in control-plane
+`routes/skills.ts`), `POST /automations` in `routes/automation-crud.ts`, and
+`POST /automations/:id/trigger` in `routes/automation-lifecycle.ts`.
 
 ## Development
 

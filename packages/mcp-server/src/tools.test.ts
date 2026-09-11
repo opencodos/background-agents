@@ -82,7 +82,9 @@ describe("tool surface", () => {
 
     const writes = tools.filter((entry) => entry.annotations?.readOnlyHint === false);
     expect(writes.map((entry) => entry.name).sort()).toEqual([
+      "create_automation",
       "import_skill_from_git",
+      "trigger_automation",
       "update_skill_from_git",
     ]);
     // Re-import moves the skill's current revision, which is what later
@@ -94,18 +96,31 @@ describe("tool surface", () => {
     expect(hints.import_skill_from_git).toBe(false);
     expect(hints.list_skills).toBe(false);
 
-    // The nested union in the import tool is the shape most likely to fail.
+    // The nested unions are the shapes most likely to fail: the import tool's
+    // assignments, and the shared trigger-condition union that create_automation
+    // reuses rather than restating.
     const importTool = tools.find((entry) => entry.name === "import_skill_from_git");
     expect(importTool?.inputSchema.properties).toHaveProperty("assignments");
+    const createTool = tools.find((entry) => entry.name === "create_automation");
+    expect(createTool?.inputSchema.properties).toHaveProperty("trigger_config");
+    expect(createTool?.inputSchema.required).toEqual(["name", "instructions"]);
     await mcpClient.close();
   });
 
-  it("marks skill import and re-import as the only writes", () => {
+  it("keeps the writes to the four additive ones, none of which destroys anything", () => {
+    // Every one of these adds a skill revision, an automation, or a run. A tool
+    // that deletes, rewrites, or pauses would need a control-plane route to opt
+    // an access token in first, which is the review this list stands in for.
     const writes = TOOLS.filter((candidate) => !candidate.readOnly).map(
       (candidate) => candidate.name
     );
 
-    expect(writes.sort()).toEqual(["import_skill_from_git", "update_skill_from_git"]);
+    expect(writes.sort()).toEqual([
+      "create_automation",
+      "import_skill_from_git",
+      "trigger_automation",
+      "update_skill_from_git",
+    ]);
   });
 });
 
@@ -116,6 +131,150 @@ describe("list_skills", () => {
     await tool("list_skills").run(client, { limit: 25, cursor: "deploy-service" });
 
     expect(get).toHaveBeenCalledWith("/skills", { limit: 25, cursor: "deploy-service" });
+  });
+});
+
+describe("create_automation", () => {
+  it("camel-cases the body and defaults a schedule's timezone", async () => {
+    const { client, post } = fakeClient({ post: () => ({ automation: { id: "auto_1" } }) });
+
+    await tool("create_automation").run(client, {
+      name: "Nightly sync",
+      instructions: "Run the tests",
+      schedule_cron: "0 9 * * *",
+      repositories: [{ repo_owner: "acme", repo_name: "web-app", base_branch: "develop" }],
+    });
+
+    expect(post).toHaveBeenCalledWith("/automations", {
+      name: "Nightly sync",
+      instructions: "Run the tests",
+      triggerType: undefined,
+      scheduleCron: "0 9 * * *",
+      scheduleTz: "UTC",
+      eventType: undefined,
+      triggerConfig: undefined,
+      repositories: [{ repoOwner: "acme", repoName: "web-app", baseBranch: "develop" }],
+      environmentIds: undefined,
+      harness: undefined,
+      model: undefined,
+      reasoningEffort: undefined,
+    });
+  });
+
+  it("keeps the caller's timezone rather than the default", async () => {
+    const { client, post } = fakeClient({ post: () => ({ automation: { id: "auto_1" } }) });
+
+    await tool("create_automation").run(client, {
+      name: "Nightly sync",
+      instructions: "Run the tests",
+      schedule_cron: "0 9 * * *",
+      schedule_tz: "Europe/Berlin",
+    });
+
+    expect(post).toHaveBeenCalledWith(
+      "/automations",
+      expect.objectContaining({ scheduleTz: "Europe/Berlin" })
+    );
+  });
+
+  it("sends no timezone on an event trigger, which the control plane refuses one on", async () => {
+    const { client, post } = fakeClient({ post: () => ({ automation: { id: "auto_1" } }) });
+
+    await tool("create_automation").run(client, {
+      name: "Review PRs",
+      instructions: "Review the diff",
+      trigger_type: "github_event",
+      event_type: "pull_request.opened",
+      repositories: [{ repo_owner: "acme", repo_name: "web-app" }],
+    });
+
+    expect(post).toHaveBeenCalledWith(
+      "/automations",
+      expect.objectContaining({
+        triggerType: "github_event",
+        eventType: "pull_request.opened",
+        scheduleCron: undefined,
+        scheduleTz: undefined,
+        // Omitted, not null: the control plane reads an omitted base branch as
+        // "the repository's own default" and a null one the same way, but only
+        // the list entry itself carries that null.
+        repositories: [{ repoOwner: "acme", repoName: "web-app", baseBranch: null }],
+      })
+    );
+  });
+
+  it("forwards the Sentry client secret, without which a sentry trigger is refused", async () => {
+    // The control plane 400s every sentry create that carries no secret, so a
+    // tool that could not send one advertised a trigger it could never use.
+    const { client, post } = fakeClient({ post: () => ({ automation: { id: "auto_1" } }) });
+
+    await tool("create_automation").run(client, {
+      name: "Triage Sentry issues",
+      instructions: "Investigate the issue",
+      trigger_type: "sentry",
+      sentry_client_secret: "sntrys_abc123",
+    });
+
+    expect(post).toHaveBeenCalledWith(
+      "/automations",
+      expect.objectContaining({ triggerType: "sentry", sentryClientSecret: "sntrys_abc123" })
+    );
+  });
+
+  it("omits the Sentry secret entirely when none was given", async () => {
+    const { client, post } = fakeClient({ post: () => ({ automation: { id: "auto_1" } }) });
+
+    await tool("create_automation").run(client, {
+      name: "Nightly sync",
+      instructions: "Run the tests",
+      schedule_cron: "0 9 * * *",
+    });
+
+    expect(post).toHaveBeenCalledWith(
+      "/automations",
+      expect.objectContaining({ sentryClientSecret: undefined })
+    );
+  });
+
+  it("returns what the control plane reported, including a one-time webhook key", async () => {
+    // The key is shown once at creation and never again, so narrowing the
+    // response would make a webhook automation uncallable.
+    const created = {
+      automation: { id: "auto_1", name: "On push" },
+      webhookApiKey: "whk_secret",
+      webhookUrl: "https://cp.test/webhooks/automation/auto_1",
+      warning: "Next scheduled run is more than 31 days away",
+    };
+    const { client } = fakeClient({ post: () => created });
+
+    await expect(
+      tool("create_automation").run(client, {
+        name: "On push",
+        instructions: "Do the thing",
+        trigger_type: "webhook",
+      })
+    ).resolves.toEqual(created);
+  });
+});
+
+describe("trigger_automation", () => {
+  it("posts to the automation's trigger route", async () => {
+    const { client, post } = fakeClient({
+      post: () => ({ invocationId: "inv_1", runs: [{ id: "run_1" }] }),
+    });
+
+    const result = await tool("trigger_automation").run(client, { automation_id: "auto_1" });
+
+    expect(post).toHaveBeenCalledWith("/automations/auto_1/trigger", {});
+    expect(result).toEqual({ invocationId: "inv_1", runs: [{ id: "run_1" }] });
+  });
+
+  it("escapes the automation id into the path", async () => {
+    const { client, post } = fakeClient({ post: () => ({ invocationId: "inv_1", runs: [] }) });
+
+    await tool("trigger_automation").run(client, { automation_id: "auto/../1" });
+
+    expect(post).toHaveBeenCalledWith("/automations/auto%2F..%2F1/trigger", {});
   });
 });
 
