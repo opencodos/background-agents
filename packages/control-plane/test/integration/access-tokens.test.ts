@@ -65,6 +65,78 @@ describe("personal access tokens", () => {
     }
   });
 
+  async function assignRole(roleId: string): Promise<void> {
+    await env.DB.prepare("UPDATE user_role_assignments SET role_id = ? WHERE user_id = ?")
+      .bind(roleId, USER_ID)
+      .run();
+  }
+
+  function skillRequest(token: string, method: string, path: string): Promise<Response> {
+    return SELF.fetch(`https://test.local${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: "{}",
+    });
+  }
+
+  describe("skill import, the one write a token may make", () => {
+    it("reaches import once the owner holds skills.manage", async () => {
+      await assignRole("role_builtin_administrator");
+      const token = await issueToken();
+
+      // 400 from the handler's own body validation: admission let it through,
+      // which is the whole claim. A 403 here would mean it never arrived.
+      const response = await skillRequest(token, "POST", "/skills/import");
+      expect(response.status).toBe(400);
+    });
+
+    it("refuses an owner whose role lacks skills.manage", async () => {
+      // The default role is member. Before access tokens resolved their
+      // owner's authorization this passed unchecked, because a principal with
+      // no loaded subject waved every permission requirement through.
+      await assignRole("role_builtin_member");
+      const token = await issueToken();
+
+      const response = await skillRequest(token, "POST", "/skills/import");
+      expect(response.status).toBe(403);
+      expect(await response.json()).toMatchObject({
+        code: "permission_required",
+        permission: "skills.manage",
+      });
+    });
+
+    it("refuses a suspended owner, whose browser session would be refused too", async () => {
+      await assignRole("role_builtin_administrator");
+      await env.DB.prepare("UPDATE users SET suspended_at = ? WHERE id = ?")
+        .bind(Date.now(), USER_ID)
+        .run();
+      const token = await issueToken();
+
+      expect((await skillRequest(token, "POST", "/skills/import")).status).toBe(403);
+    });
+
+    it("does not carry over to the destructive skill routes", async () => {
+      // The exception is four import routes, not `skills.manage` as a whole:
+      // an import is recoverable from the revision history and a delete is not.
+      // These stay human-only, so they refuse on the principal's kind before
+      // the method is even considered.
+      await assignRole("role_builtin_administrator");
+      const token = await issueToken();
+
+      for (const [method, path] of [
+        ["DELETE", "/skills/any"],
+        ["PUT", "/skills/any"],
+        ["POST", "/skills"],
+      ] as const) {
+        const response = await skillRequest(token, method, path);
+        expect(response.status, `${method} ${path}`).toBe(403);
+        expect(await response.json(), `${method} ${path}`).toMatchObject({
+          error: "Human user authentication required",
+        });
+      }
+    });
+  });
+
   it("cannot mint another token, so revocation stays meaningful", async () => {
     // /access-tokens is human-only. A token that could issue itself a
     // successor would survive its own revocation.

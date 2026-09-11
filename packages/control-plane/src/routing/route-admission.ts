@@ -6,7 +6,12 @@ import {
   type PermissionId,
 } from "@open-inspect/shared/rbac";
 import { authenticate, isAuthError } from "../auth/authenticate";
-import { principalMayUseMethod, type Principal } from "../auth/principal";
+import {
+  canonicalUserIdOf,
+  principalMayUseMethod,
+  type AccessTokenWrites,
+  type Principal,
+} from "../auth/principal";
 import type {
   AuthorizationDecisionRequirement,
   RouteAuthorizationDecision,
@@ -228,7 +233,8 @@ export function enforceRoutePrincipal(
   authentication: RouteAuthentication,
   principal: Principal,
   method: string,
-  evidence: AuthorizationEvidence = emptyEvidence()
+  evidence: AuthorizationEvidence = emptyEvidence(),
+  accessTokenWrites: AccessTokenWrites = "deny"
 ): AuthorizationFailure | null {
   if (
     authentication.kind === "web-service" &&
@@ -236,7 +242,11 @@ export function enforceRoutePrincipal(
   ) {
     return { response: error("Unauthorized", 401) };
   }
-  if (authentication.kind === "user" && principal.kind !== "user") {
+  // A route that admits token writes admits the token itself: the credential
+  // is its owner, and such a route resolves that owner exactly as it resolves
+  // a browser user. Every other route stays human-only.
+  const admitsToken = accessTokenWrites === "allow" && principal.kind === "access-token";
+  if (authentication.kind === "user" && principal.kind !== "user" && !admitsToken) {
     return authorizationDenial(
       error("Human user authentication required", 403),
       evidence,
@@ -254,10 +264,11 @@ export function enforceRoutePrincipal(
       "Service authentication required"
     );
   }
-  // A read-only access token is refused every mutating method on every
-  // route, regardless of the route's authorization policy. This is the
-  // trust boundary between a leaked token and DELETE /sessions/:id.
-  if (!principalMayUseMethod(principal, method)) {
+  // An access token is refused every mutating method on every route that has
+  // not declared `accessTokenWrites`, regardless of the route's authorization
+  // policy. This is the trust boundary between a leaked token and
+  // DELETE /sessions/:id.
+  if (!principalMayUseMethod(principal, method, accessTokenWrites)) {
     return authorizationDenial(
       error("This credential may only read", 403),
       evidence,
@@ -297,12 +308,11 @@ async function enforceActiveUser(
     // actor here means enrollment was skipped, so never authorize it.
     return authorizationUnavailable();
   }
-  const userId =
-    ctx.principal?.kind === "user"
-      ? ctx.principal.userId
-      : ctx.principal?.kind === "service"
-        ? ctx.principal.actor?.canonicalUserId
-        : null;
+  // An access token is its owner, so it loads the same role and suspension
+  // state a browser session would. Without this the token would carry no
+  // authorization at all, and `enforcePermissionRequirement` would wave every
+  // requirement through for want of a subject.
+  const userId = canonicalUserIdOf(ctx.principal);
   if (!userId) return null;
   const requirement = { kind: "active-user" } as const;
   try {
@@ -419,7 +429,11 @@ async function finalizeServiceActor(
 }
 
 function authorizationUserId(ctx: RequestContext): string | null {
-  if (ctx.principal?.kind === "user") return ctx.principal.userId;
+  // An access token authorizes as its owner, exactly as `enforceActiveUser`
+  // loaded it. Returning null here would skip the permission check instead.
+  if (ctx.principal?.kind === "user" || ctx.principal?.kind === "access-token") {
+    return ctx.principal.userId;
+  }
   if (ctx.principal?.kind === "service") {
     return ctx.principal.actor?.canonicalUserId ?? ctx.authorization?.userId ?? null;
   }
@@ -633,7 +647,8 @@ async function enforceRouteAuthorization(
     policy.authentication,
     principal,
     request.method,
-    evidence
+    evidence,
+    policy.accessTokenWrites ?? "deny"
   );
   if (principalFailure) return resultForFailure(principalFailure);
 

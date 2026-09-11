@@ -117,6 +117,42 @@ describe("ControlPlaneClient", () => {
     await expect(client.get("/sessions/s1/diff")).rejects.toThrow(/exceeded 8388608 bytes/);
   });
 
+  it("posts a JSON body with the headers the route needs", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ skill: {} }));
+    await new ControlPlaneClient({ baseUrl: BASE_URL, token: TOKEN }).post(
+      "/skills/s1/reimport",
+      { ref: "main" },
+      { headers: { "If-Match": '"skillrev_1"' } }
+    );
+
+    const [url, init] = fetchMock.mock.calls[0];
+    const headers = init.headers as Record<string, string>;
+    expect(url).toBe(`${BASE_URL}/skills/s1/reimport`);
+    expect(init.method).toBe("POST");
+    expect(init.body).toBe('{"ref":"main"}');
+    expect(headers["Content-Type"]).toBe("application/json");
+    expect(headers["If-Match"]).toBe('"skillrev_1"');
+    expect(headers.Authorization).toBe(`Bearer ${TOKEN}`);
+  });
+
+  it("sends no body and no content type on a GET", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({}));
+    await new ControlPlaneClient({ baseUrl: BASE_URL, token: TOKEN }).get("/skills");
+
+    const init = fetchMock.mock.calls[0][1];
+    expect(init.body).toBeUndefined();
+    expect((init.headers as Record<string, string>)["Content-Type"]).toBeUndefined();
+  });
+
+  it("names the method in a POST failure, so a 403 is not read as a failed read", async () => {
+    fetchMock.mockImplementation(async () => new Response("Forbidden", { status: 403 }));
+    const client = new ControlPlaneClient({ baseUrl: BASE_URL, token: TOKEN });
+
+    await expect(client.post("/skills/import", {})).rejects.toThrow(
+      /POST \/skills\/import returned 403/
+    );
+  });
+
   it("does not double the slash when the base URL has a trailing one", async () => {
     fetchMock.mockResolvedValue(jsonResponse({}));
     await new ControlPlaneClient({ baseUrl: `${BASE_URL}/`, token: TOKEN }).get("/sessions");

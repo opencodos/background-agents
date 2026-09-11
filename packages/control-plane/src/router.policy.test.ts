@@ -579,4 +579,69 @@ describe("route principal policy", () => {
     const bot = { kind: "service", service: "linear-bot", actor: null } as const;
     expect(enforceRoutePrincipal(readRoute, bot, "DELETE")).toBeNull();
   });
+
+  it.each(["POST", "PUT", "PATCH", "DELETE"])(
+    "lets a token use %s on a route that declares accessTokenWrites",
+    (method) => {
+      expect(
+        enforceRoutePrincipal(readRoute, tokenPrincipal, method, undefined, "allow")
+      ).toBeNull();
+    }
+  );
+
+  it("admits a token to a human-only route it declares token writes for", () => {
+    // Skill import is a { kind: "user" } route: without this the token would
+    // be refused for its principal kind before the method was ever considered.
+    expect(
+      enforceRoutePrincipal({ kind: "user" }, tokenPrincipal, "POST", undefined, "allow")
+    ).toBeNull();
+  });
+
+  it("keeps the declaration route-local, so a neighbouring route stays read-only", () => {
+    expect(
+      enforceRoutePrincipal(readRoute, tokenPrincipal, "DELETE", undefined, "deny")?.response.status
+    ).toBe(403);
+    expect(enforceRoutePrincipal(readRoute, tokenPrincipal, "DELETE")?.response.status).toBe(403);
+  });
+});
+
+describe("access-token write declarations", () => {
+  it("is declared by the skill import routes and nothing else", () => {
+    // The read-only claim is only as good as this list is short. A new route
+    // opting in has to change this test, which is where the reviewer looks.
+    const declared = routes
+      .filter((route) => route.accessTokenWrites === "allow")
+      .map((route) => `${route.method} ${route.path}`)
+      .sort();
+
+    expect(declared).toEqual([
+      "POST /skills/:id/reimport",
+      "POST /skills/:id/reimport/preview",
+      "POST /skills/import",
+      "POST /skills/import/preview",
+    ]);
+  });
+
+  it("still requires skills.manage, so the token widens the credential and not the user", () => {
+    for (const path of ["/skills/import", "/skills/:id/reimport"]) {
+      const route = routes.find((entry) => entry.method === "POST" && entry.path === path);
+      expect(route?.authorization).toMatchObject({
+        kind: "active-user",
+        allOf: [{ kind: "permission", permission: "skills.manage" }],
+      });
+    }
+  });
+
+  it("leaves the destructive skill routes human-only", () => {
+    for (const [method, path] of [
+      ["DELETE", "/skills/:id"],
+      ["PUT", "/skills/:id"],
+      ["PATCH", "/skills/:id"],
+      ["POST", "/skills"],
+    ] as const) {
+      const route = routes.find((entry) => entry.method === method && entry.path === path);
+      expect(route, `${method} ${path}`).toBeDefined();
+      expect(route?.accessTokenWrites, `${method} ${path}`).toBeUndefined();
+    }
+  });
 });

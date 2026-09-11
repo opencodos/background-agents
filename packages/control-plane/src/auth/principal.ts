@@ -76,6 +76,16 @@ export function canonicalUserIdOf(principal: Principal | undefined): string | nu
 const READ_ONLY_METHODS: ReadonlySet<string> = new Set(["GET", "HEAD"]);
 
 /**
+ * Whether a route admits an access token's mutating methods.
+ *
+ * `deny`, the default everywhere, is what makes the credential read-only. A
+ * route declares `allow` only when it wants the token to write, and only when
+ * its handler resolves its subject through `canonicalUserIdOf` rather than
+ * requiring a browser-authenticated human.
+ */
+export type AccessTokenWrites = "allow" | "deny";
+
+/**
  * Whether this principal may issue a request with this method.
  *
  * An access token is the one credential that lives outside the deployment —
@@ -86,11 +96,21 @@ const READ_ONLY_METHODS: ReadonlySet<string> = new Set(["GET", "HEAD"]);
  * same token on a `DELETE /sessions/:id` or `PUT /secrets` is refused whoever
  * built the request.
  *
- * Safe methods are the boundary rather than a route allowlist because every
+ * Safe methods are the default rather than a route allowlist because every
  * mutating route is already a non-GET, and an allowlist silently fails open
- * for each read route added later.
+ * for each read route added later. Routes that want a token to write — skill
+ * import, so the MCP server can create and update skills — opt in one at a
+ * time through their own policy, which keeps the exceptions enumerable and
+ * states them next to the permission the write already demands. The opt-in
+ * narrows what a leaked token reaches to those routes; everything else stays
+ * refused whoever built the request.
  */
-export function principalMayUseMethod(principal: Principal, method: string): boolean {
+export function principalMayUseMethod(
+  principal: Principal,
+  method: string,
+  accessTokenWrites: AccessTokenWrites = "deny"
+): boolean {
   if (principal.kind !== "access-token") return true;
+  if (accessTokenWrites === "allow") return true;
   return READ_ONLY_METHODS.has(method.toUpperCase());
 }
