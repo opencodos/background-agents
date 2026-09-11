@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import type { HarnessId } from "@open-inspect/shared/harnesses";
 import type { SpawnSource } from "@open-inspect/shared/types/sessions";
 import { SessionIndexStore } from "./session-index";
 import type { SessionEntry } from "./session-index";
@@ -8,6 +9,7 @@ type SessionRow = {
   title: string | null;
   repo_owner: string | null;
   repo_name: string | null;
+  harness: HarnessId;
   model: string;
   reasoning_effort: string | null;
   base_branch: string | null;
@@ -217,6 +219,7 @@ class FakeD1Database {
         title,
         repoOwner,
         repoName,
+        harness,
         model,
         reasoningEffort,
         baseBranch,
@@ -239,6 +242,7 @@ class FakeD1Database {
         string | null,
         string | null,
         string | null,
+        HarnessId,
         string,
         string | null,
         string | null,
@@ -268,6 +272,7 @@ class FakeD1Database {
           title,
           repo_owner: repoOwner,
           repo_name: repoName,
+          harness,
           model,
           reasoning_effort: reasoningEffort,
           base_branch: baseBranch,
@@ -515,6 +520,7 @@ describe("SessionIndexStore", () => {
       expect(result).toEqual({
         ...session,
         // Defaults applied for missing optional fields
+        harness: "opencode",
         parentSessionId: null,
         spawnSource: "user",
         spawnDepth: 0,
