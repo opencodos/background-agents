@@ -27,6 +27,7 @@ import {
   type SessionModelProviderAuthInput,
 } from "../model-provider-accounts/provider-auth-contracts";
 import { bulkInsertStatements } from "./bulk-insert";
+import { SessionStatusProjectionStore } from "./session-status-projection-store";
 import { attachSessionListMetadata } from "./session-list-metadata";
 import {
   SessionInboxStore,
@@ -44,20 +45,6 @@ export interface ChildAdmissionLease {
   token: string;
   childSessionId: string;
   expiresAt: number;
-}
-
-export interface OperatorArchiveCandidateCursor {
-  createdAt: number;
-  id: string;
-}
-
-export interface OperatorArchiveCandidate extends OperatorArchiveCandidateCursor {
-  indexStatus: SessionStatus;
-}
-
-export interface OperatorArchiveCandidatePage {
-  candidates: OperatorArchiveCandidate[];
-  hasMore: boolean;
 }
 
 /**
@@ -759,13 +746,7 @@ export class SessionIndexStore {
   }
 
   async updateStatus(id: string, status: SessionStatus, updatedAt = Date.now()): Promise<boolean> {
-    // Protect against out-of-order async writes by only applying monotonic updated_at values.
-    const result = await this.db
-      .prepare("UPDATE sessions SET status = ?, updated_at = ? WHERE id = ? AND updated_at <= ?")
-      .bind(status, updatedAt, id, updatedAt)
-      .run();
-
-    return (result.meta?.changes ?? 0) > 0;
+    return new SessionStatusProjectionStore(this.db).updateUnclaimed(id, status, updatedAt);
   }
 
   async updateMetrics(
@@ -787,38 +768,6 @@ export class SessionIndexStore {
     return (result.meta?.changes ?? 0) > 0;
   }
 
-  async listOperatorArchiveCandidates(options: {
-    cutoffCreatedAt: number;
-    cursor: OperatorArchiveCandidateCursor | null;
-    limit: number;
-  }): Promise<OperatorArchiveCandidatePage> {
-    const { cutoffCreatedAt, cursor, limit } = options;
-    const cursorClause = cursor ? "AND (created_at > ? OR (created_at = ? AND id > ?))" : "";
-    const params = cursor
-      ? [cutoffCreatedAt, cursor.createdAt, cursor.createdAt, cursor.id, limit + 1]
-      : [cutoffCreatedAt, limit + 1];
-    const result = await this.db
-      .prepare(
-        `SELECT id, created_at, status FROM sessions
-         WHERE created_at <= ?
-         ${cursorClause}
-         ORDER BY created_at ASC, id ASC
-         LIMIT ?`
-      )
-      .bind(...params)
-      .all<{ id: string; created_at: number; status: SessionStatus }>();
-    const rows = result.results ?? [];
-
-    return {
-      candidates: rows.slice(0, limit).map((row) => ({
-        id: row.id,
-        createdAt: row.created_at,
-        indexStatus: row.status,
-      })),
-      hasMore: rows.length > limit,
-    };
-  }
-
   /**
    * Warm sessions that never received a prompt, untouched since `staleBefore`.
    *
@@ -826,7 +775,7 @@ export class SessionIndexStore {
    * so a row still sitting there long after its last update was abandoned before
    * any work started. Ordered oldest-first, which drains a backlog only while
    * every visited row leaves this set — see `archiveOrphanedDraft` and
-   * `repairStatus` for the two cases where that had to be made true.
+   * the runtime's status projection for the two cases where that had to be made true.
    */
   async listAbandonedDraftSessionIds(staleBefore: number, limit: number): Promise<string[]> {
     const result = await this.db
@@ -851,35 +800,7 @@ export class SessionIndexStore {
    * session between the sweep's read and this write is left alone.
    */
   async archiveOrphanedDraft(id: string): Promise<boolean> {
-    const result = await this.db
-      .prepare(
-        "UPDATE sessions SET status = 'archived', updated_at = ? WHERE id = ? AND status = 'created'"
-      )
-      .bind(Date.now(), id)
-      .run();
-
-    return (result.meta?.changes ?? 0) > 0;
-  }
-
-  /**
-   * Correct a draft status projection that drifted away from its Durable Object.
-   *
-   * Deliberately not `updateStatus`, which carries an `updated_at` and refuses
-   * writes that would move it backwards. That guard keeps concurrent transitions
-   * ordered, but it silently drops a repair: the Durable Object sends its own
-   * timestamp, which is behind D1's whenever `touchUpdatedAt` has run, so the
-   * write matches no rows and reports success as `false`. This repair asserts
-   * only the stale shape the draft sweep selected: D1 still says `created`, and
-   * the Durable Object says otherwise. Only that status column is written,
-   * leaving `updated_at` to keep meaning "last real activity".
-   */
-  async repairStatus(id: string, status: SessionStatus): Promise<boolean> {
-    const result = await this.db
-      .prepare("UPDATE sessions SET status = ? WHERE id = ? AND status = 'created' AND status != ?")
-      .bind(status, id, status)
-      .run();
-
-    return (result.meta?.changes ?? 0) > 0;
+    return new SessionStatusProjectionStore(this.db).archiveOrphanedDraft(id);
   }
 
   async touchUpdatedAt(id: string): Promise<boolean> {

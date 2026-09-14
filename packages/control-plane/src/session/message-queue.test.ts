@@ -61,6 +61,7 @@ function createSession(overrides: Partial<SessionRow> = {}): SessionRow {
     model: "anthropic/claude-haiku-4-5",
     reasoning_effort: null,
     status: "active",
+    status_revision: 1,
     parent_session_id: null,
     spawn_source: "user" as const,
     spawn_depth: 0,
@@ -400,6 +401,13 @@ describe("SessionMessageQueue", () => {
         kind: "review",
         authorType: "human",
         feedbackUrl: "https://github.com/acme/widgets/pull/42#pullrequestreview-1234",
+        feedback: {
+          version: 1,
+          kind: "review",
+          url: "https://github.com/acme/widgets/pull/42#pullrequestreview-1234",
+          body: "Review body",
+          comments: [],
+        },
       },
       attemptLimit: 10,
     };

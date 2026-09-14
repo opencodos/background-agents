@@ -1,13 +1,39 @@
-import type {
-  SessionInboxCategory,
-  SessionInboxItem,
-  SessionInboxPage,
-  SessionInboxSnapshot,
-  SessionListItem,
+import {
+  sessionInboxCategorySchema,
+  sessionInboxItemSchema,
+  sessionInboxPageSchema,
+  sessionInboxSessionSchema,
+  sessionInboxSnapshotSchema,
+  type SessionInboxCategory,
+  type SessionInboxItem,
+  type SessionInboxPage,
+  type SessionInboxSession,
+  type SessionInboxSnapshot,
 } from "@open-inspect/shared/types/session-inbox";
 import type { SessionReadState } from "@open-inspect/shared/types/sessions";
+import { z } from "zod";
 import type { BrowserApiPath } from "./browser-api-fetch";
-import { applySessionReadStateToItem } from "./session-read-state";
+import { applySessionReadStateToItem, sessionReadStateClientSchema } from "./session-read-state";
+
+const sessionInboxSessionClientSchema = sessionInboxSessionSchema.extend({
+  readState: sessionReadStateClientSchema,
+});
+const sessionInboxItemClientSchema = sessionInboxItemSchema.extend({
+  rootSession: sessionInboxSessionClientSchema,
+  descendantSessions: z.array(sessionInboxSessionClientSchema),
+});
+const sessionInboxPageClientSchema = z
+  .object({
+    items: z.array(sessionInboxItemClientSchema),
+  })
+  .passthrough()
+  .pipe(sessionInboxPageSchema);
+const sessionInboxSnapshotClientSchema = z
+  .object({
+    categories: z.record(sessionInboxCategorySchema, sessionInboxPageClientSchema),
+  })
+  .passthrough()
+  .pipe(sessionInboxSnapshotSchema);
 
 const SESSION_INBOX_API_PATH = "/api/sessions/inbox";
 
@@ -39,7 +65,19 @@ export function isSessionInboxPaginationKey(key: unknown): boolean {
   return Array.isArray(key) && isSessionInboxKey(key[0]);
 }
 
-function applyTitleToSession(session: SessionListItem, sessionId: string, title: string | null) {
+export function parseSessionInboxPage(data: unknown): SessionInboxPage {
+  return sessionInboxPageClientSchema.parse(data);
+}
+
+export function parseSessionInboxSnapshot(data: unknown): SessionInboxSnapshot {
+  return sessionInboxSnapshotClientSchema.parse(data);
+}
+
+function applyTitleToSession(
+  session: SessionInboxSession,
+  sessionId: string,
+  title: string | null
+) {
   return session.id === sessionId ? { ...session, title } : session;
 }
 

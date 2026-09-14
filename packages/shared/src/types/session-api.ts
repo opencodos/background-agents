@@ -10,7 +10,7 @@ import {
   messageSourceSchema,
   sessionStatusSchema,
   type SandboxStatus,
-  type Session,
+  type SessionListResponse,
   type SessionStatus,
 } from "./sessions";
 
@@ -46,6 +46,14 @@ export const slackCallbackContextSchema = z.object({
 });
 
 export type SlackCallbackContext = z.infer<typeof slackCallbackContextSchema>;
+
+/**
+ * Domain separator for the Slack activity-refresh callback. Signed into the
+ * body and required by the route, so a body minted for another callback — whose
+ * signature is equally valid — cannot satisfy this one. Shared so the producer
+ * and the route cannot drift apart on the literal.
+ */
+export const SLACK_ACTIVITY_REFRESH_KIND = "slack.activity_refresh";
 
 const linearCallbackContextBaseSchema = z.strictObject({
   source: z.literal("linear"),
@@ -325,11 +333,8 @@ export const sendPromptResponseSchema = z.object({
 
 export type SendPromptResponse = z.infer<typeof sendPromptResponseSchema>;
 
-export interface ListSessionsResponse {
-  sessions: Session[];
-  cursor?: string;
-  hasMore: boolean;
-}
+/** @deprecated Import SessionListResponse from ./sessions. */
+export type ListSessionsResponse = SessionListResponse;
 
 /** Request body for POST /sessions/:parentId/children. */
 export const spawnChildSessionRequestSchema = z.object({
