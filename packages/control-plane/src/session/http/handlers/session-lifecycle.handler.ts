@@ -1,6 +1,9 @@
-import type { Logger } from "../../../logger";
 import type { WebSocketManager } from "../../../sandbox/lifecycle/manager";
 import type { SessionStatus } from "@open-inspect/shared/types/sessions";
+import {
+  SESSION_ARCHIVE_HTTP_STATUS,
+  type SessionArchiveOutcome,
+} from "@open-inspect/shared/types/session-archive";
 import type { SessionCoreRepository } from "../../session-core-repository";
 import type { SandboxRepository } from "../../sandbox-repository";
 import type { MessageRepository } from "../../message-repository";
@@ -9,11 +12,6 @@ import type { SessionTitleService } from "../../title-service";
 import { resolvePublicSessionId } from "../../public-session-id";
 import { normalizeSessionTitle, type SessionTitleUpdateResult } from "../../title";
 import { z } from "zod";
-import {
-  OPERATOR_ARCHIVE_HTTP_STATUS,
-  operatorArchiveRequestSchema,
-  type OperatorArchiveOutcome,
-} from "../../operator-archive";
 import { isSessionInactive } from "@open-inspect/shared/types/session-activity";
 
 /**
@@ -27,6 +25,14 @@ import { isSessionInactive } from "@open-inspect/shared/types/session-activity";
  */
 function isCancellable(status: SessionStatus): boolean {
   return !isSessionInactive(status);
+}
+
+/** Preserve the legacy response fields while deriving status from the shared decision. */
+function archiveResponse(
+  outcome: SessionArchiveOutcome,
+  fields: { error: string } | { status: "archived" }
+): Response {
+  return Response.json({ ...fields, outcome }, { status: SESSION_ARCHIVE_HTTP_STATUS[outcome] });
 }
 
 function sessionTitleUpdateStatus(
@@ -65,19 +71,6 @@ export class SessionLifecycleHandler {
     private readonly cancelSession: () => Promise<void>
   ) {}
 
-  private async getArchiveOutcome(status: SessionStatus): Promise<OperatorArchiveOutcome> {
-    if (status === "archived") {
-      await this.statusService.transition("archived");
-      return "already_archived";
-    }
-    if (status === "cancelled") return "skipped_cancelled";
-    if (this.messageRepository.getPendingOrProcessingCount() > 0) {
-      return "skipped_queued_work";
-    }
-
-    await this.statusService.transition("archived");
-    return "archived";
-  }
   getState(): Response {
     const session = this.sessionCoreRepository.getSession();
     if (!session) {
@@ -157,46 +150,28 @@ export class SessionLifecycleHandler {
       return Response.json({ error: "Session not found" }, { status: 404 });
     }
 
-    const outcome = await this.getArchiveOutcome(session.status);
-    if (outcome === "skipped_cancelled") {
-      return Response.json({ error: "Cancelled sessions cannot be archived" }, { status: 409 });
-    }
-    if (outcome === "skipped_queued_work") {
-      return Response.json({ error: "Cannot archive a session with queued work" }, { status: 409 });
+    if (session.status === "cancelled") {
+      return archiveResponse("skipped_cancelled", {
+        error: "Cancelled sessions cannot be archived",
+      });
     }
 
-    return Response.json({ status: "archived" });
-  }
-
-  async operatorArchive(request: Request, log: Logger): Promise<Response> {
-    const session = this.sessionCoreRepository.getSession();
-    if (!session) {
-      return Response.json({ error: "Session not found" }, { status: 404 });
+    if (this.messageRepository.getPendingOrProcessingCount() > 0) {
+      return archiveResponse("skipped_queued_work", {
+        error: "Cannot archive a session with queued work",
+      });
     }
 
-    let raw: unknown;
+    await this.statusService.transition("archived");
     try {
-      raw = await request.json();
+      await this.statusService.confirmIndexStatus("archived");
     } catch {
-      return Response.json({ error: "Invalid request body" }, { status: 400 });
-    }
-    const parsed = operatorArchiveRequestSchema.safeParse(raw);
-    if (!parsed.success) {
-      return Response.json({ error: "Invalid request body" }, { status: 400 });
+      return Response.json({ error: "Session archive projection unavailable" }, { status: 503 });
     }
 
-    const outcome = await this.getArchiveOutcome(session.status);
-    log.info("Operator session archive evaluated", {
-      event: "operator.session_archive",
-      operator_user_id: parsed.data.operatorUserId,
-      session_id: resolvePublicSessionId(session, this.durableObjectId),
-      outcome,
+    return archiveResponse(session.status === "archived" ? "already_archived" : "archived", {
+      status: "archived",
     });
-
-    return Response.json(
-      { outcome, status: outcome === "archived" ? "archived" : session.status },
-      { status: OPERATOR_ARCHIVE_HTTP_STATUS[outcome] }
-    );
   }
 
   /**

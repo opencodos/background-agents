@@ -201,10 +201,7 @@ describe("route admission matrix", { timeout: MATRIX_TIMEOUT_MS }, () => {
 
       // Raw web-service routes (browser auth, autofix activity) admit the web
       // principal and then let their handler own every status, including 403.
-      // The operator archive route is the same shape from a different angle:
-      // its handler additionally gates on the deployment's OPERATOR_USER_IDS
-      // allowlist, which this fixture's generic browser owner is not on.
-      if (kind !== "web-service" && identity !== "POST /operator/sessions/archive") {
+      if (kind !== "web-service") {
         expect(PROTECTED_STATUSES.has(response.status), `${identity} -> ${response.status}`).toBe(
           false
         );

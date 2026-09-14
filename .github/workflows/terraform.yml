@@ -19,10 +19,6 @@ on:
       - "packages/vercel-infra/**"
       - "packages/shared/**"
       - "packages/web/**" # Web app deployed via Terraform when web_platform = "cloudflare"
-      # Uploaded verbatim by modules/aws-control-plane, so a change to either
-      # changes the stack the AWS instance runs.
-      - "docker-compose.yml"
-      - "docker-compose.aws.yml"
       - ".github/workflows/terraform.yml"
   pull_request:
     branches: [main]
@@ -42,10 +38,6 @@ on:
       - "packages/vercel-infra/**"
       - "packages/shared/**"
       - "packages/web/**"
-      # Uploaded verbatim by modules/aws-control-plane, so a change to either
-      # changes the stack the AWS instance runs.
-      - "docker-compose.yml"
-      - "docker-compose.aws.yml"
       - ".github/workflows/terraform.yml"
   workflow_dispatch: # Allow manual trigger
 
@@ -113,25 +105,6 @@ jobs:
         id: validate
         run: terraform validate -no-color
         working-directory: ${{ env.TF_WORKING_DIR }}
-
-      # `validate` reads HCL only: it never renders the instance bootstrap, and
-      # the compose smoke boots a different overlay. This is the only thing that
-      # parses either.
-      - name: AWS stack static checks
-        id: aws_stack
-        run: scripts/check-aws-stack.sh
-
-      # Not applied from CI yet -- that is I-3 -- so this is the only thing that
-      # parses them. The module is shared, so a break here is a break there.
-      - name: Terraform Init and Validate (AWS environments)
-        id: validate_aws
-        run: |
-          for environment in aws-staging aws-production; do
-            echo "::group::$environment"
-            terraform -chdir="terraform/environments/$environment" init -backend=false -no-color
-            terraform -chdir="terraform/environments/$environment" validate -no-color
-            echo "::endgroup::"
-          done
 
       # Unfiltered so a new tests/*.tftest.hcl file is gated the moment it lands;
       # naming each file here silently left new ones unrun.
@@ -248,6 +221,8 @@ jobs:
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           TF_VAR_cloudflare_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}
           TF_VAR_cloudflare_worker_subdomain: ${{ vars.CLOUDFLARE_WORKER_SUBDOMAIN || secrets.CLOUDFLARE_WORKER_SUBDOMAIN }}
+          TF_VAR_cloudflare_zone_id: ${{ vars.CLOUDFLARE_ZONE_ID || secrets.CLOUDFLARE_ZONE_ID }}
+          TF_VAR_cloudflare_custom_domain: ${{ vars.CLOUDFLARE_CUSTOM_DOMAIN || secrets.CLOUDFLARE_CUSTOM_DOMAIN }}
           TF_VAR_vercel_api_token: "${{ secrets.VERCEL_API_TOKEN || '000000000000000000000000' }}"
           TF_VAR_vercel_team_id: "${{ vars.VERCEL_TEAM_ID || secrets.VERCEL_TEAM_ID || 'unused' }}"
           TF_VAR_modal_token_id: ${{ secrets.MODAL_TOKEN_ID }}
@@ -281,7 +256,6 @@ jobs:
           TF_VAR_allowed_email_domains: ${{ vars.ALLOWED_EMAIL_DOMAINS || secrets.ALLOWED_EMAIL_DOMAINS }}
           TF_VAR_allowed_emails: ${{ vars.ALLOWED_EMAILS || secrets.ALLOWED_EMAILS }}
           TF_VAR_allowed_github_orgs: ${{ vars.ALLOWED_GITHUB_ORGS || secrets.ALLOWED_GITHUB_ORGS }}
-          TF_VAR_operator_user_ids: ${{ vars.OPERATOR_USER_IDS || secrets.OPERATOR_USER_IDS }}
           TF_VAR_deployment_name: ${{ vars.DEPLOYMENT_NAME || secrets.DEPLOYMENT_NAME }}
           TF_VAR_enable_github_bot: "${{ vars.ENABLE_GITHUB_BOT || secrets.ENABLE_GITHUB_BOT || 'false' }}"
           TF_VAR_github_webhook_secret: ${{ secrets.GH_WEBHOOK_SECRET }}
@@ -434,6 +408,8 @@ jobs:
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           TF_VAR_cloudflare_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}
           TF_VAR_cloudflare_worker_subdomain: ${{ vars.CLOUDFLARE_WORKER_SUBDOMAIN || secrets.CLOUDFLARE_WORKER_SUBDOMAIN }}
+          TF_VAR_cloudflare_zone_id: ${{ vars.CLOUDFLARE_ZONE_ID || secrets.CLOUDFLARE_ZONE_ID }}
+          TF_VAR_cloudflare_custom_domain: ${{ vars.CLOUDFLARE_CUSTOM_DOMAIN || secrets.CLOUDFLARE_CUSTOM_DOMAIN }}
           TF_VAR_vercel_api_token: "${{ secrets.VERCEL_API_TOKEN || '000000000000000000000000' }}"
           TF_VAR_vercel_team_id: "${{ vars.VERCEL_TEAM_ID || secrets.VERCEL_TEAM_ID || 'unused' }}"
           TF_VAR_modal_token_id: ${{ secrets.MODAL_TOKEN_ID }}
@@ -467,7 +443,6 @@ jobs:
           TF_VAR_allowed_email_domains: ${{ vars.ALLOWED_EMAIL_DOMAINS || secrets.ALLOWED_EMAIL_DOMAINS }}
           TF_VAR_allowed_emails: ${{ vars.ALLOWED_EMAILS || secrets.ALLOWED_EMAILS }}
           TF_VAR_allowed_github_orgs: ${{ vars.ALLOWED_GITHUB_ORGS || secrets.ALLOWED_GITHUB_ORGS }}
-          TF_VAR_operator_user_ids: ${{ vars.OPERATOR_USER_IDS || secrets.OPERATOR_USER_IDS }}
           TF_VAR_deployment_name: ${{ vars.DEPLOYMENT_NAME || secrets.DEPLOYMENT_NAME }}
           TF_VAR_enable_github_bot: "${{ vars.ENABLE_GITHUB_BOT || secrets.ENABLE_GITHUB_BOT || 'false' }}"
           TF_VAR_github_webhook_secret: ${{ secrets.GH_WEBHOOK_SECRET }}
