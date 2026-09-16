@@ -10,7 +10,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type * as AuthenticateModule from "../auth/authenticate";
 import { createTestRequestHandler } from "../router.test-support";
-import { MAX_NAME_LENGTH } from "./automation-validation";
+import { MAX_AUTOMATION_NAME_LENGTH } from "@open-inspect/shared/types/automations";
 import { automationRoutes } from "./automations";
 import {
   mocks,
@@ -107,7 +107,10 @@ describe("automation listing routes", () => {
       { query: { limit: "101" }, error: "Invalid limit" },
       { query: { limit: ["5", "6"] }, error: "Invalid limit" },
       { query: { cursor: "not-a-cursor" }, error: "Invalid cursor" },
-      { query: { search: "x".repeat(MAX_NAME_LENGTH + 1) }, error: "Search is too long" },
+      {
+        query: { search: "x".repeat(MAX_AUTOMATION_NAME_LENGTH + 1) },
+        error: "Search is too long",
+      },
     ])("rejects list query $query without listing", async ({ query, error }) => {
       const res = await callRoute("GET", "/automations", { query });
 
