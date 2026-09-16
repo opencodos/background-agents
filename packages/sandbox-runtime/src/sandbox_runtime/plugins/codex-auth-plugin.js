@@ -94,6 +94,11 @@ let usageProbeUsed = null;
 // it is meant to be proving it can still serve.
 let subscriptionRetryPending = false;
 
+// Bumped by every latch and every recovery, so a fallback that settles late
+// can tell whether the routing state it was launched against is still the
+// current one before undoing it.
+let routingGeneration = 0;
+
 async function ensureAccessToken(getAuth, setAuth) {
   const result = await tokenBroker.getAccessToken(async (refreshed) => {
     // Update OpenCode's auth state for consistency. The broker cache remains
@@ -437,6 +442,7 @@ function replayResponse(response, bodyText) {
 function latchSpillover(reason) {
   if (spilloverLatched) return;
   spilloverLatched = true;
+  routingGeneration += 1;
   console.error(
     `[codex-auth-plugin] spilling OpenAI traffic over to ${FALLBACK_KEY_ENV}: ${reason}`
   );
@@ -455,10 +461,17 @@ function recoverSubscription(detail) {
   usageProbeUsed = null;
   usageProbed = false;
   subscriptionRetryPending = true;
+  routingGeneration += 1;
   console.error(`[codex-auth-plugin] ${FALLBACK_KEY_ENV} ${detail}`);
 }
 
 async function fetchFallback(fallbackUrl, baseInit, headers, apiKey, reason = null) {
+  // Concurrent fallbacks settle in any order. A failure may only undo the
+  // routing state it was launched against: without this, a slow 503 would
+  // erase a newer sibling's successful latch and send the next turn back to a
+  // subscription that a live fallback is already standing in for.
+  const generation = routingGeneration;
+  const stillCurrent = () => routingGeneration === generation;
   let response;
   try {
     response = await fetch(fallbackUrl, {
@@ -471,7 +484,7 @@ async function fetchFallback(fallbackUrl, baseInit, headers, apiKey, reason = nu
     // without this a latched sandbox would keep dialling a paid path that
     // cannot answer. A caller that cancelled its own turn says nothing about
     // the path's health, so its state is left alone.
-    if (!baseInit.signal?.aborted) {
+    if (!baseInit.signal?.aborted && stillCurrent()) {
       recoverSubscription(
         `request could not be sent (${error.message}); retrying the subscription on the next turn`
       );
@@ -485,9 +498,11 @@ async function fetchFallback(fallbackUrl, baseInit, headers, apiKey, reason = nu
 
   // A platform outage or unsupported model must not strand the sandbox on a
   // permanently failing paid path.
-  recoverSubscription(
-    `request failed with status ${response.status}; retrying the subscription on the next turn`
-  );
+  if (stillCurrent()) {
+    recoverSubscription(
+      `request failed with status ${response.status}; retrying the subscription on the next turn`
+    );
+  }
   return response;
 }
 

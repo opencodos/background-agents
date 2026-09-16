@@ -674,6 +674,48 @@ test("re-measures the ceiling after a recovered turn", async () => {
   );
 });
 
+test("a late fallback failure does not undo a newer successful latch", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT = "80";
+
+  // Two requests share one 85% preflight against an 80% ceiling, so both go
+  // straight to the platform. The first succeeds and latches; the second fails
+  // afterwards and must not send the next turn back to a subscription the
+  // first one is already standing in for.
+  let platformCall = 0;
+  let releaseSecond;
+  const secondReleased = new Promise((resolve) => (releaseSecond = resolve));
+  const calls = stubFetch({
+    codex: () => new Response("codex-should-not-be-called", { status: 200 }),
+    usage: () => usageResponse(42, 85),
+    platform: async () => {
+      platformCall += 1;
+      if (platformCall === 1) return new Response("platform-ok", { status: 200 });
+      if (platformCall === 2) {
+        await secondReleased;
+        return new Response("platform down", { status: 503 });
+      }
+      return new Response("platform-ok", { status: 200 });
+    },
+  });
+  const loaded = await loadProxy("late-failure-race");
+
+  const first = loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT);
+  const second = loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT);
+  assert.equal(await (await first).text(), "platform-ok", "the first fallback latches");
+  releaseSecond();
+  assert.equal((await second).status, 503);
+
+  const before = calls.length;
+  const third = await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT);
+  assert.equal(await third.text(), "platform-ok");
+  assert.equal(
+    calls.slice(before).filter((call) => call.url.includes("/codex/responses")).length,
+    0,
+    "the newer successful latch still holds"
+  );
+});
+
 test("detaches from the source Request when the caller passes a null signal", async () => {
   process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
   delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
