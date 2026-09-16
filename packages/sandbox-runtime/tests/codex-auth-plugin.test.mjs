@@ -34,13 +34,17 @@ async function loadProxy(tag) {
 function stubFetch({ codex, broker, usage, platform } = {}) {
   const calls = [];
   globalThis.fetch = async (url, init) => {
-    const target = String(url);
+    // A non-generation call is dispatched as a Request so its own options
+    // survive, so the stub must read either shape.
+    const request = url instanceof Request ? url : null;
+    const target = request ? request.url : String(url);
     calls.push({
       url: target,
-      method: init?.method,
-      headers: new Headers(init?.headers),
+      method: init?.method ?? request?.method,
+      headers: new Headers(init?.headers ?? request?.headers),
       body: init?.body,
-      signal: init?.signal,
+      signal: init?.signal ?? request?.signal,
+      request,
     });
     if (target.includes("/provider-auth/openai/access-token")) {
       return (
@@ -217,6 +221,25 @@ test("spills over when the control plane cannot mint a subscription token", asyn
   const response = await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT);
   assert.equal(await response.text(), "platform-ok");
   assert.equal(calls.filter((call) => call.url.startsWith("https://chatgpt.com/")).length, 0);
+  assert.equal(calls.at(-1).headers.get("authorization"), "Bearer sk-fallback");
+});
+
+test("spills over when the bound provider account is gone", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  // This one answers 404 rather than 409, and no retry can bring the account
+  // back, so it belongs on the permanent side with the reconnect cases.
+  const calls = stubFetch({
+    codex: () => new Response("unreachable", { status: 500 }),
+    broker: () =>
+      Response.json(
+        { error: "Provider account not found", code: "account_not_found" },
+        { status: 404 }
+      ),
+  });
+  const loaded = await loadProxy("broker-account-gone");
+
+  const response = await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT);
+  assert.equal(await response.text(), "platform-ok");
   assert.equal(calls.at(-1).headers.get("authorization"), "Bearer sk-fallback");
 });
 
@@ -582,6 +605,62 @@ test("leaves a response-retrieval path on its own origin", async () => {
     headers: {},
   });
   assert.equal(calls.filter((call) => call.url.startsWith("https://chatgpt.com/")).length, 1);
+});
+
+test("a fallback that cannot be sent releases the latch", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
+  let platformReachable = true;
+  const calls = stubFetch({
+    codex: () => usageLimitResponse(),
+    platform: () => {
+      if (platformReachable) return new Response("platform-ok", { status: 200 });
+      throw new TypeError("fetch failed");
+    },
+  });
+  const loaded = await loadProxy("fallback-transport-reject");
+
+  const latched = await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT);
+  assert.equal(await latched.text(), "platform-ok", "the sandbox is now latched");
+
+  // A transport rejection never reaches a status check, so without releasing
+  // the latch the sandbox would keep dialling a paid path that cannot answer.
+  platformReachable = false;
+  await assert.rejects(loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT), /fetch failed/);
+
+  platformReachable = true;
+  const before = calls.length;
+  await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT);
+  assert.equal(
+    calls.slice(before).filter((call) => call.url.startsWith("https://chatgpt.com/")).length,
+    1,
+    "the subscription is retried instead of the failing paid path"
+  );
+});
+
+test("dispatches a non-generation Request without reshaping it", async () => {
+  delete process.env.OPENAI_API_KEY_FALLBACK;
+  const calls = stubFetch({ codex: () => new Response("codex-ok", { status: 200 }) });
+  const loaded = await loadProxy("passthrough-request");
+
+  // Flattening this would UTF-8-decode the body and drop Request-level
+  // options, so the call would stop being equivalent to fetch(request).
+  const body = new Uint8Array([0xff, 0x00, 0x10]);
+  const request = new Request("https://api.openai.com/v1/files", {
+    method: "POST",
+    body,
+    redirect: "manual",
+    headers: { authorization: `Bearer ${"opencode-oauth-dummy-key"}`, "x-custom": "kept" },
+  });
+  await loaded.fetch(request);
+
+  const call = calls.at(-1);
+  assert.ok(call.request, "the original Request shape is dispatched");
+  assert.equal(call.request.redirect, "manual", "Request-level options survive");
+  assert.equal(call.request.headers.get("x-custom"), "kept");
+  assert.equal(call.request.headers.get("authorization"), "Bearer cp-access");
+  const sent = new Uint8Array(await call.request.arrayBuffer());
+  assert.deepEqual([...sent], [...body], "the body bytes are untouched");
 });
 
 test("latches at the ceiling from a successful response's headers", async () => {

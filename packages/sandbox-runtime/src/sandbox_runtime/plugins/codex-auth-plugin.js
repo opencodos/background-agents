@@ -51,6 +51,7 @@ const TRANSPORT_HEADERS = ["content-encoding", "content-length"];
  * they are transient and must not spend the metered fallback key.
  */
 const PERMANENT_SUBSCRIPTION_ERROR_CODES = new Set([
+  "account_not_found",
   "account_inactive",
   "account_archived",
   "provider_mismatch",
@@ -124,20 +125,32 @@ function headersFrom(init) {
   return headers;
 }
 
+/** The destination of either fetch shape, without touching the body. */
+function requestUrl(requestInput) {
+  if (requestInput instanceof Request) return new URL(requestInput.url);
+  return requestInput instanceof URL ? requestInput : new URL(String(requestInput));
+}
+
+/**
+ * Request-level options an init can carry, which a plain `{method, body,
+ * headers}` reconstruction would silently drop.
+ */
+const REQUEST_LEVEL_OPTIONS = ["cache", "credentials", "integrity", "redirect"];
+
 /**
  * Fold both fetch shapes — `(url, init)` and a `Request` — into one plain init.
  * opencode's provider client passes an init today, but a `Request` carries its
  * own method, headers and body, and spreading an absent init would send the
  * subscription call and every spillover retry as a bodiless GET. Buffering the
  * body to a string here is also what lets a 429 be retried at all.
+ *
+ * Only generation requests come through here: their bodies are JSON by the
+ * API's own contract, so decoding one to a string is lossless. Every other
+ * request is dispatched from its original shape.
  */
 async function normalizeRequest(requestInput, init) {
   const request = requestInput instanceof Request ? requestInput : null;
-  const url = request
-    ? new URL(request.url)
-    : requestInput instanceof URL
-      ? requestInput
-      : new URL(String(requestInput));
+  const url = requestUrl(requestInput);
 
   // Native fetch(request, init) REPLACES the Request's headers when init
   // supplies any, so merging them would keep a header the caller meant to drop
@@ -148,9 +161,16 @@ async function normalizeRequest(requestInput, init) {
   let body = init?.body;
   if (body === undefined && request?.body) body = await request.text();
 
+  const inherited = {};
+  for (const name of REQUEST_LEVEL_OPTIONS) {
+    const value = request?.[name];
+    if (value) inherited[name] = value;
+  }
+
   return {
     url,
     headers,
+    inherited,
     method: init?.method ?? request?.method,
     body,
     // Without the source Request's signal, a cancelled turn would leave the
@@ -318,11 +338,26 @@ function latchSpillover(reason) {
 }
 
 async function fetchFallback(fallbackUrl, baseInit, headers, apiKey, reason = null) {
-  const response = await fetch(fallbackUrl, {
-    ...baseInit,
-    body: platformFallbackBody(baseInit.body),
-    headers: spilloverHeaders(headers, apiKey),
-  });
+  let response;
+  try {
+    response = await fetch(fallbackUrl, {
+      ...baseInit,
+      body: platformFallbackBody(baseInit.body),
+      headers: spilloverHeaders(headers, apiKey),
+    });
+  } catch (error) {
+    // A DNS, TLS or network rejection never reaches the status check below, so
+    // without this a latched sandbox would keep dialling a paid path that
+    // cannot answer. A caller that cancelled its own turn says nothing about
+    // the path's health, so its latch is left alone.
+    if (!baseInit.signal?.aborted) {
+      spilloverLatched = false;
+      console.error(
+        `[codex-auth-plugin] ${FALLBACK_KEY_ENV} request could not be sent (${error.message}); retrying the subscription on the next turn`
+      );
+    }
+    throw error;
+  }
   if (response.ok) {
     if (reason) latchSpillover(reason);
     return response;
@@ -408,27 +443,39 @@ export const CodexAuthProxy = async (input) => {
         return {
           apiKey: OAUTH_DUMMY_KEY,
           async fetch(requestInput, init) {
-            const {
-              url: parsed,
-              headers,
-              method,
-              body,
-              signal,
-            } = await normalizeRequest(requestInput, init);
-            const { headers: _discardedHeaders, ...restInit } = init ?? {};
-            const baseInit = { ...restInit, method, body, signal };
-
+            const parsed = requestUrl(requestInput);
             const currentAuth = await getAuth();
-            if (currentAuth.type !== "oauth") return fetch(parsed, { ...baseInit, headers });
+
+            // A caller that has switched away from OAuth keeps its own
+            // authorization, so the request is none of this proxy's business.
+            if (currentAuth.type !== "oauth") return fetch(requestInput, init);
+
+            // Anything that is not a generation call keeps its original shape:
+            // flattening it would UTF-8-decode an arbitrary body and drop
+            // Request-level options, so a retrieval or administrative call
+            // would stop being equivalent to fetch(request). Only the
+            // placeholder credential opencode signed with is replaced.
+            if (!isModelRequest(parsed)) {
+              const proxied = new Request(requestInput, init);
+              proxied.headers.delete("authorization");
+              const { accessToken, accountId } = await ensureAccessToken(getAuth, setAuth);
+              proxied.headers.set("authorization", `Bearer ${accessToken}`);
+              if (accountId) proxied.headers.set("ChatGPT-Account-Id", accountId);
+              return fetch(proxied);
+            }
+
+            const { headers, inherited, method, body, signal } = await normalizeRequest(
+              requestInput,
+              init
+            );
+            const { headers: _discardedHeaders, ...restInit } = init ?? {};
+            const baseInit = { ...inherited, ...restInit, method, body, signal };
 
             // opencode signs the request with a placeholder API key; this proxy
-            // supplies the real credential instead. A caller that has switched
-            // away from OAuth keeps its own authorization, hence the early
-            // return above.
+            // supplies the real credential instead.
             headers.delete("authorization");
 
-            const modelRequest = isModelRequest(parsed);
-            const fallbackKey = (modelRequest && process.env[FALLBACK_KEY_ENV]) || "";
+            const fallbackKey = process.env[FALLBACK_KEY_ENV] || "";
             const fallbackUrl = fallbackEndpoint(parsed);
 
             if (fallbackKey && spilloverLatched) {
@@ -482,7 +529,7 @@ export const CodexAuthProxy = async (input) => {
               }
             }
 
-            const response = await fetch(modelRequest ? CODEX_API_ENDPOINT : parsed, {
+            const response = await fetch(CODEX_API_ENDPOINT, {
               ...baseInit,
               headers,
             });
