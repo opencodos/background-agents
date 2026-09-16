@@ -159,12 +159,27 @@ async function normalizeRequest(requestInput, init) {
   };
 }
 
+/**
+ * Which generation endpoint a request targets, or null when it targets none.
+ *
+ * Matched as a path suffix rather than a substring: `/v1/responses/resp_123`
+ * retrieves an earlier response and `/v1/chat/completionsXYZ` is not this API
+ * at all, so neither may be rewritten onto the Codex backend. A suffix still
+ * tolerates a proxied base URL that prefixes a path — including one that omits
+ * `/v1` before `/chat/completions`, which the previous substring test accepted.
+ */
+function generationPath(url) {
+  const path = url.pathname.endsWith("/") ? url.pathname.slice(0, -1) : url.pathname;
+  if (path.endsWith("/chat/completions")) return "/v1/chat/completions";
+  return path.endsWith("/v1/responses") ? "/v1/responses" : null;
+}
+
 function isChatCompletionsRequest(url) {
-  return url.pathname.includes("/chat/completions");
+  return generationPath(url) === "/v1/chat/completions";
 }
 
 function isModelRequest(url) {
-  return url.pathname.includes("/v1/responses") || isChatCompletionsRequest(url);
+  return generationPath(url) !== null;
 }
 
 /**

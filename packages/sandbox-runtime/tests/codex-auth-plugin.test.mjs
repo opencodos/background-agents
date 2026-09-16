@@ -558,6 +558,32 @@ test("a Spark spillover drops entity headers that described the original body", 
   assert.equal(spilloverCall.headers.get("content-encoding"), null);
 });
 
+test("leaves a response-retrieval path on its own origin", async () => {
+  delete process.env.OPENAI_API_KEY_FALLBACK;
+  const calls = stubFetch({ codex: () => new Response("codex-ok", { status: 200 }) });
+  const loaded = await loadProxy("retrieval-path");
+
+  // Only the generation endpoints may be rewritten onto the Codex backend;
+  // retrieving an earlier response must reach api.openai.com unchanged.
+  const retrievalUrl = "https://api.openai.com/v1/responses/resp_123";
+  await loaded.fetch(retrievalUrl, { method: "GET", headers: {} });
+  assert.equal(calls.filter((call) => call.url.startsWith("https://chatgpt.com/")).length, 0);
+  assert.equal(calls.at(-1).url, retrievalUrl);
+
+  // A path that merely starts with the endpoint name is not this API at all.
+  const lookalike = "https://api.openai.com/v1/chat/completionsXYZ";
+  await loaded.fetch(lookalike, { method: "POST", body: "{}", headers: {} });
+  assert.equal(calls.at(-1).url, lookalike);
+
+  // A proxied base URL that prefixes the generation path is still rewritten.
+  await loaded.fetch("https://gateway.test/openai/v1/responses", {
+    method: "POST",
+    body: JSON.stringify({ model: "gpt-5.4", input: "hi" }),
+    headers: {},
+  });
+  assert.equal(calls.filter((call) => call.url.startsWith("https://chatgpt.com/")).length, 1);
+});
+
 test("latches at the ceiling from a successful response's headers", async () => {
   process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
   process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT = "80";
