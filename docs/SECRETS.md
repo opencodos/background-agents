@@ -204,15 +204,15 @@ from it, even after you rotate the secret. Two guidelines:
 | Key                               | Scope  | Purpose                                                                                                                                |
 | --------------------------------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------- |
 | `ANTHROPIC_API_KEY`               | Global | Claude API access                                                                                                                      |
+| `OPENAI_API_KEY`                  | Global | OpenAI API access when a session selects API-key mode                                                                                  |
+| `XAI_API_KEY`                     | Global | xAI API access when a session selects API-key mode                                                                                     |
 | `DEEPSEEK_API_KEY`                | Global | DeepSeek API access                                                                                                                    |
 | `ZHIPU_API_KEY`                   | Global | Z.AI Coding Plan GLM access                                                                                                            |
 | `OPENCODE_API_KEY`                | Global | OpenCode Zen and OpenCode Go access                                                                                                    |
-| `OPENAI_API_KEY`                  | Global | OpenAI API access when a session selects API-key mode                                                                                  |
-| `XAI_API_KEY`                     | Global | xAI API access when a session selects API-key mode                                                                                     |
 | `OPENAI_API_KEY_FALLBACK`         | Any    | Spillover once the ChatGPT subscription reaches its ceiling ([guide](OPENAI_MODELS.md#spilling-over-before-the-subscription-runs-out)) |
-| `OPENAI_SUBSCRIPTION_MAX_PERCENT` | Any    | Percentage of a Codex window sandboxes may consume (default 100)                                                                       |
-| `OPENAI_OAUTH_REFRESH_TOKEN`      | Repo   | Legacy OpenAI Codex via ChatGPT subscription ([setup guide](OPENAI_MODELS.md))                                                         |
-| `OPENAI_OAUTH_ACCOUNT_ID`         | Repo   | Legacy OpenAI Codex via ChatGPT subscription ([setup guide](OPENAI_MODELS.md))                                                         |
+| `OPENAI_SUBSCRIPTION_MAX_PERCENT` | Any    | Share of a Codex rate-limit window sandboxes may consume (default 100)                                                                 |
+| `OPENAI_OAUTH_REFRESH_TOKEN`      | Any    | Legacy OpenAI Codex via ChatGPT subscription ([setup guide](OPENAI_MODELS.md))                                                         |
+| `OPENAI_OAUTH_ACCOUNT_ID`         | Any    | Legacy OpenAI Codex via ChatGPT subscription ([setup guide](OPENAI_MODELS.md))                                                         |
 | `XAI_OAUTH_REFRESH_TOKEN`         | Any    | Legacy SuperGrok access ([setup guide](GROK_MODELS.md))                                                                                |
 | `DATABASE_URL`                    | Repo   | Database connection string                                                                                                             |
 | `AWS_ACCESS_KEY_ID`               | Repo   | AWS credentials for a specific project                                                                                                 |
