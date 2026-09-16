@@ -133,9 +133,43 @@ function requestUrl(requestInput) {
 
 /**
  * Request-level options an init can carry, which a plain `{method, body,
- * headers}` reconstruction would silently drop.
+ * headers}` reconstruction would silently drop. `mode` is included but
+ * `navigate` is skipped below: a Request may hold it, an init may not.
  */
-const REQUEST_LEVEL_OPTIONS = ["cache", "credentials", "integrity", "redirect"];
+const REQUEST_LEVEL_OPTIONS = [
+  "cache",
+  "credentials",
+  "integrity",
+  "keepalive",
+  "mode",
+  "redirect",
+  "referrer",
+  "referrerPolicy",
+];
+
+function abortError(signal) {
+  return signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
+}
+
+/**
+ * Buffer a Request body without outliving the caller's cancellation. A
+ * streaming body whose producer stalls would otherwise keep this await pending
+ * forever: the signal is only handed to `fetch` afterwards, so an abort would
+ * reach neither network leg.
+ */
+function readBodyText(request, signal) {
+  if (!signal) return request.text();
+  if (signal.aborted) return Promise.reject(abortError(signal));
+  let onAbort;
+  return new Promise((resolve, reject) => {
+    onAbort = () => {
+      request.body?.cancel().catch(() => {});
+      reject(abortError(signal));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    request.text().then(resolve, reject);
+  }).finally(() => signal.removeEventListener("abort", onAbort));
+}
 
 /**
  * Fold both fetch shapes — `(url, init)` and a `Request` — into one plain init.
@@ -158,25 +192,21 @@ async function normalizeRequest(requestInput, init) {
   const headers =
     init?.headers === undefined ? new Headers(request?.headers ?? []) : headersFrom(init);
 
+  // Without the source Request's signal, a cancelled turn would leave the
+  // subscription or platform call running.
+  const signal = init?.signal ?? request?.signal;
+
   let body = init?.body;
-  if (body === undefined && request?.body) body = await request.text();
+  if (body === undefined && request?.body) body = await readBodyText(request, signal);
 
   const inherited = {};
   for (const name of REQUEST_LEVEL_OPTIONS) {
     const value = request?.[name];
-    if (value) inherited[name] = value;
+    if (!value || (name === "mode" && value === "navigate")) continue;
+    inherited[name] = value;
   }
 
-  return {
-    url,
-    headers,
-    inherited,
-    method: init?.method ?? request?.method,
-    body,
-    // Without the source Request's signal, a cancelled turn would leave the
-    // subscription or platform call running.
-    signal: init?.signal ?? request?.signal,
-  };
+  return { url, headers, inherited, method: init?.method ?? request?.method, body, signal };
 }
 
 /**
@@ -457,7 +487,11 @@ export const CodexAuthProxy = async (input) => {
             // placeholder credential opencode signed with is replaced.
             if (!isModelRequest(parsed)) {
               const proxied = new Request(requestInput, init);
+              // A token and the account it belongs to must travel together:
+              // ensureAccessToken can answer without an account id, so an
+              // inherited header would pair a fresh token with a stale one.
               proxied.headers.delete("authorization");
+              proxied.headers.delete("chatgpt-account-id");
               const { accessToken, accountId } = await ensureAccessToken(getAuth, setAuth);
               proxied.headers.set("authorization", `Bearer ${accessToken}`);
               if (accountId) proxied.headers.set("ChatGPT-Account-Id", accountId);
@@ -474,6 +508,7 @@ export const CodexAuthProxy = async (input) => {
             // opencode signs the request with a placeholder API key; this proxy
             // supplies the real credential instead.
             headers.delete("authorization");
+            headers.delete("chatgpt-account-id");
 
             const fallbackKey = process.env[FALLBACK_KEY_ENV] || "";
             const fallbackUrl = fallbackEndpoint(parsed);

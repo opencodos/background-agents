@@ -44,6 +44,7 @@ function stubFetch({ codex, broker, usage, platform } = {}) {
       headers: new Headers(init?.headers ?? request?.headers),
       body: init?.body,
       signal: init?.signal ?? request?.signal,
+      init: init ?? {},
       request,
     });
     if (target.includes("/provider-auth/openai/access-token")) {
@@ -661,6 +662,88 @@ test("dispatches a non-generation Request without reshaping it", async () => {
   assert.equal(call.request.headers.get("authorization"), "Bearer cp-access");
   const sent = new Uint8Array(await call.request.arrayBuffer());
   assert.deepEqual([...sent], [...body], "the body bytes are untouched");
+});
+
+test("abandons a stalled streaming body when the caller aborts", async () => {
+  delete process.env.OPENAI_API_KEY_FALLBACK;
+  stubFetch({ codex: () => new Response("codex-ok", { status: 200 }) });
+  const loaded = await loadProxy("stalled-body-abort");
+
+  // A body that never completes must not keep the buffering await pending: the
+  // signal only reaches fetch afterwards, so neither leg would ever cancel.
+  const controller = new AbortController();
+  const body = new ReadableStream({
+    start(streamController) {
+      streamController.enqueue(new TextEncoder().encode('{"model":"gpt-5.4","input":"'));
+    },
+  });
+  const request = new Request(MODEL_REQUEST_URL, {
+    method: "POST",
+    body,
+    duplex: "half",
+    signal: controller.signal,
+  });
+  const pending = loaded.fetch(request);
+
+  let stall;
+  controller.abort();
+  const outcome = await Promise.race([
+    pending.then(
+      () => "settled",
+      () => "settled"
+    ),
+    new Promise((resolve) => (stall = setTimeout(() => resolve("blocked"), 500))),
+  ]);
+  clearTimeout(stall);
+  assert.equal(outcome, "settled", "the turn does not hang on a body that never arrives");
+});
+
+test("carries every Request-level option onto the reconstructed legs", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
+  const calls = stubFetch({ codex: () => usageLimitResponse() });
+  const loaded = await loadProxy("request-option-carry");
+
+  await loaded.fetch(
+    new Request(MODEL_REQUEST_URL, {
+      ...REQUEST_INIT,
+      keepalive: true,
+      referrer: "https://referrer.test/page",
+      referrerPolicy: "origin",
+      redirect: "manual",
+    })
+  );
+
+  for (const call of [
+    calls.find((entry) => entry.url.startsWith("https://chatgpt.com/")),
+    calls.at(-1),
+  ]) {
+    assert.equal(call.init.keepalive, true);
+    assert.equal(call.init.referrer, "https://referrer.test/page");
+    assert.equal(call.init.referrerPolicy, "origin");
+    assert.equal(call.init.redirect, "manual");
+  }
+});
+
+test("never pairs a fresh token with an inherited account id", async () => {
+  delete process.env.OPENAI_API_KEY_FALLBACK;
+  const calls = stubFetch({
+    codex: () => new Response("codex-ok", { status: 200 }),
+    broker: () => Response.json({ accessToken: "cp-access", expiresIn: 3600 }),
+  });
+  const loaded = await loadProxy("stale-account-header");
+
+  // The broker answered without an account id, so a copied header would send
+  // this token against someone else's account.
+  const headers = {
+    authorization: "Bearer opencode-oauth-dummy-key",
+    "chatgpt-account-id": "acct-stale",
+  };
+  await loaded.fetch(MODEL_REQUEST_URL, { ...REQUEST_INIT, headers });
+  assert.equal(calls.at(-1).headers.get("chatgpt-account-id"), null);
+
+  await loaded.fetch(new Request("https://api.openai.com/v1/files", { method: "GET", headers }));
+  assert.equal(calls.at(-1).headers.get("chatgpt-account-id"), null);
 });
 
 test("latches at the ceiling from a successful response's headers", async () => {
