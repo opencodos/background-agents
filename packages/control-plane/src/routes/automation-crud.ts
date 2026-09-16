@@ -16,6 +16,7 @@ import {
 import type { AutomationTriggerType } from "@open-inspect/shared/triggers";
 import {
   MAX_AUTOMATION_INSTRUCTIONS_LENGTH,
+  MAX_AUTOMATION_NAME_LENGTH,
   updateAutomationRequestSchema,
 } from "@open-inspect/shared/types/automations";
 import type { ModelProviderSelections } from "@open-inspect/shared/types/provider-accounts";
@@ -68,7 +69,6 @@ import { AUTOMATIONS_READ, AUTOMATION_MANAGE, admittedAutomation } from "./autom
 import {
   type CreateAutomationBody,
   FAR_FUTURE_THRESHOLD_MS,
-  MAX_NAME_LENGTH,
   TargetSelectionError,
   createAutomationBodySchema,
   extractSlackChannels,
@@ -112,8 +112,8 @@ async function handleCreateAutomation(
   if (!body.name || typeof body.name !== "string" || body.name.trim().length === 0) {
     return error("name is required", 400);
   }
-  if (body.name.length > MAX_NAME_LENGTH) {
-    return error(`name must be at most ${MAX_NAME_LENGTH} characters`, 400);
+  if (body.name.length > MAX_AUTOMATION_NAME_LENGTH) {
+    return error(`name must be at most ${MAX_AUTOMATION_NAME_LENGTH} characters`, 400);
   }
   if (
     !body.instructions ||
@@ -437,8 +437,8 @@ async function handleUpdateAutomation(
     if (typeof body.name !== "string" || body.name.trim().length === 0) {
       return error("name cannot be empty", 400);
     }
-    if (body.name.length > MAX_NAME_LENGTH) {
-      return error(`name must be at most ${MAX_NAME_LENGTH} characters`, 400);
+    if (body.name.length > MAX_AUTOMATION_NAME_LENGTH) {
+      return error(`name must be at most ${MAX_AUTOMATION_NAME_LENGTH} characters`, 400);
     }
   }
 

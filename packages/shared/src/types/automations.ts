@@ -42,6 +42,13 @@ export const MAX_AUTOMATION_REPOSITORIES = MAX_TARGET_REPOSITORIES;
 export const MAX_AUTOMATION_INSTRUCTIONS_LENGTH = 15_000;
 
 /**
+ * Maximum length of an automation's name, and of a name search against the
+ * list route — that search matches names, so a longer needle than any name can
+ * hold is refused rather than run.
+ */
+export const MAX_AUTOMATION_NAME_LENGTH = 200;
+
+/**
  * Most firings of one automation that may be in flight at once. The bound
  * counts invocations rather than runs, so at the ceiling a fan-out automation
  * can still have ten times as many sessions alive; the tick's own child-launch
@@ -87,6 +94,12 @@ export function validateAutomationTargetCounts(
 }
 /** Largest page `GET /automations/:id/invocations` serves; larger limits are refused. */
 export const MAX_AUTOMATION_INVOCATION_LIST_LIMIT = 100;
+
+/** Largest page `GET /automations` serves; larger limits are refused. */
+export const MAX_AUTOMATION_LIST_PAGE_SIZE = 100;
+
+/** Page `GET /automations` serves when the caller names no limit. */
+export const DEFAULT_AUTOMATION_LIST_PAGE_SIZE = 25;
 
 /** A repository selected on an automation (response shape, resolved). */
 const automationRepositorySchema = z.object({
