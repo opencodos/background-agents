@@ -563,6 +563,79 @@ test("keeps a measurement whose only waiter walked away", async () => {
   );
 });
 
+test("retries the subscription after a fallback chosen by the preflight fails", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT = "80";
+  let platformOk = false;
+  const calls = stubFetch({
+    codex: () => new Response("codex-ok", { status: 200 }),
+    usage: () => usageResponse(42, 85),
+    platform: () =>
+      platformOk
+        ? new Response("platform-ok", { status: 200 })
+        : new Response("platform down", { status: 503 }),
+  });
+  const loaded = await loadProxy("preflight-fallback-recovery");
+
+  const first = await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT);
+  assert.equal(first.status, 503, "the preflight sent this turn to a failing platform");
+
+  // Clearing only the latch is not enough: the retained 85% measurement would
+  // pick the platform again and never give the subscription a turn.
+  platformOk = true;
+  const before = calls.length;
+  const second = await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT);
+  assert.equal(await second.text(), "codex-ok");
+  assert.equal(
+    calls.slice(before).filter((call) => call.url.startsWith("https://chatgpt.com/")).length,
+    1,
+    "the subscription is retried"
+  );
+});
+
+test("inherits the source body when an init passes a null body", async () => {
+  delete process.env.OPENAI_API_KEY_FALLBACK;
+  const calls = stubFetch({ codex: () => new Response("codex-ok", { status: 200 }) });
+  const loaded = await loadProxy("null-body-override");
+
+  // native new Request(source, { body: null }) inherits the source body, so a
+  // null must not turn a valid POST into a bodiless call.
+  await loaded.fetch(new Request(MODEL_REQUEST_URL, REQUEST_INIT), { body: null });
+
+  const call = calls.find((entry) => entry.url.startsWith("https://chatgpt.com/"));
+  assert.equal(call.body, REQUEST_INIT.body, "the source body reaches the subscription");
+});
+
+test("ignores init members whose value is undefined", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
+  const calls = stubFetch({ codex: () => usageLimitResponse() });
+  const loaded = await loadProxy("undefined-init-members");
+
+  // The shape an object spread produces: keys present, values undefined.
+  // Request construction ignores those, so they must not erase the source's.
+  const request = new Request(MODEL_REQUEST_URL, {
+    ...REQUEST_INIT,
+    redirect: "manual",
+    credentials: "include",
+    cache: "no-store",
+  });
+  await loaded.fetch(request, {
+    redirect: undefined,
+    credentials: undefined,
+    cache: undefined,
+  });
+
+  for (const call of [
+    calls.find((entry) => entry.url.startsWith("https://chatgpt.com/")),
+    calls.at(-1),
+  ]) {
+    assert.equal(call.init.redirect, "manual");
+    assert.equal(call.init.credentials, "include");
+    assert.equal(call.init.cache, "no-store");
+  }
+});
+
 test("detaches from the source Request when the caller passes a null signal", async () => {
   process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
   delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;

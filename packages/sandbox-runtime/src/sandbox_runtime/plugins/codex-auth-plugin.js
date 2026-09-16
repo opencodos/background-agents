@@ -232,7 +232,9 @@ async function normalizeRequest(requestInput, init) {
 
   const signal = resolveSignal(request, init);
 
-  let body = init?.body;
+  // `new Request(source, { body: null })` inherits the source body, and for a
+  // URL-shaped call a null body is the same as none, so null is no override.
+  let body = init?.body ?? undefined;
   if (body === undefined && request?.body) body = await readBodyText(request, signal);
 
   const inherited = {};
@@ -435,6 +437,19 @@ function latchSpillover(reason) {
   );
 }
 
+/**
+ * Hand the next turn back to the subscription. Clearing the latch alone is not
+ * enough: a fallback chosen by the preflight would be chosen again from the
+ * retained measurement, so that measurement is dropped too. `usageProbed`
+ * stays set, so the recovery costs no second probe and the response headers
+ * govern from here.
+ */
+function recoverSubscription(detail) {
+  spilloverLatched = false;
+  usageProbeUsed = null;
+  console.error(`[codex-auth-plugin] ${FALLBACK_KEY_ENV} ${detail}`);
+}
+
 async function fetchFallback(fallbackUrl, baseInit, headers, apiKey, reason = null) {
   let response;
   try {
@@ -447,11 +462,10 @@ async function fetchFallback(fallbackUrl, baseInit, headers, apiKey, reason = nu
     // A DNS, TLS or network rejection never reaches the status check below, so
     // without this a latched sandbox would keep dialling a paid path that
     // cannot answer. A caller that cancelled its own turn says nothing about
-    // the path's health, so its latch is left alone.
+    // the path's health, so its state is left alone.
     if (!baseInit.signal?.aborted) {
-      spilloverLatched = false;
-      console.error(
-        `[codex-auth-plugin] ${FALLBACK_KEY_ENV} request could not be sent (${error.message}); retrying the subscription on the next turn`
+      recoverSubscription(
+        `request could not be sent (${error.message}); retrying the subscription on the next turn`
       );
     }
     throw error;
@@ -462,10 +476,9 @@ async function fetchFallback(fallbackUrl, baseInit, headers, apiKey, reason = nu
   }
 
   // A platform outage or unsupported model must not strand the sandbox on a
-  // permanently failing paid path. Retry the subscription on the next turn.
-  spilloverLatched = false;
-  console.error(
-    `[codex-auth-plugin] ${FALLBACK_KEY_ENV} request failed with status ${response.status}; retrying the subscription on the next turn`
+  // permanently failing paid path.
+  recoverSubscription(
+    `request failed with status ${response.status}; retrying the subscription on the next turn`
   );
   return response;
 }
@@ -571,7 +584,13 @@ export const CodexAuthProxy = async (input) => {
               init
             );
             const { headers: _discardedHeaders, ...restInit } = init ?? {};
-            const baseInit = { ...inherited, ...restInit, method, body, signal };
+            // An object spread routinely carries keys whose value is
+            // `undefined`; Request construction ignores those, so overlaying
+            // them here would erase the source Request's own values.
+            const overrides = Object.fromEntries(
+              Object.entries(restInit).filter(([, value]) => value !== undefined)
+            );
+            const baseInit = { ...inherited, ...overrides, method, body, signal };
 
             // opencode signs the request with a placeholder API key; this proxy
             // supplies the real credential instead.
