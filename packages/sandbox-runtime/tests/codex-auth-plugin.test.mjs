@@ -439,22 +439,20 @@ test("keeps the subscription while usage is under the ceiling", async () => {
   assert.equal(calls.filter((call) => call.url === MODEL_REQUEST_URL).length, 0);
 });
 
-test("abandons a usage probe still in flight when the caller aborts", async () => {
+test("stops waiting on the ceiling probe when the caller aborts", async () => {
   process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
   process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT = "80";
 
-  // A probe that only settles on cancellation: without the caller's signal it
-  // would hang until USAGE_PROBE_TIMEOUT_MS, which is exactly the wait under test.
+  // The probe is shared, so the caller's signal is deliberately not forwarded
+  // into it. A cancelled turn must therefore stop waiting on its own rather
+  // than hang until USAGE_PROBE_TIMEOUT_MS.
   let probeStarted;
-  const probeSignal = new Promise((resolve) => (probeStarted = resolve));
+  const probeReached = new Promise((resolve) => (probeStarted = resolve));
   stubFetch({
     codex: () => new Response("codex-ok", { status: 200 }),
-    usage: (init) =>
-      new Promise((_, reject) => {
-        probeStarted(init.signal);
-        init.signal.addEventListener("abort", () =>
-          reject(new DOMException("aborted", "AbortError"))
-        );
+    usage: () =>
+      new Promise(() => {
+        probeStarted();
       }),
   });
   const loaded = await loadProxy("probe-abort");
@@ -463,8 +461,7 @@ test("abandons a usage probe still in flight when the caller aborts", async () =
   const request = new Request(MODEL_REQUEST_URL, { ...REQUEST_INIT, signal: controller.signal });
   const pending = loaded.fetch(request);
 
-  const signal = await probeSignal;
-  assert.equal(signal.aborted, false, "the probe is in flight");
+  await probeReached;
   controller.abort();
 
   let stall;
@@ -476,55 +473,49 @@ test("abandons a usage probe still in flight when the caller aborts", async () =
     new Promise((resolve) => (stall = setTimeout(() => resolve("blocked"), 500))),
   ]);
   clearTimeout(stall);
-  assert.equal(signal.aborted, true);
   assert.equal(outcome, "settled", "the turn does not wait out the probe timeout");
 });
 
-test("an aborted usage probe leaves the ceiling enforceable for the next request", async () => {
+test("holds a concurrent request behind the pending ceiling probe", async () => {
   process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
   process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT = "80";
 
+  // The preflight only counts as spent once it answers. A second request
+  // arriving while it is in flight must wait for the same answer instead of
+  // spending a subscription turn above the ceiling being measured.
+  let releaseProbe;
   let probeStarted;
-  let probeSignal = new Promise((resolve) => (probeStarted = resolve));
-  let overCeiling = false;
+  const probeReached = new Promise((resolve) => (probeStarted = resolve));
   const calls = stubFetch({
     codex: () => new Response("codex-should-not-be-called", { status: 200 }),
-    usage: (init) => {
-      if (overCeiling) return usageResponse(42, 85);
-      return new Promise((_, reject) => {
-        probeStarted(init.signal);
-        init.signal.addEventListener("abort", () =>
-          reject(new DOMException("aborted", "AbortError"))
-        );
-      });
-    },
+    usage: () =>
+      new Promise((resolve) => {
+        probeStarted();
+        releaseProbe = () => resolve(usageResponse(42, 85));
+      }),
   });
-  const loaded = await loadProxy("probe-abort-reset");
+  const loaded = await loadProxy("probe-shared");
 
-  const controller = new AbortController();
-  const pending = loaded.fetch(
-    new Request(MODEL_REQUEST_URL, { ...REQUEST_INIT, signal: controller.signal })
-  );
-  await probeSignal;
-  controller.abort();
-  await pending.catch(() => {});
+  const first = loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT);
+  await probeReached;
+  const second = loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT);
 
-  // The cancelled turn never learned the usage, so the ceiling must still be
-  // discovered before the next turn is spent on the subscription.
-  overCeiling = true;
-  const before = calls.length;
-  const response = await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT);
-  assert.equal(await response.text(), "platform-ok");
+  await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(
-    calls.slice(before).filter((call) => call.url.includes("/wham/usage")).length,
-    1,
-    "the ceiling is probed again"
-  );
-  assert.equal(
-    calls.slice(before).filter((call) => call.url.includes("/codex/responses")).length,
+    calls.filter((call) => call.url.includes("/codex/responses")).length,
     0,
-    "no subscription turn is spent past the ceiling"
+    "no turn is spent while the ceiling is still unknown"
   );
+
+  releaseProbe();
+  assert.equal(await (await first).text(), "platform-ok");
+  assert.equal(await (await second).text(), "platform-ok");
+  assert.equal(
+    calls.filter((call) => call.url.includes("/wham/usage")).length,
+    1,
+    "both requests share one probe"
+  );
+  assert.equal(calls.filter((call) => call.url.includes("/codex/responses")).length, 0);
 });
 
 test("an init header set replaces the source Request's headers", async () => {
@@ -664,17 +655,31 @@ test("dispatches a non-generation Request without reshaping it", async () => {
   assert.deepEqual([...sent], [...body], "the body bytes are untouched");
 });
 
-test("abandons a stalled streaming body when the caller aborts", async () => {
+test("cancels a stalled streaming body when the caller aborts", async () => {
   delete process.env.OPENAI_API_KEY_FALLBACK;
   stubFetch({ codex: () => new Response("codex-ok", { status: 200 }) });
   const loaded = await loadProxy("stalled-body-abort");
 
-  // A body that never completes must not keep the buffering await pending: the
-  // signal only reaches fetch afterwards, so neither leg would ever cancel.
+  // A body that never completes must not keep the buffering await pending, and
+  // settling alone is not enough: the producer has to be told to stop, or it
+  // keeps being drained by a read nobody is waiting for any more.
+  let cancelled;
+  let pulled;
+  const producerCancelled = new Promise((resolve) => (cancelled = resolve));
+  const producerPulled = new Promise((resolve) => (pulled = resolve));
   const controller = new AbortController();
   const body = new ReadableStream({
     start(streamController) {
       streamController.enqueue(new TextEncoder().encode('{"model":"gpt-5.4","input":"'));
+    },
+    // Reached once the first chunk has been consumed, so the abort below
+    // lands while the read loop is waiting rather than before it starts.
+    pull() {
+      pulled();
+      return new Promise(() => {});
+    },
+    cancel() {
+      cancelled();
     },
   });
   const request = new Request(MODEL_REQUEST_URL, {
@@ -685,6 +690,7 @@ test("abandons a stalled streaming body when the caller aborts", async () => {
   });
   const pending = loaded.fetch(request);
 
+  await producerPulled;
   let stall;
   controller.abort();
   const outcome = await Promise.race([
@@ -696,6 +702,14 @@ test("abandons a stalled streaming body when the caller aborts", async () => {
   ]);
   clearTimeout(stall);
   assert.equal(outcome, "settled", "the turn does not hang on a body that never arrives");
+
+  let cancelStall;
+  const producerOutcome = await Promise.race([
+    producerCancelled.then(() => "cancelled"),
+    new Promise((resolve) => (cancelStall = setTimeout(() => resolve("still draining"), 500))),
+  ]);
+  clearTimeout(cancelStall);
+  assert.equal(producerOutcome, "cancelled", "the stream producer is told to stop");
 });
 
 test("carries every Request-level option onto the reconstructed legs", async () => {

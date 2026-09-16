@@ -81,8 +81,10 @@ const PLATFORM_MODEL_ALIASES = new Map([["gpt-5.3-codex-spark", "gpt-5.3-codex"]
 let spilloverLatched = false;
 
 // One usage probe per sandbox: afterwards every Codex response carries the
-// numbers in its headers for free.
+// numbers in its headers for free. `usageProbe` holds it while in flight so
+// concurrent requests wait for the same answer instead of racing past it.
 let usageProbed = false;
+let usageProbe = null;
 
 async function ensureAccessToken(getAuth, setAuth) {
   const result = await tokenBroker.getAccessToken(async (refreshed) => {
@@ -156,19 +158,40 @@ function abortError(signal) {
  * streaming body whose producer stalls would otherwise keep this await pending
  * forever: the signal is only handed to `fetch` afterwards, so an abort would
  * reach neither network leg.
+ *
+ * Read through an explicit reader rather than `request.text()`: that helper
+ * locks the body itself, leaving nothing to cancel, so a producer that keeps
+ * enqueueing after the abort would still be drained.
  */
-function readBodyText(request, signal) {
+async function readBodyText(request, signal) {
   if (!signal) return request.text();
-  if (signal.aborted) return Promise.reject(abortError(signal));
-  let onAbort;
-  return new Promise((resolve, reject) => {
-    onAbort = () => {
-      request.body?.cancel().catch(() => {});
-      reject(abortError(signal));
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-    request.text().then(resolve, reject);
-  }).finally(() => signal.removeEventListener("abort", onAbort));
+  if (signal.aborted) {
+    // Nothing has locked the body yet, so this is the one place where
+    // cancelling the stream directly is both valid and necessary: otherwise
+    // the producer of an already-abandoned turn is never told to stop.
+    request.body.cancel(abortError(signal)).catch(() => {});
+    throw abortError(signal);
+  }
+  const reader = request.body.getReader();
+  const onAbort = () => {
+    reader.cancel(abortError(signal)).catch(() => {});
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    const decoder = new TextDecoder();
+    let text = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value, { stream: true });
+    }
+    // A cancelled reader reports `done` rather than rejecting, so the abort
+    // has to be re-raised here instead of returning a truncated body.
+    if (signal.aborted) throw abortError(signal);
+    return text + decoder.decode();
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
 }
 
 /**
@@ -298,20 +321,21 @@ function spentReason(response, { maxPercent = 100, bodyText = "" } = {}) {
  * Reads the account's window usage from the ChatGPT usage endpoint, which does
  * not consume any of it. Returns the highest window, or null when the payload
  * carries no usage at all.
+ *
+ * Deliberately takes no caller signal: the result is shared by every request
+ * that arrives while it is in flight, so one caller's cancellation must not
+ * cancel it for the others. Its own timeout still bounds it.
  */
-async function probeUsedPercent(accessToken, accountId, callerSignal) {
+async function probeUsedPercent(accessToken, accountId) {
   const headers = new Headers({
     authorization: `Bearer ${accessToken}`,
     originator: "opencode",
   });
   if (accountId) headers.set("ChatGPT-Account-Id", accountId);
 
-  // The probe runs before the turn's own request, so a cancelled turn must not
-  // wait out the probe timeout.
-  const timeout = AbortSignal.timeout(USAGE_PROBE_TIMEOUT_MS);
   const response = await fetch(USAGE_STATUS_ENDPOINT, {
     headers,
-    signal: callerSignal ? AbortSignal.any([callerSignal, timeout]) : timeout,
+    signal: AbortSignal.timeout(USAGE_PROBE_TIMEOUT_MS),
   });
   if (!response.ok) throw new Error(`usage status ${response.status}`);
 
@@ -323,6 +347,30 @@ async function probeUsedPercent(accessToken, accountId, callerSignal) {
     if (used !== null) highest = Math.max(highest ?? 0, used);
   }
   return highest;
+}
+
+/**
+ * The one-time preflight, shared by concurrent requests. Marking it spent
+ * before it settles would let a second request skip a pending preflight and
+ * consume the subscription past the ceiling the first one is still measuring.
+ */
+function sharedUsageProbe(accessToken, accountId) {
+  if (!usageProbe) {
+    usageProbe = probeUsedPercent(accessToken, accountId).finally(() => {
+      usageProbed = true;
+      usageProbe = null;
+    });
+  }
+  return usageProbe;
+}
+
+/** Reject as soon as the caller gives up, without disturbing other waiters. */
+function whenAborted(signal) {
+  if (!signal) return new Promise(() => {});
+  return new Promise((_, reject) => {
+    if (signal.aborted) reject(abortError(signal));
+    else signal.addEventListener("abort", () => reject(abortError(signal)), { once: true });
+  });
 }
 
 function spilloverHeaders(headers, apiKey) {
@@ -541,9 +589,13 @@ export const CodexAuthProxy = async (input) => {
             // discover the ceiling by consuming a turn past it, so ask the usage
             // endpoint first. A failed probe simply leaves the header path to it.
             if (fallbackKey && maxPercent < 100 && !usageProbed) {
-              usageProbed = true;
+              const probe = sharedUsageProbe(accessToken, accountId);
               try {
-                const used = await probeUsedPercent(accessToken, accountId, signal);
+                // The probe is shared, so it is raced against this caller's
+                // signal rather than cancelled by it: a turn that gives up
+                // stops waiting without stranding the other waiters, and the
+                // preflight counts as spent only once it settles.
+                const used = await Promise.race([probe, whenAborted(signal)]);
                 if (used !== null && used >= maxPercent) {
                   return fetchFallback(
                     fallbackUrl,
@@ -554,10 +606,7 @@ export const CodexAuthProxy = async (input) => {
                   );
                 }
               } catch (error) {
-                // A caller that cancelled its turn never learned the usage, so
-                // the ceiling must stay enforceable for the next request. Only a
-                // probe that actually answered (or failed on its own) is spent.
-                if (signal?.aborted) usageProbed = false;
+                if (signal?.aborted) throw error;
                 console.error(
                   `[codex-auth-plugin] usage probe failed, staying on the subscription: ${error.message}`
                 );
