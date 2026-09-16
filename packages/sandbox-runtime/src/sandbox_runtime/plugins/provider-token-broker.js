@@ -1,9 +1,16 @@
 export class ProviderTokenBrokerError extends Error {
-  constructor(message, { kind, status = null }) {
+  constructor(message, { kind, status = null, providerCode = null }) {
     super(message);
     this.name = "ProviderTokenBrokerError";
     this.kind = kind;
     this.status = status;
+    /**
+     * The control plane's own error code when it sent one. An HTTP status
+     * cannot separate a credential that needs reconnection from transient
+     * exchange contention — both answer 409 — so callers deciding whether to
+     * abandon a subscription must read this instead.
+     */
+    this.providerCode = providerCode;
   }
 }
 
@@ -64,10 +71,17 @@ export function createProviderTokenBroker({ provider, providerLabel }) {
       }
     );
     if (!response.ok) {
-      const body = (await response.text()).slice(0, 200);
+      const raw = (await response.text()).slice(0, 200);
+      let providerCode = null;
+      try {
+        const parsed = JSON.parse(raw);
+        if (typeof parsed?.code === "string" && parsed.code) providerCode = parsed.code;
+      } catch {
+        // A non-JSON body carries no code; the status still classifies it.
+      }
       throw new ProviderTokenBrokerError(
-        `${providerLabel} token refresh failed (${response.status}): ${body}`,
-        { kind: "http", status: response.status }
+        `${providerLabel} token refresh failed (${response.status}): ${raw}`,
+        { kind: "http", status: response.status, providerCode }
       );
     }
 

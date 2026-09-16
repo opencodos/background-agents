@@ -41,8 +41,23 @@ const USAGE_PROBE_TIMEOUT_MS = 5000;
 /** Headers the ChatGPT backend expects that api.openai.com has no use for. */
 const CHATGPT_ONLY_HEADERS = ["chatgpt-account-id", "originator", "session_id"];
 
-/** Response headers that describe the transport, not the payload. */
+/** Entity headers that describe a specific body, not the payload's meaning. */
 const TRANSPORT_HEADERS = ["content-encoding", "content-length"];
+
+/**
+ * Control-plane provider-access error codes that no retry can clear, so the
+ * subscription is genuinely unusable for this session. `exchange_busy`,
+ * `provider_unavailable` and `upstream_retry_safe` are deliberately absent:
+ * they are transient and must not spend the metered fallback key.
+ */
+const PERMANENT_SUBSCRIPTION_ERROR_CODES = new Set([
+  "account_inactive",
+  "account_archived",
+  "provider_mismatch",
+  "credential_not_found",
+  "credential_invalid",
+  "reconnect_required",
+]);
 
 const ALLOWED_MODELS = new Set([
   "gpt-5.1-codex-max",
@@ -124,9 +139,11 @@ async function normalizeRequest(requestInput, init) {
       ? requestInput
       : new URL(String(requestInput));
 
-  const headers = new Headers();
-  if (request) request.headers.forEach((value, key) => headers.set(key, value));
-  for (const [key, value] of headersFrom(init)) headers.set(key, value);
+  // Native fetch(request, init) REPLACES the Request's headers when init
+  // supplies any, so merging them would keep a header the caller meant to drop
+  // — an authorization override would leave the source credential in place.
+  const headers =
+    init?.headers === undefined ? new Headers(request?.headers ?? []) : headersFrom(init);
 
   let body = init?.body;
   if (body === undefined && request?.body) body = await request.text();
@@ -246,6 +263,11 @@ async function probeUsedPercent(accessToken, accountId, callerSignal) {
 function spilloverHeaders(headers, apiKey) {
   const next = new Headers(headers);
   for (const name of CHATGPT_ONLY_HEADERS) next.delete(name);
+  // A source Request's content-length describes the subscription body, which a
+  // Spark alias rewrite changes; forwarding it makes the transport reject the
+  // fallback before it is sent. content-encoding never describes this
+  // already-decoded string body.
+  for (const name of TRANSPORT_HEADERS) next.delete(name);
   next.set("authorization", `Bearer ${apiKey}`);
   return next;
 }
@@ -301,11 +323,14 @@ async function fetchFallback(fallbackUrl, baseInit, headers, apiKey, reason = nu
 }
 
 function isPermanentSubscriptionTokenFailure(error) {
-  // Provider-account credentials that are invalid or require reconnection are
-  // reported as 409. A 401 means the router rejected this sandbox's own token
-  // and says nothing about the ChatGPT subscription.
+  // The control plane answers 409 for both a credential that needs
+  // reconnection and transient exchange contention, so the status alone would
+  // spend the paid key on contention. Decide on the control plane's own error
+  // code, and only for codes that no retry can clear.
   return (
-    error?.name === "ProviderTokenBrokerError" && error.kind === "http" && error.status === 409
+    error?.name === "ProviderTokenBrokerError" &&
+    error.kind === "http" &&
+    PERMANENT_SUBSCRIPTION_ERROR_CODES.has(error.providerCode)
   );
 }
 
@@ -432,6 +457,10 @@ export const CodexAuthProxy = async (input) => {
                   );
                 }
               } catch (error) {
+                // A caller that cancelled its turn never learned the usage, so
+                // the ceiling must stay enforceable for the next request. Only a
+                // probe that actually answered (or failed on its own) is spent.
+                if (signal?.aborted) usageProbed = false;
                 console.error(
                   `[codex-auth-plugin] usage probe failed, staying on the subscription: ${error.message}`
                 );

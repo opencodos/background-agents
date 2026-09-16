@@ -209,7 +209,8 @@ test("spills over when the control plane cannot mint a subscription token", asyn
   process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
   const calls = stubFetch({
     codex: () => new Response("unreachable", { status: 500 }),
-    broker: () => new Response("reconnect required", { status: 409 }),
+    broker: () =>
+      Response.json({ error: "reconnect required", code: "reconnect_required" }, { status: 409 }),
   });
   const loaded = await loadProxy("broker-down");
 
@@ -234,6 +235,42 @@ test("does not spend the fallback key on a transient broker failure", async () =
   assert.equal(calls.filter((call) => call.url === MODEL_REQUEST_URL).length, 0);
 });
 
+test("does not spend the fallback key on transient exchange contention", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  // The control plane answers 409 for a credential that needs reconnection and
+  // for exchange contention alike, so only its own code separates them.
+  const calls = stubFetch({
+    codex: () => new Response("unreachable", { status: 500 }),
+    broker: () =>
+      Response.json(
+        { error: "openai credential exchange did not complete", code: "exchange_busy" },
+        { status: 409 }
+      ),
+  });
+  const loaded = await loadProxy("broker-exchange-busy");
+
+  await assert.rejects(
+    loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT),
+    /OpenAI token refresh failed \(409\)/
+  );
+  assert.equal(calls.filter((call) => call.url === MODEL_REQUEST_URL).length, 0);
+});
+
+test("does not spend the fallback key on a 409 that carries no code", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  const calls = stubFetch({
+    codex: () => new Response("unreachable", { status: 500 }),
+    broker: () => new Response("conflict", { status: 409 }),
+  });
+  const loaded = await loadProxy("broker-409-no-code");
+
+  await assert.rejects(
+    loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT),
+    /OpenAI token refresh failed \(409\)/
+  );
+  assert.equal(calls.filter((call) => call.url === MODEL_REQUEST_URL).length, 0);
+});
+
 test("does not spend the fallback key when sandbox authentication is rejected", async () => {
   process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
   const calls = stubFetch({
@@ -253,7 +290,8 @@ test("keeps a Request-shaped call intact when the subscription token fails", asy
   process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
   const calls = stubFetch({
     codex: () => new Response("unreachable", { status: 500 }),
-    broker: () => new Response("reconnect required", { status: 409 }),
+    broker: () =>
+      Response.json({ error: "reconnect required", code: "reconnect_required" }, { status: 409 }),
   });
   const loaded = await loadProxy("request-input-token");
 
@@ -416,6 +454,108 @@ test("abandons a usage probe still in flight when the caller aborts", async () =
   clearTimeout(stall);
   assert.equal(signal.aborted, true);
   assert.equal(outcome, "settled", "the turn does not wait out the probe timeout");
+});
+
+test("an aborted usage probe leaves the ceiling enforceable for the next request", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT = "80";
+
+  let probeStarted;
+  let probeSignal = new Promise((resolve) => (probeStarted = resolve));
+  let overCeiling = false;
+  const calls = stubFetch({
+    codex: () => new Response("codex-should-not-be-called", { status: 200 }),
+    usage: (init) => {
+      if (overCeiling) return usageResponse(42, 85);
+      return new Promise((_, reject) => {
+        probeStarted(init.signal);
+        init.signal.addEventListener("abort", () =>
+          reject(new DOMException("aborted", "AbortError"))
+        );
+      });
+    },
+  });
+  const loaded = await loadProxy("probe-abort-reset");
+
+  const controller = new AbortController();
+  const pending = loaded.fetch(
+    new Request(MODEL_REQUEST_URL, { ...REQUEST_INIT, signal: controller.signal })
+  );
+  await probeSignal;
+  controller.abort();
+  await pending.catch(() => {});
+
+  // The cancelled turn never learned the usage, so the ceiling must still be
+  // discovered before the next turn is spent on the subscription.
+  overCeiling = true;
+  const before = calls.length;
+  const response = await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT);
+  assert.equal(await response.text(), "platform-ok");
+  assert.equal(
+    calls.slice(before).filter((call) => call.url.includes("/wham/usage")).length,
+    1,
+    "the ceiling is probed again"
+  );
+  assert.equal(
+    calls.slice(before).filter((call) => call.url.includes("/codex/responses")).length,
+    0,
+    "no subscription turn is spent past the ceiling"
+  );
+});
+
+test("an init header set replaces the source Request's headers", async () => {
+  delete process.env.OPENAI_API_KEY_FALLBACK;
+  const calls = stubFetch({ codex: () => new Response("codex-ok", { status: 200 }) });
+  const loaded = await loadProxy("header-replacement");
+
+  // Native fetch(request, { headers }) replaces rather than merges, so a
+  // caller dropping authorization must not have the Request's value survive.
+  const request = new Request(MODEL_REQUEST_URL, {
+    ...REQUEST_INIT,
+    headers: { authorization: "Bearer caller-secret", "x-keep": "no" },
+  });
+  await loaded.fetch(request, { headers: { "x-replaced": "yes" } });
+
+  const call = calls.find((entry) => entry.url.startsWith("https://chatgpt.com/"));
+  assert.equal(call.headers.get("x-replaced"), "yes");
+  assert.equal(call.headers.get("x-keep"), null, "the Request's headers are not merged in");
+  assert.equal(
+    call.headers.get("authorization"),
+    "Bearer cp-access",
+    "the subscription credential replaces the caller's, not the Request's"
+  );
+});
+
+test("a Spark spillover drops entity headers that described the original body", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
+  const body = JSON.stringify({ model: "gpt-5.3-codex-spark", input: "hi" });
+  const calls = stubFetch({ codex: () => usageLimitResponse() });
+  const loaded = await loadProxy("spark-entity-headers");
+
+  await loaded.fetch(MODEL_REQUEST_URL, {
+    method: "POST",
+    body,
+    headers: {
+      authorization: "Bearer opencode-oauth-dummy-key",
+      "content-length": String(Buffer.byteLength(body)),
+      "content-encoding": "identity",
+    },
+  });
+
+  const spilloverCall = calls.at(-1);
+  assert.equal(
+    JSON.parse(spilloverCall.body).model,
+    "gpt-5.3-codex",
+    "Spark aliases to the platform model"
+  );
+  assert.notEqual(spilloverCall.body, body, "the body really was rewritten");
+  assert.equal(
+    spilloverCall.headers.get("content-length"),
+    null,
+    "a stale length would make the transport reject the fallback"
+  );
+  assert.equal(spilloverCall.headers.get("content-encoding"), null);
 });
 
 test("latches at the ceiling from a successful response's headers", async () => {
