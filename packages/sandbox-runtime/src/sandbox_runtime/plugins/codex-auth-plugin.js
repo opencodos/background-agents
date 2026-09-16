@@ -89,6 +89,11 @@ let usageProbed = false;
 let usageProbe = null;
 let usageProbeUsed = null;
 
+// Set when a failed fallback hands the next turn back to the subscription, so
+// that one turn is not immediately sent to the platform again by the ceiling
+// it is meant to be proving it can still serve.
+let subscriptionRetryPending = false;
+
 async function ensureAccessToken(getAuth, setAuth) {
   const result = await tokenBroker.getAccessToken(async (refreshed) => {
     // Update OpenCode's auth state for consistency. The broker cache remains
@@ -440,13 +445,16 @@ function latchSpillover(reason) {
 /**
  * Hand the next turn back to the subscription. Clearing the latch alone is not
  * enough: a fallback chosen by the preflight would be chosen again from the
- * retained measurement, so that measurement is dropped too. `usageProbed`
- * stays set, so the recovery costs no second probe and the response headers
- * govern from here.
+ * retained measurement. So the measurement is dropped, exactly one turn is
+ * allowed past the ceiling to prove the subscription still answers, and the
+ * preflight is re-armed — leaving it spent would disable
+ * OPENAI_SUBSCRIPTION_MAX_PERCENT for the rest of the sandbox's life.
  */
 function recoverSubscription(detail) {
   spilloverLatched = false;
   usageProbeUsed = null;
+  usageProbed = false;
+  subscriptionRetryPending = true;
   console.error(`[codex-auth-plugin] ${FALLBACK_KEY_ENV} ${detail}`);
 }
 
@@ -627,7 +635,11 @@ export const CodexAuthProxy = async (input) => {
             // With a ceiling below 100 the first request of a sandbox must not
             // discover the ceiling by consuming a turn past it, so ask the usage
             // endpoint first. A failed probe simply leaves the header path to it.
-            if (fallbackKey && maxPercent < 100) {
+            // One turn after a failed fallback skips this: its whole purpose is
+            // to find out whether the subscription can serve again.
+            if (subscriptionRetryPending) {
+              subscriptionRetryPending = false;
+            } else if (fallbackKey && maxPercent < 100) {
               let used = usageProbeUsed;
               if (!usageProbed) {
                 const probe = sharedUsageProbe(accessToken, accountId);

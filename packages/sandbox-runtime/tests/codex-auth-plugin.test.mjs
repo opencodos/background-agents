@@ -636,6 +636,44 @@ test("ignores init members whose value is undefined", async () => {
   }
 });
 
+test("re-measures the ceiling after a recovered turn", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT = "80";
+  let platformOk = false;
+  const calls = stubFetch({
+    // Header-less Codex replies, so the ceiling can only be enforced by the
+    // preflight: if the recovery leaves it spent, it is off for good.
+    codex: () => new Response("codex-ok", { status: 200 }),
+    usage: () => usageResponse(42, 95),
+    platform: () =>
+      platformOk
+        ? new Response("platform-ok", { status: 200 })
+        : new Response("platform down", { status: 503 }),
+  });
+  const loaded = await loadProxy("ceiling-rearm");
+
+  assert.equal((await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT)).status, 503);
+
+  // Exactly one turn is allowed past the ceiling, to find out whether the
+  // subscription answers at all.
+  platformOk = true;
+  assert.equal(await (await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT)).text(), "codex-ok");
+
+  const before = calls.length;
+  const third = await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT);
+  assert.equal(await third.text(), "platform-ok");
+  assert.equal(
+    calls.slice(before).filter((call) => call.url.includes("/wham/usage")).length,
+    1,
+    "the ceiling is measured again"
+  );
+  assert.equal(
+    calls.slice(before).filter((call) => call.url.includes("/codex/responses")).length,
+    0,
+    "95% against an 80% ceiling still reserves the window"
+  );
+});
+
 test("detaches from the source Request when the caller passes a null signal", async () => {
   process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
   delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
