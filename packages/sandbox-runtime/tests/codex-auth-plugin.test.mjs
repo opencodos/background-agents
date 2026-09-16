@@ -518,6 +518,72 @@ test("holds a concurrent request behind the pending ceiling probe", async () => 
   assert.equal(calls.filter((call) => call.url.includes("/codex/responses")).length, 0);
 });
 
+test("keeps a measurement whose only waiter walked away", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT = "80";
+
+  let releaseProbe;
+  let probeStarted;
+  const probeReached = new Promise((resolve) => (probeStarted = resolve));
+  const calls = stubFetch({
+    codex: () => new Response("codex-should-not-be-called", { status: 200 }),
+    usage: () =>
+      new Promise((resolve) => {
+        probeStarted();
+        releaseProbe = () => resolve(usageResponse(42, 85));
+      }),
+  });
+  const loaded = await loadProxy("probe-result-retained");
+
+  const controller = new AbortController();
+  const abandoned = loaded.fetch(
+    new Request(MODEL_REQUEST_URL, { ...REQUEST_INIT, signal: controller.signal })
+  );
+  await probeReached;
+  controller.abort();
+  await abandoned.catch(() => {});
+
+  // The probe answers after its only waiter gave up. Discarding that 85%
+  // would send the next request over the 80% ceiling.
+  releaseProbe();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const before = calls.length;
+  const response = await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT);
+  assert.equal(await response.text(), "platform-ok");
+  assert.equal(
+    calls.slice(before).filter((call) => call.url.includes("/codex/responses")).length,
+    0,
+    "no subscription turn is spent above the measured ceiling"
+  );
+  assert.equal(
+    calls.slice(before).filter((call) => call.url.includes("/wham/usage")).length,
+    0,
+    "the retained measurement is reused rather than re-probed"
+  );
+});
+
+test("detaches from the source Request when the caller passes a null signal", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
+  const calls = stubFetch({ codex: () => usageLimitResponse() });
+  const loaded = await loadProxy("null-signal-detach");
+
+  // Native fetch(request, { signal: null }) detaches, so aborting the source
+  // must not reach either reconstructed leg.
+  const controller = new AbortController();
+  const request = new Request(MODEL_REQUEST_URL, { ...REQUEST_INIT, signal: controller.signal });
+  await loaded.fetch(request, { signal: null });
+  controller.abort();
+
+  for (const call of [
+    calls.find((entry) => entry.url.startsWith("https://chatgpt.com/")),
+    calls.at(-1),
+  ]) {
+    assert.equal(call.signal, undefined, "no signal is attached to the call");
+  }
+});
+
 test("an init header set replaces the source Request's headers", async () => {
   delete process.env.OPENAI_API_KEY_FALLBACK;
   const calls = stubFetch({ codex: () => new Response("codex-ok", { status: 200 }) });

@@ -82,9 +82,12 @@ let spilloverLatched = false;
 
 // One usage probe per sandbox: afterwards every Codex response carries the
 // numbers in its headers for free. `usageProbe` holds it while in flight so
-// concurrent requests wait for the same answer instead of racing past it.
+// concurrent requests wait for the same answer instead of racing past it, and
+// `usageProbeUsed` keeps the answer itself — a waiter that gave up must not
+// take the measurement with it and let the next request past the ceiling.
 let usageProbed = false;
 let usageProbe = null;
+let usageProbeUsed = null;
 
 async function ensureAccessToken(getAuth, setAuth) {
   const result = await tokenBroker.getAccessToken(async (refreshed) => {
@@ -195,6 +198,18 @@ async function readBodyText(request, signal) {
 }
 
 /**
+ * The signal the call should honour. Without the source Request's signal a
+ * cancelled turn would leave the subscription or platform call running — but
+ * `fetch(request, { signal: null })` deliberately detaches from it, so an
+ * explicit null must not fall back to the Request's own signal. An absent or
+ * `undefined` member is not an override, matching the fetch spec.
+ */
+function resolveSignal(request, init) {
+  if (init && "signal" in init && init.signal !== undefined) return init.signal ?? undefined;
+  return request?.signal;
+}
+
+/**
  * Fold both fetch shapes — `(url, init)` and a `Request` — into one plain init.
  * opencode's provider client passes an init today, but a `Request` carries its
  * own method, headers and body, and spreading an absent init would send the
@@ -215,9 +230,7 @@ async function normalizeRequest(requestInput, init) {
   const headers =
     init?.headers === undefined ? new Headers(request?.headers ?? []) : headersFrom(init);
 
-  // Without the source Request's signal, a cancelled turn would leave the
-  // subscription or platform call running.
-  const signal = init?.signal ?? request?.signal;
+  const signal = resolveSignal(request, init);
 
   let body = init?.body;
   if (body === undefined && request?.body) body = await readBodyText(request, signal);
@@ -353,13 +366,20 @@ async function probeUsedPercent(accessToken, accountId) {
  * The one-time preflight, shared by concurrent requests. Marking it spent
  * before it settles would let a second request skip a pending preflight and
  * consume the subscription past the ceiling the first one is still measuring.
+ * The measurement is retained, so a probe whose only waiter walked away still
+ * decides the next request instead of being thrown away with that waiter.
  */
 function sharedUsageProbe(accessToken, accountId) {
   if (!usageProbe) {
-    usageProbe = probeUsedPercent(accessToken, accountId).finally(() => {
-      usageProbed = true;
-      usageProbe = null;
-    });
+    usageProbe = probeUsedPercent(accessToken, accountId)
+      .then((used) => {
+        usageProbeUsed = used;
+        return used;
+      })
+      .finally(() => {
+        usageProbed = true;
+        usageProbe = null;
+      });
   }
   return usageProbe;
 }
@@ -588,27 +608,31 @@ export const CodexAuthProxy = async (input) => {
             // With a ceiling below 100 the first request of a sandbox must not
             // discover the ceiling by consuming a turn past it, so ask the usage
             // endpoint first. A failed probe simply leaves the header path to it.
-            if (fallbackKey && maxPercent < 100 && !usageProbed) {
-              const probe = sharedUsageProbe(accessToken, accountId);
-              try {
-                // The probe is shared, so it is raced against this caller's
-                // signal rather than cancelled by it: a turn that gives up
-                // stops waiting without stranding the other waiters, and the
-                // preflight counts as spent only once it settles.
-                const used = await Promise.race([probe, whenAborted(signal)]);
-                if (used !== null && used >= maxPercent) {
-                  return fetchFallback(
-                    fallbackUrl,
-                    baseInit,
-                    headers,
-                    fallbackKey,
-                    `subscription usage at ${used}% of the ${maxPercent}% ceiling`
+            if (fallbackKey && maxPercent < 100) {
+              let used = usageProbeUsed;
+              if (!usageProbed) {
+                const probe = sharedUsageProbe(accessToken, accountId);
+                try {
+                  // The probe is shared, so it is raced against this caller's
+                  // signal rather than cancelled by it: a turn that gives up
+                  // stops waiting without stranding the other waiters, and the
+                  // preflight counts as spent only once it settles.
+                  used = await Promise.race([probe, whenAborted(signal)]);
+                } catch (error) {
+                  if (signal?.aborted) throw error;
+                  console.error(
+                    `[codex-auth-plugin] usage probe failed, staying on the subscription: ${error.message}`
                   );
+                  used = usageProbeUsed;
                 }
-              } catch (error) {
-                if (signal?.aborted) throw error;
-                console.error(
-                  `[codex-auth-plugin] usage probe failed, staying on the subscription: ${error.message}`
+              }
+              if (used !== null && used >= maxPercent) {
+                return fetchFallback(
+                  fallbackUrl,
+                  baseInit,
+                  headers,
+                  fallbackKey,
+                  `subscription usage at ${used}% of the ${maxPercent}% ceiling`
                 );
               }
             }
