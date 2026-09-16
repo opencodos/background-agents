@@ -82,8 +82,10 @@ this one rides along unused until the subscription cannot answer. Set
 `OPENAI_SUBSCRIPTION_MAX_PERCENT` to `80` to reserve the last fifth of each window for whoever else
 uses that ChatGPT account.
 
-A sandbox sends OpenAI traffic to the subscription until one of these happens, then latches to a
-successful fallback path for the rest of its life:
+With `OPENAI_API_KEY_FALLBACK` configured, a sandbox sends OpenAI traffic to the subscription until
+one of these happens, then latches to a successful fallback path for the rest of its life. Without
+that secret nothing below applies — every response is passed through unchanged, including a
+usage-limit `429`:
 
 - when `OPENAI_SUBSCRIPTION_MAX_PERCENT` is below `100`, usage is already at or above that ceiling
   before the first turn. The percentage comes from `GET /backend-api/wham/usage`, which reports both

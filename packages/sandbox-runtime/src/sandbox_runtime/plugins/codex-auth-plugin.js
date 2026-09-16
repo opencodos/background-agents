@@ -14,6 +14,7 @@ import { createProviderTokenBroker } from "./provider-token-broker.js";
 
 const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses";
 const OPENAI_API_ENDPOINT = "https://api.openai.com/v1/responses";
+const OPENAI_CHAT_COMPLETIONS_ENDPOINT = "https://api.openai.com/v1/chat/completions";
 const OAUTH_DUMMY_KEY = "opencode-oauth-dummy-key";
 const tokenBroker = createProviderTokenBroker({ provider: "openai", providerLabel: "OpenAI" });
 
@@ -57,6 +58,8 @@ const ALLOWED_MODELS = new Set([
   "gpt-5.1-codex",
 ]);
 
+const PLATFORM_MODEL_ALIASES = new Map([["gpt-5.3-codex-spark", "gpt-5.3-codex"]]);
+
 // Latched for the rest of the sandbox's life once the subscription is spent, so
 // a doomed Codex call is not repeated on every later turn.
 let spilloverLatched = false;
@@ -89,12 +92,79 @@ async function ensureAccessToken(getAuth, setAuth) {
   };
 }
 
+function headersFrom(init) {
+  const headers = new Headers();
+  if (!init?.headers) return headers;
+  if (init.headers instanceof Headers) {
+    init.headers.forEach((value, key) => headers.set(key, value));
+  } else if (Array.isArray(init.headers)) {
+    for (const [key, value] of init.headers) {
+      if (value !== undefined) headers.set(key, String(value));
+    }
+  } else {
+    for (const [key, value] of Object.entries(init.headers)) {
+      if (value !== undefined) headers.set(key, String(value));
+    }
+  }
+  return headers;
+}
+
+/**
+ * Fold both fetch shapes — `(url, init)` and a `Request` — into one plain init.
+ * opencode's provider client passes an init today, but a `Request` carries its
+ * own method, headers and body, and spreading an absent init would send the
+ * subscription call and every spillover retry as a bodiless GET. Buffering the
+ * body to a string here is also what lets a 429 be retried at all.
+ */
+async function normalizeRequest(requestInput, init) {
+  const request = requestInput instanceof Request ? requestInput : null;
+  const url = request
+    ? new URL(request.url)
+    : requestInput instanceof URL
+      ? requestInput
+      : new URL(String(requestInput));
+
+  const headers = new Headers();
+  if (request) request.headers.forEach((value, key) => headers.set(key, value));
+  for (const [key, value] of headersFrom(init)) headers.set(key, value);
+
+  let body = init?.body;
+  if (body === undefined && request?.body) body = await request.text();
+
+  return {
+    url,
+    headers,
+    method: init?.method ?? request?.method,
+    body,
+    // Without the source Request's signal, a cancelled turn would leave the
+    // subscription or platform call running.
+    signal: init?.signal ?? request?.signal,
+  };
+}
+
+function isChatCompletionsRequest(url) {
+  return url.pathname.includes("/chat/completions");
+}
+
 function isModelRequest(url) {
-  return url.pathname.includes("/v1/responses") || url.pathname.includes("/chat/completions");
+  return url.pathname.includes("/v1/responses") || isChatCompletionsRequest(url);
+}
+
+/**
+ * Platform endpoint that keeps the request contract the caller chose: Chat
+ * Completions and Responses payloads are not interchangeable, so a
+ * /chat/completions body must not be replayed against /v1/responses. Origin and
+ * path are fixed rather than forwarded from the request, so a proxied base URL
+ * cannot steer spillover traffic somewhere else.
+ */
+function fallbackEndpoint(url) {
+  return isChatCompletionsRequest(url) ? OPENAI_CHAT_COMPLETIONS_ENDPOINT : OPENAI_API_ENDPOINT;
 }
 
 function toPercent(value) {
-  const percent = typeof value === "number" ? value : Number.parseFloat(value ?? "");
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string" || value.trim() === "") return null;
+  const percent = Number(value);
   return Number.isFinite(percent) ? percent : null;
 }
 
@@ -128,13 +198,15 @@ function usedPercentFromHeaders(headers) {
  * the standard x-ratelimit-* headers.
  */
 function spentReason(response, { maxPercent = 100, bodyText = "" } = {}) {
-  const reached = response.headers.get("x-codex-rate-limit-reached-type");
-  if (reached) return `Codex reported the ${reached} limit reached`;
+  const reached = response.headers.get("x-codex-rate-limit-reached-type")?.toLowerCase();
+  if (reached === "primary" || reached === "secondary") {
+    return `Codex reported the ${reached} limit reached`;
+  }
   const used = usedPercentFromHeaders(response.headers);
   if (used !== null && used >= maxPercent) {
     return `subscription usage at ${used}% of the ${maxPercent}% ceiling`;
   }
-  if (/usage limit|quota/i.test(bodyText)) {
+  if (/\busage limit(?: has been)? reached\b/i.test(bodyText)) {
     return "the ChatGPT subscription reported its usage limit";
   }
   return null;
@@ -145,16 +217,19 @@ function spentReason(response, { maxPercent = 100, bodyText = "" } = {}) {
  * not consume any of it. Returns the highest window, or null when the payload
  * carries no usage at all.
  */
-async function probeUsedPercent(accessToken, accountId) {
+async function probeUsedPercent(accessToken, accountId, callerSignal) {
   const headers = new Headers({
     authorization: `Bearer ${accessToken}`,
     originator: "opencode",
   });
   if (accountId) headers.set("ChatGPT-Account-Id", accountId);
 
+  // The probe runs before the turn's own request, so a cancelled turn must not
+  // wait out the probe timeout.
+  const timeout = AbortSignal.timeout(USAGE_PROBE_TIMEOUT_MS);
   const response = await fetch(USAGE_STATUS_ENDPOINT, {
     headers,
-    signal: AbortSignal.timeout(USAGE_PROBE_TIMEOUT_MS),
+    signal: callerSignal ? AbortSignal.any([callerSignal, timeout]) : timeout,
   });
   if (!response.ok) throw new Error(`usage status ${response.status}`);
 
@@ -168,9 +243,22 @@ async function probeUsedPercent(accessToken, accountId) {
   return highest;
 }
 
-function applySpilloverHeaders(headers, apiKey) {
-  for (const name of CHATGPT_ONLY_HEADERS) headers.delete(name);
-  headers.set("authorization", `Bearer ${apiKey}`);
+function spilloverHeaders(headers, apiKey) {
+  const next = new Headers(headers);
+  for (const name of CHATGPT_ONLY_HEADERS) next.delete(name);
+  next.set("authorization", `Bearer ${apiKey}`);
+  return next;
+}
+
+function platformFallbackBody(body) {
+  if (typeof body !== "string") return body;
+  try {
+    const parsed = JSON.parse(body);
+    const platformModel = PLATFORM_MODEL_ALIASES.get(parsed?.model);
+    return platformModel ? JSON.stringify({ ...parsed, model: platformModel }) : body;
+  } catch {
+    return body;
+  }
 }
 
 /** Re-materialize a response whose body was read to classify a 429. */
@@ -189,6 +277,35 @@ function latchSpillover(reason) {
   spilloverLatched = true;
   console.error(
     `[codex-auth-plugin] spilling OpenAI traffic over to ${FALLBACK_KEY_ENV}: ${reason}`
+  );
+}
+
+async function fetchFallback(fallbackUrl, baseInit, headers, apiKey, reason = null) {
+  const response = await fetch(fallbackUrl, {
+    ...baseInit,
+    body: platformFallbackBody(baseInit.body),
+    headers: spilloverHeaders(headers, apiKey),
+  });
+  if (response.ok) {
+    if (reason) latchSpillover(reason);
+    return response;
+  }
+
+  // A platform outage or unsupported model must not strand the sandbox on a
+  // permanently failing paid path. Retry the subscription on the next turn.
+  spilloverLatched = false;
+  console.error(
+    `[codex-auth-plugin] ${FALLBACK_KEY_ENV} request failed with status ${response.status}; retrying the subscription on the next turn`
+  );
+  return response;
+}
+
+function isPermanentSubscriptionTokenFailure(error) {
+  // Provider-account credentials that are invalid or require reconnection are
+  // reported as 409. A 401 means the router rejected this sandbox's own token
+  // and says nothing about the ChatGPT subscription.
+  return (
+    error?.name === "ProviderTokenBrokerError" && error.kind === "http" && error.status === 409
   );
 }
 
@@ -251,34 +368,31 @@ export const CodexAuthProxy = async (input) => {
         return {
           apiKey: OAUTH_DUMMY_KEY,
           async fetch(requestInput, init) {
-            const request = new Request(requestInput, init);
+            const {
+              url: parsed,
+              headers,
+              method,
+              body,
+              signal,
+            } = await normalizeRequest(requestInput, init);
+            const { headers: _discardedHeaders, ...restInit } = init ?? {};
+            const baseInit = { ...restInit, method, body, signal };
 
             const currentAuth = await getAuth();
-            if (currentAuth.type !== "oauth") return fetch(request);
+            if (currentAuth.type !== "oauth") return fetch(parsed, { ...baseInit, headers });
 
-            request.headers.delete("authorization");
+            // opencode signs the request with a placeholder API key; this proxy
+            // supplies the real credential instead. A caller that has switched
+            // away from OAuth keeps its own authorization, hence the early
+            // return above.
+            headers.delete("authorization");
 
-            const parsed = new URL(request.url);
             const modelRequest = isModelRequest(parsed);
             const fallbackKey = (modelRequest && process.env[FALLBACK_KEY_ENV]) || "";
-
-            // Retarget a clone of `request` at `url`, preserving its method,
-            // body, and every other header — a bare `{ ...init, headers }`
-            // drops all of that when the caller passed a Request with no
-            // separate `init`. Cloning first, rather than passing `request`
-            // itself, keeps `request`'s body unread so a spillover retry can
-            // retarget it again after the primary attempt already consumed
-            // its own clone.
-            const requestFor = (url) => new Request(url, request.clone());
-
-            const spilloverRequest = () => {
-              const proxied = requestFor(OPENAI_API_ENDPOINT);
-              applySpilloverHeaders(proxied.headers, fallbackKey);
-              return proxied;
-            };
+            const fallbackUrl = fallbackEndpoint(parsed);
 
             if (fallbackKey && spilloverLatched) {
-              return fetch(spilloverRequest());
+              return fetchFallback(fallbackUrl, baseInit, headers, fallbackKey);
             }
 
             let accessToken;
@@ -286,13 +400,18 @@ export const CodexAuthProxy = async (input) => {
             try {
               ({ accessToken, accountId } = await ensureAccessToken(getAuth, setAuth));
             } catch (error) {
-              if (!fallbackKey) throw error;
-              latchSpillover(`subscription token unavailable (${error.message})`);
-              return fetch(spilloverRequest());
+              if (!fallbackKey || !isPermanentSubscriptionTokenFailure(error)) throw error;
+              return fetchFallback(
+                fallbackUrl,
+                baseInit,
+                headers,
+                fallbackKey,
+                `subscription token unavailable (${error.message})`
+              );
             }
 
-            request.headers.set("authorization", `Bearer ${accessToken}`);
-            if (accountId) request.headers.set("ChatGPT-Account-Id", accountId);
+            headers.set("authorization", `Bearer ${accessToken}`);
+            if (accountId) headers.set("ChatGPT-Account-Id", accountId);
 
             const maxPercent = fallbackKey ? subscriptionMaxPercent() : 100;
 
@@ -302,10 +421,15 @@ export const CodexAuthProxy = async (input) => {
             if (fallbackKey && maxPercent < 100 && !usageProbed) {
               usageProbed = true;
               try {
-                const used = await probeUsedPercent(accessToken, accountId);
+                const used = await probeUsedPercent(accessToken, accountId, signal);
                 if (used !== null && used >= maxPercent) {
-                  latchSpillover(`subscription usage at ${used}% of the ${maxPercent}% ceiling`);
-                  return fetch(spilloverRequest());
+                  return fetchFallback(
+                    fallbackUrl,
+                    baseInit,
+                    headers,
+                    fallbackKey,
+                    `subscription usage at ${used}% of the ${maxPercent}% ceiling`
+                  );
                 }
               } catch (error) {
                 console.error(
@@ -314,7 +438,10 @@ export const CodexAuthProxy = async (input) => {
               }
             }
 
-            const response = await fetch(requestFor(modelRequest ? CODEX_API_ENDPOINT : parsed));
+            const response = await fetch(modelRequest ? CODEX_API_ENDPOINT : parsed, {
+              ...baseInit,
+              headers,
+            });
             if (!fallbackKey) return response;
 
             // A stream that has already started cannot be replayed, so a spent
@@ -327,11 +454,10 @@ export const CodexAuthProxy = async (input) => {
 
             const bodyText = await response.text().catch(() => "");
             const reason = spentReason(response, { maxPercent, bodyText });
-            if (!reason || typeof init?.body !== "string") {
+            if (!reason || typeof body !== "string") {
               return replayResponse(response, bodyText);
             }
-            latchSpillover(reason);
-            return fetch(spilloverRequest());
+            return fetchFallback(fallbackUrl, baseInit, headers, fallbackKey, reason);
           },
         };
       },
