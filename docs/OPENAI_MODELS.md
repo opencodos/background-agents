@@ -22,7 +22,7 @@ There are three ways to pay for OpenAI models:
 | Secrets                                      | Billing                                               | Setup                                                            |
 | -------------------------------------------- | ----------------------------------------------------- | ---------------------------------------------------------------- |
 | `OPENAI_OAUTH_*` (ChatGPT Plus/Pro)          | Included in the subscription; fails at its quota      | [Steps 1–3](#step-1-connect-chatgpt)                             |
-| `OPENAI_API_KEY`                             | Metered, per token                                    | [Using an API key](#using-an-api-key)                            |
+| `OPENAI_API_KEY`                             | Metered, per token                                    | [Step 3](#step-3-select-authentication)                          |
 | `OPENAI_OAUTH_*` + `OPENAI_API_KEY_FALLBACK` | Subscription up to a ceiling you choose, then metered | [Spilling over](#spilling-over-before-the-subscription-runs-out) |
 
 ### Step 1: Connect ChatGPT
@@ -61,28 +61,6 @@ choose provider policy, a specific connected account, or **Use API key**. Accoun
 Automation editors expose the same choices for every subscription provider. **Use defaults when each
 run starts** resolves current policy for every run; selecting an account or API-key mode pins that
 choice for future runs.
-
----
-
-## Using an API key
-
-Instead of a ChatGPT subscription, add a single secret on the **Settings** page:
-
-| Secret Name      | Value                                                           |
-| ---------------- | --------------------------------------------------------------- |
-| `OPENAI_API_KEY` | A key from https://platform.openai.com/api-keys (`sk-proj-...`) |
-
-Global scope makes every session use it; repository or environment scope narrows it to one target.
-All OpenAI models in the dropdown — including the Codex variants — are available this way, billed to
-the key's project.
-
-**An API key wins over the managed subscription.** When a session can see `OPENAI_API_KEY`, the
-control plane skips OAuth broker mode for OpenAI, so the sandbox talks to `api.openai.com` with the
-key. The `OPENAI_OAUTH_*` secrets can stay in place; delete the `OPENAI_API_KEY` secret to switch
-back to the subscription. The same precedence applies to xAI (`XAI_API_KEY` over SuperGrok OAuth).
-
-Unlike the OAuth path, the key itself is injected into the sandbox environment, because OpenCode
-reads `OPENAI_API_KEY` directly.
 
 ---
 
@@ -170,9 +148,10 @@ session explicitly uses API-key mode, confirm `OPENAI_API_KEY` is available in i
 
 ### "The usage limit has been reached"
 
-The ChatGPT subscription behind `OPENAI_OAUTH_REFRESH_TOKEN` hit its Codex quota. Wait for the quota
-window to reset, switch the session to a Claude model, or add an `OPENAI_API_KEY` secret
-([Using an API key](#using-an-api-key)) to bill OpenAI usage per token instead.
+The ChatGPT subscription hit its Codex quota. Wait for the window to reset, switch the session to
+another provider's model, or configure a spillover key
+([Spilling over](#spilling-over-before-the-subscription-runs-out)) so sessions continue on metered
+billing.
 
 ### "Token refresh failed" errors
 

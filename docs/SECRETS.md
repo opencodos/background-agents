@@ -71,7 +71,7 @@ The most common example:
 | `ANTHROPIC_API_KEY`               | Required for Claude models, unless the deployment configured a fleet-wide key (see below)                                                       |
 | `DEEPSEEK_API_KEY`                | Required for DeepSeek models with any sandbox provider                                                                                          |
 | `ZHIPU_API_KEY`                   | Required for Z.AI Coding Plan GLM models with any sandbox provider                                                                              |
-| `OPENAI_API_KEY`                  | Bills OpenAI models to a platform API key instead of a ChatGPT subscription ([guide](OPENAI_MODELS.md#using-an-api-key))                        |
+| `OPENCODE_API_KEY`                | Required for OpenCode Zen and OpenCode Go models with any sandbox provider                                                                      |
 | `OPENAI_API_KEY_FALLBACK`         | Spillover key used once the ChatGPT subscription reaches its ceiling ([guide](OPENAI_MODELS.md#spilling-over-before-the-subscription-runs-out)) |
 | `OPENAI_SUBSCRIPTION_MAX_PERCENT` | Share of a Codex rate-limit window sandboxes may consume before spilling over; default 100                                                      |
 
@@ -206,7 +206,8 @@ from it, even after you rotate the secret. Two guidelines:
 | `ANTHROPIC_API_KEY`               | Global | Claude API access                                                                                                                      |
 | `DEEPSEEK_API_KEY`                | Global | DeepSeek API access                                                                                                                    |
 | `ZHIPU_API_KEY`                   | Global | Z.AI Coding Plan GLM access                                                                                                            |
-| `OPENAI_API_KEY`                  | Any    | OpenAI models billed per token ([guide](OPENAI_MODELS.md#using-an-api-key))                                                            |
+| `OPENCODE_API_KEY`                | Global | OpenCode Zen and OpenCode Go access                                                                                                    |
+| `OPENAI_API_KEY`                  | Global | OpenAI API access when a session selects API-key mode                                                                                  |
 | `XAI_API_KEY`                     | Global | xAI API access when a session selects API-key mode                                                                                     |
 | `OPENAI_API_KEY_FALLBACK`         | Any    | Spillover once the ChatGPT subscription reaches its ceiling ([guide](OPENAI_MODELS.md#spilling-over-before-the-subscription-runs-out)) |
 | `OPENAI_SUBSCRIPTION_MAX_PERCENT` | Any    | Percentage of a Codex window sandboxes may consume (default 100)                                                                       |
@@ -226,9 +227,11 @@ from it, even after you rotate the secret. Two guidelines:
 If you see "Model not found" errors, verify the selected provider authentication mode first. For
 provider-account mode, verify the account and model entitlement. For API-key mode, add the required
 key to the session's secret scope. OpenAI uses `OPENAI_API_KEY`; xAI uses `XAI_API_KEY`; Claude uses
-`ANTHROPIC_API_KEY`; DeepSeek uses `DEEPSEEK_API_KEY`; Z.AI Coding Plan uses `ZHIPU_API_KEY`. For
-subscription authentication, follow the provider-account setup guidance in
-[OpenAI models](OPENAI_MODELS.md) or [Grok models](GROK_MODELS.md).
+`ANTHROPIC_API_KEY`; DeepSeek uses `DEEPSEEK_API_KEY`; Z.AI Coding Plan uses `ZHIPU_API_KEY`;
+OpenCode Zen and OpenCode Go both use `OPENCODE_API_KEY`, and an `opencode-go/*` model additionally
+needs an active Go subscription on that key. For subscription authentication, follow the
+provider-account setup guidance in [OpenAI models](OPENAI_MODELS.md) or
+[Grok models](GROK_MODELS.md).
 
 ### Secret not appearing in sandbox
 
