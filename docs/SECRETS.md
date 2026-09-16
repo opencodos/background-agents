@@ -72,7 +72,6 @@ The most common example:
 | `DEEPSEEK_API_KEY`                | Required for DeepSeek models with any sandbox provider                                                                                          |
 | `ZHIPU_API_KEY`                   | Required for Z.AI Coding Plan GLM models with any sandbox provider                                                                              |
 | `OPENCODE_API_KEY`                | Required for OpenCode Zen and OpenCode Go models with any sandbox provider                                                                      |
-| `OPENAI_API_KEY`                  | Bills OpenAI models to a platform API key instead of a ChatGPT subscription ([guide](OPENAI_MODELS.md#using-an-api-key))                        |
 | `OPENAI_API_KEY_FALLBACK`         | Spillover key used once the ChatGPT subscription reaches its ceiling ([guide](OPENAI_MODELS.md#spilling-over-before-the-subscription-runs-out)) |
 | `OPENAI_SUBSCRIPTION_MAX_PERCENT` | Share of a Codex rate-limit window sandboxes may consume before spilling over; default 100                                                      |
 
@@ -208,7 +207,7 @@ from it, even after you rotate the secret. Two guidelines:
 | `DEEPSEEK_API_KEY`                | Global | DeepSeek API access                                                                                                                    |
 | `ZHIPU_API_KEY`                   | Global | Z.AI Coding Plan GLM access                                                                                                            |
 | `OPENCODE_API_KEY`                | Global | OpenCode Zen and OpenCode Go access                                                                                                    |
-| `OPENAI_API_KEY`                  | Any    | OpenAI models billed per token ([guide](OPENAI_MODELS.md#using-an-api-key))                                                            |
+| `OPENAI_API_KEY`                  | Global | OpenAI API access when a session selects API-key mode                                                                                  |
 | `XAI_API_KEY`                     | Global | xAI API access when a session selects API-key mode                                                                                     |
 | `OPENAI_API_KEY_FALLBACK`         | Any    | Spillover once the ChatGPT subscription reaches its ceiling ([guide](OPENAI_MODELS.md#spilling-over-before-the-subscription-runs-out)) |
 | `OPENAI_SUBSCRIPTION_MAX_PERCENT` | Any    | Percentage of a Codex window sandboxes may consume (default 100)                                                                       |
