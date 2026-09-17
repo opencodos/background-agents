@@ -109,7 +109,13 @@ export async function resolveGitHubCredentialAuthority(
   if (context.authentication) {
     throw new Error("Non-user principal cannot carry browser-session provenance");
   }
-  if (context.principal.kind !== "service") {
+  // A personal access token is a non-browser actor bound to the user who issued
+  // it, so it authorizes credentials the same way a service principal does:
+  // enrichment comes from the stored user record, never from browser-session
+  // provenance. Routes that admit `accessTokenWrites` (for example
+  // `POST /automations/:id/trigger`) reach this resolver, so rejecting the kind
+  // here would fail the request outright.
+  if (context.principal.kind !== "service" && context.principal.kind !== "access-token") {
     throw new Error("Principal cannot authorize GitHub user credentials");
   }
   return { kind: "service_principal" };

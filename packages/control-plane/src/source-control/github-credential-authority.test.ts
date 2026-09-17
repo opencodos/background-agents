@@ -168,6 +168,27 @@ describe("resolveGitHubCredentialAuthority", () => {
     expect(getUserAuth).not.toHaveBeenCalled();
   });
 
+  it("authorizes an access-token principal as a non-browser actor", async () => {
+    // A personal access token reaches this resolver through every route that
+    // declares `accessTokenWrites`, so it must resolve rather than throw.
+    // Stored-record enrichment is the correct authority: a token carries no
+    // browser-session provenance, and Better Auth must not be constructed.
+    const getUserAuth = vi.fn(() => {
+      throw new Error("At least one sign-in provider must be configured");
+    });
+
+    await expect(
+      resolveGitHubCredentialAuthority(
+        createContext({
+          principal: { kind: "access-token", userId: "user-1", tokenId: "pat-1" },
+          getUserAuth,
+        }),
+        BROWSER_HEADERS
+      )
+    ).resolves.toEqual({ kind: "service_principal" });
+    expect(getUserAuth).not.toHaveBeenCalled();
+  });
+
   it("rejects sandbox principals", async () => {
     await expect(
       resolveGitHubCredentialAuthority(
