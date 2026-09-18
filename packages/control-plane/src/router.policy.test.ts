@@ -16,11 +16,11 @@ function routeFor(method: string, path: string) {
 
 describe("route policy table", () => {
   it("publishes the complete canonical route catalog", () => {
-    expect(routes).toHaveLength(187);
+    expect(routes).toHaveLength(188);
 
     const paths = routes.map((route) => route.path);
-    expect(new Set(paths).size).toBe(142);
-    expect(new Set(routes.map((route) => `${route.method}:${route.path}`)).size).toBe(187);
+    expect(new Set(paths).size).toBe(143);
+    expect(new Set(routes.map((route) => `${route.method}:${route.path}`)).size).toBe(188);
   });
 
   it("declares every path in the literal-or-parameter grammar", () => {
@@ -34,6 +34,7 @@ describe("route policy table", () => {
 
   it.each([
     ["GET", "/sessions/inbox", "/sessions/:id"],
+    ["GET", "/sessions/export", "/sessions/:id"],
     ["GET", "/model-provider-accounts/legacy-credentials", "/model-provider-accounts/:id"],
   ])("orders the static overlap %s %s before %s", (method, staticPath, dynamicPath) => {
     const staticIndex = routes.findIndex(

@@ -32,7 +32,7 @@ import {
   type AutomationModelProviderAuthRow,
 } from "./automation-model-provider-auth";
 import type { SqlDatabase, SqlStatement } from "./sql-database";
-import type { AutomationListCursor } from "./automation-list-cursor";
+import type { CreatedAtCursor } from "../created-at-cursor";
 import { z } from "zod";
 import { UserStore } from "./user-store";
 
@@ -92,7 +92,7 @@ export interface AutomationRow {
 
 type AutomationListResult = { automations: AutomationRow[] } & (
   | { hasMore: false; nextCursor: null }
-  | { hasMore: true; nextCursor: AutomationListCursor }
+  | { hasMore: true; nextCursor: CreatedAtCursor }
 );
 
 /**
@@ -462,7 +462,7 @@ export class AutomationStore {
 
   async list(options: {
     limit: number;
-    cursor?: AutomationListCursor | null;
+    cursor?: CreatedAtCursor | null;
     nameSearch?: string;
     repoOwner?: string;
     repoName?: string;
