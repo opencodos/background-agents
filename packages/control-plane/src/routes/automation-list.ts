@@ -6,11 +6,6 @@ import { AutomationStore, toAutomation } from "../db/automation-store";
 import { dispatch } from "../routing/admit";
 import { encodeCreatedAtCursor, parseCreatedAtCursor } from "../created-at-cursor";
 import { AutomationModelProviderAuthStore } from "../db/automation-model-provider-auth";
-import {
-  DEFAULT_AUTOMATION_LIST_PAGE_SIZE,
-  MAX_AUTOMATION_LIST_PAGE_SIZE,
-  MAX_AUTOMATION_NAME_LENGTH,
-} from "@open-inspect/shared/types/automations";
 import { Hono } from "hono";
 import type { ControlPlaneHonoEnv } from "../routing/hono-env";
 import { type RequestContext, json } from "./shared";
@@ -18,6 +13,11 @@ import type { Env } from "../types";
 import { z } from "zod";
 import { AUTOMATIONS_READ } from "./automation-shared";
 import { parseQuery } from "./query";
+import {
+  DEFAULT_AUTOMATION_LIST_PAGE_SIZE,
+  MAX_AUTOMATION_LIST_PAGE_SIZE,
+  MAX_AUTOMATION_NAME_LENGTH,
+} from "@open-inspect/shared/types/automations";
 
 const RECENT_EXECUTION_COUNT = 10;
 
