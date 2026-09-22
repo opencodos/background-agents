@@ -289,8 +289,14 @@ export const MODEL_CATALOG = [
       {
         id: "xai/grok-4.6",
         name: "Grok 4.6",
+        description: "Grok for chat, coding, and agentic tools",
+        reasoning: { efforts: ["low", "medium", "high", "xhigh"], default: "high" },
+      },
+      {
+        id: "xai/grok-4.7",
+        name: "Grok 4.7",
         description: "Latest Grok for chat, coding, and agentic tools",
-        reasoning: { efforts: ["low", "medium", "high"], default: "high" },
+        reasoning: { efforts: ["low", "medium", "high", "xhigh"], default: "high" },
       },
       {
         id: "xai/grok-build-0.1",
@@ -371,6 +377,21 @@ export const MODEL_OPTIONS: ModelCategory[] = [
     models: group.models.map(({ id, name, description }) => ({ id, name, description })),
   })),
 ];
+
+const MODEL_DISPLAY_NAMES = new Map<string, string>(
+  MODEL_CATALOG.flatMap((group) => group.models.map((model) => [model.id, model.name]))
+);
+
+/**
+ * Catalog display name for a model ID, falling back to the ID itself for
+ * models that are no longer in the catalog.
+ *
+ * @example
+ * getModelDisplayName("anthropic/claude-sonnet-4-5") // "Claude Sonnet 4.5"
+ */
+export function getModelDisplayName(modelId: string): string {
+  return MODEL_DISPLAY_NAMES.get(normalizeModelId(modelId)) ?? modelId;
+}
 
 /**
  * Models enabled by default when no preferences are stored.
