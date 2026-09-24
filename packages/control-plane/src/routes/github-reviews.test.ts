@@ -10,6 +10,7 @@ import type { Env } from "../types";
 import {
   githubReviewRoutes,
   handleClaimReviewGeneration,
+  handleCloseOutReview,
   handleReviewerToken,
   handleReviewLeaseRelease,
   handleReviewOwnership,
@@ -47,6 +48,8 @@ function createFakeDb(
     staleRowLease?: { lease_session_id: string; lease_expires_at: number };
     /** meta.changes for the lease-acquire UPDATE (ownership handler). */
     leaseAcquireChanges?: number;
+    /** Whether the close-out DELETE..RETURNING matches the session's row. */
+    closeOutMatches?: boolean;
   } = {}
 ): {
   db: SqlDatabase;
@@ -64,6 +67,13 @@ function createFakeDb(
             async first<T>(): Promise<T | null> {
               if (trimmed.startsWith("INSERT INTO github_review_state")) {
                 return { latest_generation: config.claimGeneration ?? 1 } as unknown as T;
+              }
+              if (
+                trimmed.startsWith("DELETE FROM github_review_sessions") &&
+                config.closeOutMatches
+              ) {
+                deletedSessionIds.push(values[0] as string);
+                return { session_id: values[0] } as unknown as T;
               }
               return null;
             },
@@ -138,23 +148,24 @@ function sweepContext(
 }
 
 describe("auth gating", () => {
-  it.each(["/internal/github-reviews/claim", "/internal/github-reviews/sweep"])(
-    "declares %s as github-bot-only service authorization",
-    (path) => {
-      const contract = listRouteContracts(githubReviewRoutes).find(
-        (candidate) => candidate.method === "POST" && candidate.path === path
-      );
-      if (!contract) throw new Error(`No route registered for ${path}`);
+  it.each([
+    "/internal/github-reviews/claim",
+    "/internal/github-reviews/sweep",
+    "/internal/github-reviews/close-out",
+  ])("declares %s as github-bot-only service authorization", (path) => {
+    const contract = listRouteContracts(githubReviewRoutes).find(
+      (candidate) => candidate.method === "POST" && candidate.path === path
+    );
+    if (!contract) throw new Error(`No route registered for ${path}`);
 
-      expect(contract.authentication).toEqual({ kind: "service" });
-      expect(contract.authorization).toEqual({
-        kind: "service",
-        services: ["github-bot"],
-        actor: "optional",
-        auditAllowed: true,
-      });
-    }
-  );
+    expect(contract.authentication).toEqual({ kind: "service" });
+    expect(contract.authorization).toEqual({
+      kind: "service",
+      services: ["github-bot"],
+      actor: "optional",
+      auditAllowed: true,
+    });
+  });
 });
 
 describe("handleClaimReviewGeneration", () => {
@@ -376,6 +387,53 @@ describe("handleSweepStaleReviews", () => {
     );
 
     expect(response.status).toBe(400);
+  });
+});
+
+describe("handleCloseOutReview", () => {
+  const CLOSE_OUT_URL = "https://test.local/internal/github-reviews/close-out";
+
+  it("returns 204 and drops the session's fence row when the close-out is owned", async () => {
+    const fake = createFakeDb({ closeOutMatches: true });
+
+    const response = await handleCloseOutReview(
+      jsonRequest(CLOSE_OUT_URL, { sessionId: "session-1" }),
+      {} as Env,
+      {},
+      requestContext(fake.db, GITHUB_BOT_PRINCIPAL)
+    );
+
+    expect(response.status).toBe(204);
+    expect(fake.deletedSessionIds).toEqual(["session-1"]);
+  });
+
+  it("returns 409 when the session is superseded, gone, or mid-write", async () => {
+    // The guarded DELETE matches no row in every one of those cases.
+    const fake = createFakeDb({ closeOutMatches: false });
+
+    const response = await handleCloseOutReview(
+      jsonRequest(CLOSE_OUT_URL, { sessionId: "session-1" }),
+      {} as Env,
+      {},
+      requestContext(fake.db, GITHUB_BOT_PRINCIPAL)
+    );
+
+    expect(response.status).toBe(409);
+    expect(fake.deletedSessionIds).toEqual([]);
+  });
+
+  it("rejects a body without a session id", async () => {
+    const fake = createFakeDb({ closeOutMatches: true });
+
+    const response = await handleCloseOutReview(
+      jsonRequest(CLOSE_OUT_URL, { sessionId: " " }),
+      {} as Env,
+      {},
+      requestContext(fake.db, GITHUB_BOT_PRINCIPAL)
+    );
+
+    expect(response.status).toBe(400);
+    expect(fake.deletedSessionIds).toEqual([]);
   });
 });
 

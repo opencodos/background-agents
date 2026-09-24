@@ -6,6 +6,7 @@ import {
   postCommitStatus,
   checkSenderPermission,
   getPullRequestApproval,
+  getReviewStatusState,
   GITHUB_API_REQUEST_TIMEOUT_MS,
 } from "../src/github-auth";
 
@@ -616,5 +617,67 @@ describe("getPullRequestApproval", () => {
 
     await expect(resultPromise).resolves.toMatchObject({ ok: false });
     expect(timeoutSpy).toHaveBeenCalledWith(GITHUB_API_REQUEST_TIMEOUT_MS);
+  });
+});
+
+describe("getReviewStatusState", () => {
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    globalThis.fetch = vi.fn();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("reads the review context's latest state from the combined status endpoint", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          state: "pending",
+          statuses: [
+            { context: "ci/build", state: "success" },
+            { context: "open-inspect", state: "pending" },
+          ],
+        }),
+        { status: 200 }
+      )
+    );
+
+    const result = await getReviewStatusState(
+      "test-token",
+      "acme",
+      "widgets",
+      "abc123",
+      "Acme Bot"
+    );
+
+    expect(result).toEqual({ ok: true, state: "pending" });
+    expect(vi.mocked(globalThis.fetch).mock.calls[0][0]).toBe(
+      "https://api.github.com/repos/acme/widgets/commits/abc123/status?per_page=100"
+    );
+  });
+
+  it("reports null when the commit carries no review status", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(JSON.stringify({ statuses: [{ context: "ci/build", state: "success" }] }), {
+        status: 200,
+      })
+    );
+
+    await expect(getReviewStatusState("test-token", "acme", "widgets", "abc123")).resolves.toEqual({
+      ok: true,
+      state: null,
+    });
+  });
+
+  it("reports a non-2xx response as unreadable", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(new Response("", { status: 404 }));
+
+    await expect(getReviewStatusState("test-token", "acme", "widgets", "abc123")).resolves.toEqual({
+      ok: false,
+      error: "GitHub API returned 404",
+    });
   });
 });
