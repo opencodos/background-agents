@@ -1,10 +1,10 @@
+import { encodeRepositoryPathSegments } from "@open-inspect/shared/types/repositories";
 import {
   REVIEW_COMPLETED_DESCRIPTION,
-  REVIEW_NOT_PUBLISHED_DESCRIPTION,
-  REVIEW_PENDING_DESCRIPTION,
+  REVIEW_START_FAILED_DESCRIPTION,
+  REVIEW_STALE_DESCRIPTION,
   REVIEW_STATUS_CONTEXT,
 } from "./github-auth";
-import { encodeRepositoryPathSegments } from "@open-inspect/shared/types/repositories";
 
 function buildCustomInstructionsSection(instructions: string | null | undefined): string {
   if (!instructions?.trim()) return "";
@@ -88,6 +88,7 @@ export function buildCodeReviewPrompt(params: {
   base: string;
   head: string;
   headSha: string;
+  isDraft: boolean;
   isPublic: boolean;
   codeReviewInstructions?: string | null;
   isSelfReview?: boolean;
@@ -103,6 +104,7 @@ export function buildCodeReviewPrompt(params: {
     base,
     head,
     headSha,
+    isDraft,
     isPublic,
     codeReviewInstructions,
     isSelfReview = false,
@@ -113,8 +115,9 @@ export function buildCodeReviewPrompt(params: {
     ? "Use COMMENT because GitHub does not allow pull request authors to approve their own PRs."
     : "Use APPROVE if the code looks good, REQUEST_CHANGES if changes are needed,\n   or COMMENT for general feedback.";
   const repositoryPath = encodeRepositoryPathSegments({ repoOwner: owner, repoName: repo });
-  // curl's output is captured on its own so its exit status, not the parser's,
-  // gates the review POST: a review must never be submitted under the wrong identity.
+  // Chained with `&&` into the review POST so a failed fetch stops before it:
+  // a review must never be submitted under the wrong identity. curl's output
+  // is captured on its own so its exit status, not the parser's, gates the POST.
   const reviewTokenFetch = hasReviewerApp
     ? `review_token_response="$(curl -fsS -H "Authorization: Bearer $SANDBOX_AUTH_TOKEN" \\
      "$CONTROL_PLANE_URL/sessions/$session_id/review-token")" && \\
@@ -122,8 +125,8 @@ export function buildCodeReviewPrompt(params: {
    `
     : "";
   const reviewTokenPrefix = hasReviewerApp ? 'GH_TOKEN="$review_token" ' : "";
-  const reviewTokenFenceClause = hasReviewerApp
-    ? "; the review token is the reviewer App's installation token, fetched from the control\n   plane and used for the review POST alone, so the status writes keep the default\n   credential"
+  const reviewTokenGuidance = hasReviewerApp
+    ? "\n\n   The review token is the reviewer App's installation token, fetched from the control\n   plane under the lease: it authenticates the review POST alone, so every status write keeps\n   the default credential. A failed fetch never falls through to another identity — it skips\n   the POST and is terminalized like a failed review write."
     : "";
 
   const prTitleBlock = buildUntrustedUserContentBlock({
@@ -168,10 +171,10 @@ ${prDescriptionBlock}
    - Performance implications
    - Code clarity and maintainability
 3. You may read individual files in the repo for additional context beyond the diff
-4. When your review is complete, write the ENTIRE review — summary AND any inline comments —
-   to a single file /tmp/review.json. Include every inline comment in the file's \`comments\`
-   array; do not create standalone pull request comments. If there are no inline comments, use
-   an empty array:
+4. When your review is complete, compose the summary and all inline comments first, then write
+   the ENTIRE review — summary AND every inline comment — to a single file /tmp/review.json.
+   Include every inline comment in the review's \`comments\` array; do not create standalone
+   pull request comments. Submission happens in step 8, under this session's lease:
 
    {
      "body": "<your review summary>",
@@ -193,49 +196,90 @@ ${prDescriptionBlock}
 
    ${reviewEventGuidance}
 
-5. Submit as ONE command that chains the ownership and freshness fence directly into the
-   write calls, so any guard failure mechanically prevents the POST:
+5. Define a helper that terminalizes this session's deterministic submission failures:
 
-   session_id="$(printf '%s' "$SESSION_CONFIG" | python3 -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')" && \\
-   snapshot="$(gh api repos/${repositoryPath}/pulls/${number} --jq '.head.sha + " " + .state + " draft:" + (.draft|tostring)')" && \\
-   test "$snapshot" = "${headSha} open draft:false" && \\
-   curl -fsS -H "Authorization: Bearer $SANDBOX_AUTH_TOKEN" \\
-     "$CONTROL_PLANE_URL/sessions/$session_id/review-ownership" && \\
+   post_submission_error() { \\
+     gh api repos/${repositoryPath}/statuses/${headSha} \\
+       --method POST \\
+       -f state="error" \\
+       -f context="${REVIEW_STATUS_CONTEXT}" \\
+       -f description="${REVIEW_START_FAILED_DESCRIPTION}"; \\
+   }
+
+   Then validate the required environment, resolve this session's id, and read the PR's live
+   snapshot. Every failure here must call the helper before stopping:
+
+   test -n "$SESSION_CONFIG" && \\
+   test -n "$CONTROL_PLANE_URL" && \\
+   test -n "$SANDBOX_AUTH_TOKEN" || { post_submission_error; exit 0; }
+   session_id="$(printf '%s' "$SESSION_CONFIG" | python3 -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')" || \\
+     { post_submission_error; exit 0; }
+   snapshot="$(gh api repos/${repositoryPath}/pulls/${number} --jq '.head.sha + " " + .state + " draft:" + (.draft|tostring)')" || \\
+     { post_submission_error; exit 0; }
+
+6. If the snapshot no longer matches, this review is obsolete. Close out the pending status
+   on the commit you were started for and stop — do NOT post a review or inline comment:
+
+   test "$snapshot" = "${headSha} open draft:${isDraft}" || { \\
+     gh api repos/${repositoryPath}/statuses/${headSha} \\
+       --method POST \\
+       -f state="error" \\
+       -f context="${REVIEW_STATUS_CONTEXT}" \\
+       -f description="${REVIEW_STALE_DESCRIPTION}"; \\
+     exit 0; }
+
+   This branch writes a terminal status because the head moved, the PR closed, or its draft state
+   changed — no other review session is writing to "${headSha}", so there is nothing to race.
+
+7. Acquire this session's submission lease and distinguish a superseding owner from every
+   other acquisition failure:
+
+   ownership_status="$(curl -sS -o /tmp/review-ownership-response -w '%{http_code}' \\
+     -X POST -H "Authorization: Bearer $SANDBOX_AUTH_TOKEN" \\
+     "$CONTROL_PLANE_URL/sessions/$session_id/review-ownership")" || \\
+     { post_submission_error; exit 0; }
+   if test "$ownership_status" = "409"; then \\
+     exit 0; \\
+   fi
+   test "$ownership_status" = "204" || { \\
+     post_submission_error; \\
+     exit 0; \\
+   }
+
+   A 204 means this session owns the submission lease. A 409 means a newer review session
+   owns the "${headSha}" status, so exit silently and let that session post its terminal
+   result. Network errors and every other HTTP response belong to this session and must
+   terminalize its pending status through \`post_submission_error\`.
+
+8. While holding the lease, submit the review and mark the status successful. Capture either
+   write's result, then always attempt to release the lease before handling failure:
+
    ${reviewTokenFetch}review_url="$(${reviewTokenPrefix}gh api repos/${repositoryPath}/pulls/${number}/reviews \\
      --method POST \\
      --input /tmp/review.json \\
-     --jq '.html_url')" && \\
-   gh api repos/${repositoryPath}/statuses/${headSha} \\
-     --method POST \\
-     -f state="success" \\
-     -f context="${REVIEW_STATUS_CONTEXT}" \\
-     -f description="${REVIEW_COMPLETED_DESCRIPTION}" \\
-     -f target_url="$review_url" && \\
+     --jq '.html_url')"
+   review_result=$?
+   if test "$review_result" = "0"; then \\
+     gh api repos/${repositoryPath}/statuses/${headSha} \\
+       --method POST \\
+       -f state="success" \\
+       -f context="${REVIEW_STATUS_CONTEXT}" \\
+       -f description="${REVIEW_COMPLETED_DESCRIPTION}" \\
+       -f target_url="$review_url"
+     review_result=$?
+   fi
+   if test "$review_result" != "0"; then \\
+     post_submission_error || true; \\
+   fi
    curl -fsS -X DELETE -H "Authorization: Bearer $SANDBOX_AUTH_TOKEN" \\
-     "$CONTROL_PLANE_URL/sessions/$session_id/review-ownership"
+     "$CONTROL_PLANE_URL/sessions/$session_id/review-ownership" || true
+   if test "$review_result" != "0"; then \\
+     exit 0; \\
+   fi
 
-   The fence: the \`test\` asserts the live head is still exactly "${headSha}", open, and not
-   a draft; the GET \`curl\` acquires this session's submission lease from the control plane
-   (204 = owned; 409 = a newer review session has taken over, curl exits 22); the final
-   DELETE releases the lease after the writes${reviewTokenFenceClause}. If ANY part fails — missing environment
-   variable, freshness mismatch, ownership 409, network error — the chain stops before or at
-   the review POST. In that case post NO review and NO inline comment by any other means.
-
-6. If, and only if, step 5's chain did not reach its status write, close the commit status out
-   before you exit, so the review never ends leaving "${REVIEW_PENDING_DESCRIPTION}" behind:
-
-   gh api repos/${repositoryPath}/statuses/${headSha} \\
-     --method POST \\
-     -f state="error" \\
-     -f context="${REVIEW_STATUS_CONTEXT}" \\
-     -f description="${REVIEW_NOT_PUBLISHED_DESCRIPTION}"
-
-   This is the only status write permitted outside the chain, and it is required. A "pending"
-   status is written when the review starts, so an ending that leaves it in place is
-   indistinguishable from a review still running: nothing else ever clears it, and a human
-   waiting on the check waits forever. Posting the failure is always better than posting
-   nothing. If the head has genuinely moved on, this status lands on the commit that was
-   superseded and the newer review publishes its own — so it is safe in every case.
+   The failure status is attempted while this session still owns the lease, preventing a
+   successor from racing its own write against the old session's terminal error. The DELETE
+   is then unconditional, so a failed review or status write cannot strand the lease.${reviewTokenGuidance}
 ${buildSuggestionGuidelines()}
 ${buildCustomInstructionsSection(codeReviewInstructions)}
 ${buildCommentGuidelines(isPublic)}`;

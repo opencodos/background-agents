@@ -26,6 +26,7 @@ interface CreateSessionResponse {
 
 interface SweepResponse {
   cancelledSessionIds: string[];
+  deferredSessionIds: string[];
   failedSessionIds: string[];
 }
 
@@ -112,7 +113,11 @@ describe("GitHub review supersession (claim -> fenced create -> sweep)", () => {
     });
     expect(sweep.status).toBe(200);
     const sweepBody = await sweep.json<SweepResponse>();
-    expect(sweepBody).toEqual({ cancelledSessionIds: [sessionA], failedSessionIds: [] });
+    expect(sweepBody).toEqual({
+      cancelledSessionIds: [sessionA],
+      deferredSessionIds: [],
+      failedSessionIds: [],
+    });
 
     const sessionStore = new SessionIndexStore(env.DB);
     expect((await sessionStore.get(sessionA))?.status).toBe("cancelled");
@@ -134,6 +139,7 @@ describe("GitHub review supersession (claim -> fenced create -> sweep)", () => {
     });
     await expect(secondSweep.json()).resolves.toEqual({
       cancelledSessionIds: [],
+      deferredSessionIds: [],
       failedSessionIds: [],
     });
   });
@@ -181,6 +187,7 @@ describe("GitHub review supersession (claim -> fenced create -> sweep)", () => {
     });
     await expect(sweep.json()).resolves.toEqual({
       cancelledSessionIds: [],
+      deferredSessionIds: [],
       failedSessionIds: [],
     });
 
@@ -192,7 +199,7 @@ describe("GitHub review supersession (claim -> fenced create -> sweep)", () => {
     expect(rows.results).toEqual([{ session_id: winnerSession }]);
   });
 
-  it("rejects claim, create, and sweep from callers other than the github-bot service", async () => {
+  it("refuses claim, create, and sweep from callers other than the github-bot service", async () => {
     const claimFromWrongService = await serviceFetch(
       "https://test.local/internal/github-reviews/claim",
       {
@@ -201,6 +208,8 @@ describe("GitHub review supersession (claim -> fenced create -> sweep)", () => {
         body: JSON.stringify({ repoId: 1, prNumber: 1 }),
       }
     );
+    // Admission authorizes the service after authenticating it, so a wrong
+    // bot is 403 (forbidden), not 401 — same as the guarded create below.
     expect(claimFromWrongService.status).toBe(403);
 
     const createWithGithubReviewFromWrongService = await serviceFetch(

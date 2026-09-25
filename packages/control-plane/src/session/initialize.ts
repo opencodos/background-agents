@@ -90,6 +90,10 @@ export interface SessionInitInput {
   spawnDepth?: number;
   automationId?: string | null;
   automationRunId?: string | null;
+  managedSkillsManifest?: SessionSkillManifestInput;
+  managedSkillsSourceSessionId?: string;
+  /** Complete, immutable provider routing snapshot resolved by the caller. */
+  providerAuth: SessionModelProviderAuthInput[];
 
   // GitHub review-generation fence (design: review-supersede). Present only
   // for github-bot-created review sessions; routes/session-create.ts rejects
@@ -100,10 +104,6 @@ export interface SessionInitInput {
     generation: number;
     headSha: string;
   };
-  managedSkillsManifest?: SessionSkillManifestInput;
-  managedSkillsSourceSessionId?: string;
-  /** Complete, immutable provider routing snapshot resolved by the caller. */
-  providerAuth: SessionModelProviderAuthInput[];
 }
 
 /**
@@ -218,33 +218,38 @@ export async function initializeSession(
     }
   }
 
-  // Step 2: D1 index (must succeed before DO init starts sandbox warming)
+  // Step 2: D1 index (must succeed before runtime init starts sandbox warming)
   const sessionStore = new SessionIndexStore(ctx.db);
-  await sessionStore.create({
-    id: input.sessionId,
-    title: input.title || null,
-    repoOwner: input.repoOwner,
-    repoName: input.repoName,
-    harness: input.harness,
-    model: input.model,
-    reasoningEffort: input.reasoningEffort,
-    baseBranch,
-    repositories,
-    environmentId: input.environmentId ?? null,
-    status: "created",
-    parentSessionId: input.parentSessionId,
-    spawnSource: input.spawnSource,
-    spawnDepth: input.spawnDepth,
-    automationId: input.automationId,
-    automationRunId: input.automationRunId,
-    scmLogin: input.scmLogin || null,
-    userId: input.platformUserId,
-    createdAt: now,
-    updatedAt: now,
-    skillManifest: input.managedSkillsManifest,
-    skillManifestSourceSessionId: input.managedSkillsSourceSessionId,
-    providerAuth: input.providerAuth,
-  });
+  try {
+    await sessionStore.create({
+      id: input.sessionId,
+      title: input.title || null,
+      repoOwner: input.repoOwner,
+      repoName: input.repoName,
+      harness: input.harness,
+      model: input.model,
+      reasoningEffort: input.reasoningEffort,
+      baseBranch,
+      repositories,
+      environmentId: input.environmentId ?? null,
+      status: "created",
+      parentSessionId: input.parentSessionId,
+      spawnSource: input.spawnSource,
+      spawnDepth: input.spawnDepth,
+      automationId: input.automationId,
+      automationRunId: input.automationRunId,
+      scmLogin: input.scmLogin || null,
+      userId: input.platformUserId,
+      createdAt: now,
+      updatedAt: now,
+      skillManifest: input.managedSkillsManifest,
+      skillManifestSourceSessionId: input.managedSkillsSourceSessionId,
+      providerAuth: input.providerAuth,
+    });
+  } catch (error) {
+    await deleteFailedReviewFence(ctx.db, input.githubReview, input.sessionId, ctx.trace_id);
+    throw error;
+  }
 
   // Step 3: runtime init
   let initResponse: Response;
@@ -284,12 +289,12 @@ export async function initializeSession(
       }
     );
   } catch (transportError) {
-    await markSessionFailed(sessionStore, input.sessionId, ctx.trace_id);
+    await compensateFailedDoInit(sessionStore, ctx.db, input, ctx.trace_id);
     throw transportError;
   }
 
   if (!initResponse.ok) {
-    await markSessionFailed(sessionStore, input.sessionId, ctx.trace_id);
+    await compensateFailedDoInit(sessionStore, ctx.db, input, ctx.trace_id);
     const errorText = await initResponse.text().catch(() => "unknown");
     logger.error("DO init failed", {
       session_id: input.sessionId,
@@ -300,8 +305,8 @@ export async function initializeSession(
     throw new Error(`Failed to initialize session DO: ${initResponse.status}`);
   }
 
-  // Step 4: re-verify the review generation now that the DO exists. Between
-  // the fence insert (Step 1) and DO init (Step 3), a newer generation's
+  // Step 4: re-verify the review generation now that the runtime exists.
+  // Between the fence insert (Step 1) and runtime init (Step 3), a newer
   // sweep may have hit this session's not-yet-initialized DO, received a
   // 404, and deleted our fence row as an orphan — leaving this session live
   // but invisible to every future sweep. Re-checking after init closes that
@@ -349,6 +354,7 @@ export async function initializeSession(
           trace_id: ctx.trace_id,
         });
       }
+      await markSessionFailed(sessionStore, input.sessionId, ctx.trace_id);
       throw new ReviewGenerationSupersededError();
     }
   }
@@ -370,6 +376,46 @@ async function markSessionFailed(
   } catch (compensationError) {
     logger.error("Failed to mark session as failed after DO init error", {
       session_id: sessionId,
+      trace_id: traceId,
+      error:
+        compensationError instanceof Error ? compensationError.message : String(compensationError),
+    });
+  }
+}
+
+async function compensateFailedDoInit(
+  sessionStore: SessionIndexStore,
+  db: RequestContext["db"],
+  input: Pick<SessionInitInput, "sessionId" | "githubReview">,
+  traceId: string
+): Promise<void> {
+  await Promise.all([
+    markSessionFailed(sessionStore, input.sessionId, traceId),
+    deleteFailedReviewFence(db, input.githubReview, input.sessionId, traceId),
+  ]);
+}
+
+async function deleteFailedReviewFence(
+  db: RequestContext["db"],
+  review: SessionInitInput["githubReview"],
+  sessionId: string,
+  traceId: string
+): Promise<void> {
+  if (!review) return;
+  try {
+    await db
+      .prepare(
+        "DELETE FROM github_review_sessions WHERE repo_id = ? AND pr_number = ? AND generation = ?"
+      )
+      .bind(review.repoId, review.prNumber, review.generation)
+      .run();
+  } catch (compensationError) {
+    logger.error("Failed to delete review fence after DO init error", {
+      event: "review_fence.init_compensation_failed",
+      session_id: sessionId,
+      repo_id: review.repoId,
+      pr_number: review.prNumber,
+      generation: review.generation,
       trace_id: traceId,
       error:
         compensationError instanceof Error ? compensationError.message : String(compensationError),

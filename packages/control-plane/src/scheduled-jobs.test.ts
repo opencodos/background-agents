@@ -29,6 +29,7 @@ import type { Env } from "./types";
 // The job bodies are mocked; the cron constants stay the production values so
 // the Terraform parity check below reads what the Worker really registers.
 vi.mock("./autofix/queue-health", () => ({ checkAutofixQueueHealth: vi.fn(async () => {}) }));
+vi.mock("./routes/github-reviews", () => ({ reapSupersededReviewSessions: vi.fn(async () => {}) }));
 vi.mock("./image-builds/scheduler", async (importOriginal) => ({
   ...(await importOriginal<typeof ImageBuildScheduler>()),
   runImageBuildScheduler: vi.fn(async () => ({})),
@@ -45,7 +46,6 @@ vi.mock("./session/abandoned-draft-sweep", async (importOriginal) => ({
   }),
   SessionDraftExpiryClient: vi.fn(),
 }));
-vi.mock("./routes/github-reviews", () => ({ reapSupersededReviewSessions: vi.fn(async () => {}) }));
 
 const { schedulerTick, sweepRun } = vi.hoisted(() => ({
   schedulerTick: vi.fn(async () => ({})),

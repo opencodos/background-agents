@@ -13,7 +13,7 @@ vi.mock("../src/github-auth", () => ({
   REVIEW_COMPLETED_DESCRIPTION: "Review completed",
   REVIEW_PENDING_DESCRIPTION: "Review in progress",
   REVIEW_START_FAILED_DESCRIPTION: "Review failed to start",
-  REVIEW_NOT_PUBLISHED_DESCRIPTION: "Review did not publish — push again to retry",
+  REVIEW_STALE_DESCRIPTION: "Review skipped: PR changed before submission",
   REVIEW_SUPERSEDED_DESCRIPTION: "Superseded by a newer commit",
   REVIEW_SKIPPED_APPROVED_DESCRIPTION: "Skipped — PR already approved",
   REVIEW_STATUS_CONTEXT: "open-inspect",
@@ -84,10 +84,14 @@ function defaultReviewSupersessionResponse(url: string): Response | null {
   if (url === "https://internal/internal/github-reviews/claim") {
     return new Response(JSON.stringify({ generation: 1 }), { status: 200 });
   }
+  if (url === "https://internal/internal/github-reviews/release-claim") {
+    return new Response(JSON.stringify({ released: true }), { status: 200 });
+  }
   if (url === "https://internal/internal/github-reviews/sweep") {
-    return new Response(JSON.stringify({ cancelledSessionIds: [], failedSessionIds: [] }), {
-      status: 200,
-    });
+    return new Response(
+      JSON.stringify({ cancelledSessionIds: [], deferredSessionIds: [], failedSessionIds: [] }),
+      { status: 200 }
+    );
   }
   return null;
 }
@@ -418,7 +422,25 @@ describe("handlePullRequestReviewTrigger", () => {
       handlePullRequestReviewTrigger(env, log, pullRequestReviewTriggerPayload, "trace-0")
     ).rejects.toThrow("Session creation failed: invalid response");
 
-    expect(cpFetch).toHaveBeenCalledTimes(3);
+    // The claim bumped the fence but no session carries it, so the handler
+    // must release it — conditionally, on exactly the generation it claimed —
+    // before rethrowing. Without this a review still running on the previous
+    // generation would be permanently locked out of submitting.
+    const releaseCalls = cpFetch.mock.calls.filter(
+      ([url]: [string]) => url === "https://internal/internal/github-reviews/release-claim"
+    );
+    expect(releaseCalls).toHaveLength(1);
+    expect(JSON.parse(releaseCalls[0][1].body)).toEqual({
+      repoId: 501,
+      prNumber: 42,
+      generation: 1,
+    });
+    // No sweep ran: the superseding session never existed.
+    expect(
+      cpFetch.mock.calls.filter(
+        ([url]: [string]) => url === "https://internal/internal/github-reviews/sweep"
+      )
+    ).toHaveLength(0);
     expect(postCommitStatus).not.toHaveBeenCalled();
   });
 
@@ -1009,6 +1031,27 @@ describe("handleReviewRequested", () => {
     );
   });
 
+  it("encodes nested repository owners in the reaction URL", async () => {
+    const env = createMockEnv();
+    const log = createMockLogger();
+    const payload = {
+      ...reviewRequestedPayload,
+      repository: {
+        ...reviewRequestedPayload.repository,
+        owner: { login: "group/platform" },
+      },
+    };
+
+    await handleReviewRequested(env, log, payload, "trace-nested-owner");
+
+    expect(postReaction).toHaveBeenCalledWith(
+      "test-installation-token",
+      "https://api.github.com/repos/group%2Fplatform/widgets/issues/42/reactions",
+      "eyes",
+      "Open-Inspect"
+    );
+  });
+
   it("posts pending and error statuses when prompt delivery fails", async () => {
     const env = createMockEnv();
     const cpFetch = getControlPlaneFetch(env);
@@ -1060,27 +1103,6 @@ describe("handleReviewRequested", () => {
         context: "open-inspect",
         description: "Review failed to start",
       },
-      "Open-Inspect"
-    );
-  });
-
-  it("encodes nested repository owners in the reaction URL", async () => {
-    const env = createMockEnv();
-    const log = createMockLogger();
-    const payload = {
-      ...reviewRequestedPayload,
-      repository: {
-        ...reviewRequestedPayload.repository,
-        owner: { login: "group/platform" },
-      },
-    };
-
-    await handleReviewRequested(env, log, payload, "trace-nested-owner");
-
-    expect(postReaction).toHaveBeenCalledWith(
-      "test-installation-token",
-      "https://api.github.com/repos/group%2Fplatform/widgets/issues/42/reactions",
-      "eyes",
       "Open-Inspect"
     );
   });
@@ -1174,6 +1196,30 @@ describe("handleReviewRequested", () => {
       expect.anything()
     );
     expect(log.debug).toHaveBeenCalledWith("handler.stale_head_sha", expect.anything());
+  });
+
+  it("honors an explicit review request while the PR is still a draft", async () => {
+    vi.mocked(getPullRequestSnapshot).mockResolvedValue({
+      ok: true,
+      headSha: "abc123",
+      state: "open",
+      draft: true,
+    });
+    const env = createMockEnv();
+    const log = createMockLogger();
+
+    const result = await handleReviewRequested(env, log, reviewRequestedPayload, "trace-draft");
+
+    expect(result).toEqual({
+      outcome: "processed",
+      session_id: "session-123",
+      message_id: "msg-456",
+      handler_action: "review",
+    });
+    expect(getControlPlaneFetch(env)).toHaveBeenCalledWith(
+      "https://internal/internal/github-reviews/claim",
+      expect.anything()
+    );
   });
 
   it("skips when the PR has already closed by the time of the freshness check", async () => {

@@ -396,6 +396,42 @@ describe("initializeSession", () => {
       expect(stubFetchMock).not.toHaveBeenCalled();
     });
 
+    it("deletes the review fence when the D1 session insert fails", async () => {
+      const { db, deletes } = createReviewDb({ latestGeneration: 1 });
+      createMock.mockRejectedValue(new Error("D1 unavailable"));
+
+      await expect(initializeSession(createEnv(), reviewInput, reviewCtx(db))).rejects.toThrow(
+        "D1 unavailable"
+      );
+
+      expect(deletes).toEqual([[7, 9, 1]]);
+      expect(stubFetchMock).not.toHaveBeenCalled();
+    });
+
+    it("deletes the review fence when DO init returns a non-ok response", async () => {
+      const { db, deletes } = createReviewDb({ latestGeneration: 1 });
+      stubFetchMock.mockResolvedValue(new Response("unavailable", { status: 503 }));
+
+      await expect(initializeSession(createEnv(), reviewInput, reviewCtx(db))).rejects.toThrow(
+        "Failed to initialize session DO: 503"
+      );
+
+      expect(deletes).toEqual([[7, 9, 1]]);
+      expect(updateStatusMock).toHaveBeenCalledWith("session-123", "failed");
+    });
+
+    it("deletes the review fence when DO init throws", async () => {
+      const { db, deletes } = createReviewDb({ latestGeneration: 1 });
+      stubFetchMock.mockRejectedValue(new Error("transport failed"));
+
+      await expect(initializeSession(createEnv(), reviewInput, reviewCtx(db))).rejects.toThrow(
+        "transport failed"
+      );
+
+      expect(deletes).toEqual([[7, 9, 1]]);
+      expect(updateStatusMock).toHaveBeenCalledWith("session-123", "failed");
+    });
+
     it("completes when the generation is still the latest after DO init", async () => {
       const { db, deletes } = createReviewDb({ latestGeneration: 1 });
 
@@ -425,6 +461,7 @@ describe("initializeSession", () => {
       );
       expect(cancelCalls).toHaveLength(1);
       expect(deletes).toHaveLength(1);
+      expect(updateStatusMock).toHaveBeenCalledWith("session-123", "failed");
     });
 
     it("retains the fence row when the self-cancel is not confirmed", async () => {
@@ -439,6 +476,7 @@ describe("initializeSession", () => {
         ReviewGenerationSupersededError
       );
       expect(deletes).toEqual([]);
+      expect(updateStatusMock).toHaveBeenCalledWith("session-123", "failed");
     });
   });
 });

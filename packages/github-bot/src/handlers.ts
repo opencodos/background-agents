@@ -31,8 +31,12 @@ import { buildCodeReviewPrompt, buildCommentActionPrompt } from "./prompts";
 import { resolveSessionTarget, type SessionTargetFields } from "./session-target";
 import { getGitHubConfig, type ResolvedGitHubConfig } from "./utils/integration-config";
 import { requestedReviewerPayloadSchema } from "./payload-schemas";
-import { claimReviewGeneration, sweepStaleReviews } from "./review-supersession";
 import { containsBotMention, stripBotMention } from "./github-mention";
+import {
+  claimReviewGeneration,
+  releaseReviewGeneration,
+  sweepStaleReviews,
+} from "./review-supersession";
 
 export type HandlerResult =
   | {
@@ -440,7 +444,6 @@ export async function handleReviewRequested(
 
   const meta = { trace_id: traceId, repo: repoFullName, pull_number: pr.number };
   const userAgent = resolveAppName(env);
-
   return withReaction(
     log,
     ghToken,
@@ -457,9 +460,9 @@ export async function handleReviewRequested(
         traceId,
       });
 
-      // Freshness runs as the last await before claim: any earlier
-      // network-bound step (target resolution) widens the window in which a
-      // close/draft tombstone or newer push could outrank this snapshot.
+      // Freshness runs as the last await before claim: any earlier network-bound
+      // step (target resolution) widens the window in which a close/draft
+      // tombstone or newer push could outrank this snapshot.
       const freshness = await getPullRequestSnapshot(
         ghToken,
         owner,
@@ -471,7 +474,7 @@ export async function handleReviewRequested(
         log.warn("handler.freshness_check_failed", { ...meta, error: freshness.error });
         return { outcome: "skipped", skip_reason: "freshness_check_failed" };
       }
-      if (freshness.headSha !== pr.head.sha || freshness.state !== "open" || freshness.draft) {
+      if (freshness.headSha !== pr.head.sha || freshness.state !== "open") {
         log.debug("handler.stale_head_sha", {
           ...meta,
           current_head_sha: freshness.headSha,
@@ -501,9 +504,18 @@ export async function handleReviewRequested(
         });
       } catch (error) {
         if (error instanceof ReviewSupersededError) {
+          // A newer trigger already owns the fence; its claim must stand.
           log.info("handler.review_superseded", { ...meta, generation });
           return { outcome: "skipped", skip_reason: "superseded" };
         }
+        // The claim bumped the fence but no session will ever carry it. Roll it
+        // back so a review still running on the previous generation is not
+        // permanently locked out of submitting.
+        await releaseReviewGeneration(env, log, traceId, {
+          repoId: repo.id,
+          prNumber: pr.number,
+          generation,
+        });
         throw error;
       }
 
@@ -512,6 +524,7 @@ export async function handleReviewRequested(
         prNumber: pr.number,
         generation,
       });
+
       const statusTarget = await postPendingReviewStatus(
         log,
         ghToken,
@@ -534,6 +547,7 @@ export async function handleReviewRequested(
         base: pr.base.ref,
         head: pr.head.ref,
         headSha: pr.head.sha,
+        isDraft: freshness.draft,
         isPublic: !repo.private,
         codeReviewInstructions: config.codeReviewInstructions,
         isSelfReview: pr.user.login.toLowerCase() === reviewIdentity.submittingLogin.toLowerCase(),
@@ -658,9 +672,9 @@ export async function handlePullRequestReviewTrigger(
         traceId,
       });
 
-      // Freshness runs as the last await before claim: any earlier
-      // network-bound step (target resolution) widens the window in which a
-      // close/draft tombstone or newer push could outrank this snapshot.
+      // Freshness runs as the last await before claim: any earlier network-bound
+      // step (target resolution) widens the window in which a close/draft
+      // tombstone or newer push could outrank this snapshot.
       const freshness = await getPullRequestSnapshot(
         ghToken,
         owner,
@@ -702,9 +716,18 @@ export async function handlePullRequestReviewTrigger(
         });
       } catch (error) {
         if (error instanceof ReviewSupersededError) {
+          // A newer trigger already owns the fence; its claim must stand.
           log.info("handler.review_superseded", { ...meta, generation });
           return { outcome: "skipped", skip_reason: "superseded" };
         }
+        // The claim bumped the fence but no session will ever carry it. Roll it
+        // back so a review still running on the previous generation is not
+        // permanently locked out of submitting.
+        await releaseReviewGeneration(env, log, traceId, {
+          repoId: repo.id,
+          prNumber: pr.number,
+          generation,
+        });
         throw error;
       }
 
@@ -741,6 +764,7 @@ export async function handlePullRequestReviewTrigger(
         base: pr.base.ref,
         head: pr.head.ref,
         headSha: pr.head.sha,
+        isDraft: freshness.draft,
         isPublic: !repo.private,
         codeReviewInstructions: config.codeReviewInstructions,
         isSelfReview: pr.user.login.toLowerCase() === reviewIdentity.submittingLogin.toLowerCase(),

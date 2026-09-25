@@ -6,17 +6,28 @@ import { describe, it, expect } from "vitest";
 import { buildCodeReviewPrompt, buildCommentActionPrompt } from "../src/prompts";
 
 /**
- * Runs the prompt's review-submission chain (session id through the lease
- * release) under bash, with `curl` and `gh` replaced by stubs that record their
- * calls. The review-token `curl` exits with `tokenCurlExit`, printing a valid
- * token body first unless that is 22: `curl -f` withholds the body of an HTTP
- * error. Every other call succeeds as it would for a fresh, owned review.
+ * Runs the prompt's submission commands (steps 5–8: helper, environment and
+ * snapshot guards, lease acquisition, leased writes) under bash, with `curl`
+ * and `gh` replaced by stubs that record their calls. The review-token `curl`
+ * exits with `tokenCurlExit`, printing a valid token body first unless that is
+ * 22: `curl -f` withholds the body of an HTTP error. Every other call succeeds
+ * as it would for a fresh review whose lease acquisition returns 204.
  */
 function runReviewSubmission(prompt: string, headSha: string, tokenCurlExit: number) {
-  const start = prompt.indexOf('session_id="');
-  const chainEnd = '/review-ownership"\n\n';
-  const end = prompt.indexOf(chainEnd, start) + chainEnd.length;
-  const command = prompt.slice(start, end);
+  const blockStarts = [
+    "post_submission_error() {",
+    'test -n "$SESSION_CONFIG"',
+    'test "$snapshot" =',
+    'ownership_status="$(',
+    prompt.includes('review_token_response="$(') ? 'review_token_response="$(' : 'review_url="$(',
+  ];
+  const command = blockStarts
+    .map((marker) => {
+      const start = prompt.indexOf(marker);
+      expect(start, marker).toBeGreaterThan(-1);
+      return prompt.slice(start, prompt.indexOf("\n\n", start));
+    })
+    .join("\n");
 
   const dir = mkdtempSync(join(tmpdir(), "review-submission-"));
   try {
@@ -26,7 +37,10 @@ function runReviewSubmission(prompt: string, headSha: string, tokenCurlExit: num
     writeFileSync(
       join(dir, "curl"),
       `#!/bin/sh\nprintf '%s\\n' "$*" >> '${curlLog}'\n` +
-        `case "$*" in *review-token*) ${body}exit ${tokenCurlExit} ;; esac\n`
+        `case "$*" in\n` +
+        `  *review-token*) ${body}exit ${tokenCurlExit} ;;\n` +
+        `  *"-X POST"*review-ownership*) printf 204 ;;\n` +
+        `esac\n`
     );
     writeFileSync(
       join(dir, "gh"),
@@ -71,23 +85,10 @@ describe("buildCodeReviewPrompt", () => {
     base: "main",
     head: "feature/cache",
     headSha: "abc123",
+    isDraft: false,
     isPublic: true,
     hasReviewerApp: false,
   };
-
-  it("requires a terminal status when the guarded chain does not publish", () => {
-    // The pending status is written when the review starts and only the success path replaced it,
-    // so an agent that exits after a failed fence used to leave "Review in progress" on the head
-    // forever — indistinguishable from a review still running, and cleared by nothing.
-    const prompt = buildCodeReviewPrompt(baseParams);
-
-    expect(prompt).toContain('-f state="error"');
-    expect(prompt).toContain("Review did not publish — push again to retry");
-    expect(prompt).toContain("statuses/abc123");
-    // The instruction has to be mandatory, not advisory: the old wording told the agent to exit
-    // without a status update by any other means, which is what made the hang silent.
-    expect(prompt).not.toContain("or status update by any other means");
-  });
 
   it("includes all fields in the prompt", () => {
     const prompt = buildCodeReviewPrompt(baseParams);
@@ -141,9 +142,11 @@ describe("buildCodeReviewPrompt", () => {
     const prompt = buildCodeReviewPrompt(baseParams);
     // All feedback rides one review-creation call inside the submission
     // lease; a separate per-comment endpoint would escape the fence.
+    expect(prompt.match(/repos\/acme\/widgets\/pulls\/42\/reviews/g)).toHaveLength(1);
     expect(prompt).toContain('"comments": [');
-    expect(prompt).toContain("repos/acme/widgets/pulls/42/reviews");
-    expect(prompt).not.toContain("pulls/42/comments \\");
+    expect(prompt).toContain('"body": "<comment>"');
+    expect(prompt).toContain("do not create standalone");
+    expect(prompt).not.toContain("repos/acme/widgets/pulls/42/comments");
   });
 
   it("teaches the applyable suggestion fence and its range anchors", () => {
@@ -175,6 +178,58 @@ describe("buildCodeReviewPrompt", () => {
     expect(prompt).toContain("reviewing Pull Request #42 in group/subgroup/widgets");
     expect(prompt).toContain("gh api repos/group%2Fsubgroup/widgets/pulls/42/reviews");
     expect(prompt).not.toContain("gh api repos/group/subgroup/widgets/pulls/42/reviews");
+    expect(prompt).toContain("gh api repos/group%2Fsubgroup/widgets/statuses/abc123");
+  });
+
+  it("terminalizes submission guards except when a newer owner returns 409", () => {
+    const prompt = buildCodeReviewPrompt(baseParams);
+
+    expect(prompt).toContain('-f description="Review failed to start"');
+    expect(prompt).toContain(
+      'snapshot="$(gh api repos/acme/widgets/pulls/42 --jq \'.head.sha + " " + .state + " draft:" + (.draft|tostring)\')" || \\\n' +
+        "     { post_submission_error; exit 0; }"
+    );
+
+    const conflictStart = prompt.indexOf('if test "$ownership_status" = "409"');
+    const otherFailureStart = prompt.indexOf('test "$ownership_status" = "204"');
+    expect(conflictStart).toBeGreaterThan(-1);
+    expect(otherFailureStart).toBeGreaterThan(conflictStart);
+    expect(prompt.slice(conflictStart, otherFailureStart)).not.toContain("post_submission_error");
+    expect(prompt.slice(otherFailureStart)).toContain("post_submission_error");
+  });
+
+  it("terminalizes write failures before releasing an acquired lease", () => {
+    const prompt = buildCodeReviewPrompt(baseParams);
+
+    const reviewWriteStart = prompt.indexOf(
+      'review_url="$(gh api repos/acme/widgets/pulls/42/reviews'
+    );
+    const successStatusStart = prompt.indexOf(
+      "gh api repos/acme/widgets/statuses/abc123",
+      reviewWriteStart
+    );
+    const successStatusResult = prompt.indexOf("review_result=$?", successStatusStart);
+    const failureStart = prompt.indexOf('if test "$review_result" != "0"', successStatusResult);
+    const failureStatusStart = prompt.indexOf("post_submission_error || true", failureStart);
+    const releaseStart = prompt.indexOf(
+      'curl -fsS -X DELETE -H "Authorization: Bearer $SANDBOX_AUTH_TOKEN"',
+      failureStatusStart
+    );
+
+    expect(reviewWriteStart).toBeGreaterThan(-1);
+    expect(successStatusStart).toBeGreaterThan(reviewWriteStart);
+    expect(successStatusResult).toBeGreaterThan(successStatusStart);
+    expect(failureStatusStart).toBeGreaterThan(failureStart);
+    expect(releaseStart).toBeGreaterThan(failureStatusStart);
+    expect(failureStart).toBeGreaterThan(successStatusResult);
+    expect(prompt.slice(releaseStart)).toContain("|| true");
+  });
+
+  it("uses the admitted draft state in the submission freshness guard", () => {
+    const prompt = buildCodeReviewPrompt({ ...baseParams, isDraft: true });
+
+    expect(prompt).toContain('test "$snapshot" = "abc123 open draft:true"');
+    expect(prompt).not.toContain('test "$snapshot" = "abc123 open draft:false"');
   });
 
   it("limits self-reviews to comments", () => {
@@ -191,10 +246,10 @@ describe("buildCodeReviewPrompt", () => {
       const run = runReviewSubmission(prompt, baseParams.headSha, 0);
 
       expect(run.status).toBe(0);
-      // The token is fetched inside the guarded chain, after the ownership lease, so a
-      // superseded session never reaches it.
+      // The token is fetched after the lease is acquired, so a superseded session never
+      // reaches it, and the lease is released after the writes.
       expect(run.curlCalls?.split("\n")).toEqual([
-        "-fsS -H Authorization: Bearer sandbox-token https://cp.test/sessions/sess-1/review-ownership",
+        "-sS -o /tmp/review-ownership-response -w %{http_code} -X POST -H Authorization: Bearer sandbox-token https://cp.test/sessions/sess-1/review-ownership",
         "-fsS -H Authorization: Bearer sandbox-token https://cp.test/sessions/sess-1/review-token",
         "-fsS -X DELETE -H Authorization: Bearer sandbox-token https://cp.test/sessions/sess-1/review-ownership",
         "",
@@ -203,7 +258,9 @@ describe("buildCodeReviewPrompt", () => {
         "reviewer-token api repos/acme/widgets/pulls/42/reviews --method POST --input /tmp/review.json"
       );
       // Statuses stay on the default credential: the reviewer app holds no statuses permission.
-      expect(run.ghCalls).toContain("\n api repos/acme/widgets/statuses/abc123 --method POST");
+      expect(run.ghCalls).toContain(
+        "\n api repos/acme/widgets/statuses/abc123 --method POST -f state=success"
+      );
     });
 
     // 22 is curl -f's exit on an HTTP error such as the 404 from a control
@@ -213,9 +270,17 @@ describe("buildCodeReviewPrompt", () => {
       const run = runReviewSubmission(prompt, baseParams.headSha, curlExit);
 
       expect(run.curlCalls).toContain("https://cp.test/sessions/sess-1/review-token");
-      expect(run.status).not.toBe(0);
       expect(run.ghCalls).not.toContain("/reviews");
-      expect(run.ghCalls).not.toContain("/statuses/");
+      expect(run.ghCalls).not.toContain("state=success");
+      // The session still owns the lease, so it terminalizes its own pending status on the
+      // default credential and then releases the lease.
+      expect(run.ghCalls).toContain(
+        "\n api repos/acme/widgets/statuses/abc123 --method POST -f state=error"
+      );
+      expect(run.curlCalls).toContain(
+        "-X DELETE -H Authorization: Bearer sandbox-token https://cp.test/sessions/sess-1/review-ownership"
+      );
+      expect(run.status).toBe(0);
     });
   });
 
@@ -224,7 +289,16 @@ describe("buildCodeReviewPrompt", () => {
 
     expect(prompt).not.toContain("review-token");
     expect(prompt).not.toContain("review_token");
-    expect(prompt).toContain('review_url="$(gh api repos/acme/widgets/pulls/42/reviews');
+
+    const run = runReviewSubmission(prompt, baseParams.headSha, 0);
+
+    expect(run.status).toBe(0);
+    expect(run.ghCalls).toContain(
+      "\n api repos/acme/widgets/pulls/42/reviews --method POST --input /tmp/review.json"
+    );
+    expect(run.ghCalls).toContain(
+      "\n api repos/acme/widgets/statuses/abc123 --method POST -f state=success"
+    );
   });
 
   it("includes custom instructions section when codeReviewInstructions provided", () => {

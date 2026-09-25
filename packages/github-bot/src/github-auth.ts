@@ -30,13 +30,7 @@ export const REVIEW_STATUS_CONTEXT = "open-inspect";
 export const REVIEW_PENDING_DESCRIPTION = "Review in progress";
 export const REVIEW_COMPLETED_DESCRIPTION = "Review completed";
 export const REVIEW_START_FAILED_DESCRIPTION = "Review failed to start";
-/**
- * Terminal status for a review that ran but could not publish its verdict — a moved head, a lost
- * ownership lease, a failed write. It exists because "pending" is written when a review starts and
- * only the success path ever replaced it, so any other ending left the status pending forever:
- * indistinguishable from a review still in progress, and never cleared by anything.
- */
-export const REVIEW_NOT_PUBLISHED_DESCRIPTION = "Review did not publish — push again to retry";
+export const REVIEW_STALE_DESCRIPTION = "Review skipped: PR changed before submission";
 /** Terminal status for the head a newer push replaced, so its pending status does not outlive it. */
 export const REVIEW_SUPERSEDED_DESCRIPTION = "Superseded by a newer commit";
 /**
@@ -46,11 +40,18 @@ export const REVIEW_SUPERSEDED_DESCRIPTION = "Superseded by a newer commit";
  */
 export const REVIEW_SKIPPED_APPROVED_DESCRIPTION = "Skipped — PR already approved";
 /**
+ * Terminal status for a review session that ended without publishing its verdict and left no
+ * reason of its own. "Pending" is written when a review starts, so an ending that never replaces it
+ * would leave the status pending forever: indistinguishable from a review still in progress.
+ */
+export const REVIEW_NOT_PUBLISHED_DESCRIPTION = "Review did not publish — push again to retry";
+/**
  * Prefix of the terminal status for a review whose session ended without finishing — timed out,
  * cancelled, or lost its sandbox. The session's own reason follows it, so the commit says the
  * review process died rather than that the review found a problem.
  */
 export const REVIEW_DID_NOT_FINISH_PREFIX = "Review did not finish: ";
+
 export interface GitHubAppConfig {
   appId: string;
   privateKey: string;

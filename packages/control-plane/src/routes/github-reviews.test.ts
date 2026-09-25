@@ -1,23 +1,25 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { TEST_BACKGROUND_TASK_CONTEXT } from "../router.test-support";
 import type * as GitHubAppModule from "../auth/github-app";
 import { getCachedInstallationToken } from "../auth/github-app";
 import type { Principal } from "../auth/principal";
 import { SessionIndexStore } from "../db/session-index";
 import type { SqlDatabase } from "../db/sql-database";
-import { listRouteContracts } from "../routing/route-contracts";
 import type { SessionRuntimeClient } from "../session/runtime-client";
 import type { Env } from "../types";
 import {
   githubReviewRoutes,
   handleClaimReviewGeneration,
   handleCloseOutReview,
+  handleReleaseReviewGeneration,
   handleReviewerToken,
   handleReviewLeaseRelease,
   handleReviewOwnership,
   handleSweepStaleReviews,
 } from "./github-reviews";
 import type { SessionRouteContext } from "./session-route";
-import type { RequestContext } from "./shared";
+import { listRouteContracts } from "../routing/route-contracts";
+import { type RequestContext } from "./shared";
 
 vi.mock("../auth/github-app", async (importOriginal) => ({
   ...(await importOriginal<typeof GitHubAppModule>()),
@@ -25,6 +27,8 @@ vi.mock("../auth/github-app", async (importOriginal) => ({
 }));
 
 const GITHUB_BOT_PRINCIPAL: Principal = { kind: "service", service: "github-bot", actor: null };
+
+const NO_PARAMS = {};
 
 function jsonRequest(url: string, body: unknown): Request {
   return new Request(url, {
@@ -48,6 +52,8 @@ function createFakeDb(
     staleRowLease?: { lease_session_id: string; lease_expires_at: number };
     /** meta.changes for the lease-acquire UPDATE (ownership handler). */
     leaseAcquireChanges?: number;
+    /** meta.changes for the conditional generation rollback (release handler). */
+    releaseClaimChanges?: number;
     /** Whether the close-out DELETE..RETURNING matches the session's row. */
     closeOutMatches?: boolean;
   } = {}
@@ -55,8 +61,10 @@ function createFakeDb(
   db: SqlDatabase;
   deletedSessionIds: string[];
   leaseReleases: number;
+  releaseClaimBindings: unknown[][];
 } {
   const deletedSessionIds: string[] = [];
+  const releaseClaimBindings: unknown[][] = [];
   const counters = { leaseReleases: 0 };
   const db = {
     prepare(sql: string) {
@@ -102,6 +110,12 @@ function createFakeDb(
               if (trimmed.startsWith("DELETE FROM github_review_sessions")) {
                 deletedSessionIds.push(values[2] as string);
               }
+              if (
+                trimmed.startsWith("UPDATE github_review_state\n         SET latest_generation")
+              ) {
+                releaseClaimBindings.push(values);
+                return { results: [] as T[], meta: { changes: config.releaseClaimChanges ?? 1 } };
+              }
               if (trimmed.startsWith("UPDATE github_review_state SET lease_session_id = NULL")) {
                 counters.leaseReleases += 1;
                 return { results: [] as T[], meta: { changes: 1 } };
@@ -122,6 +136,7 @@ function createFakeDb(
   return {
     db,
     deletedSessionIds,
+    releaseClaimBindings,
     get leaseReleases() {
       return counters.leaseReleases;
     },
@@ -132,9 +147,9 @@ function requestContext(db: SqlDatabase, principal?: Principal): RequestContext 
   return {
     db,
     metrics: {} as RequestContext["metrics"],
+    executionCtx: TEST_BACKGROUND_TASK_CONTEXT,
     request_id: "request-id",
     trace_id: "trace-id",
-    executionCtx: { submit: vi.fn() },
     principal,
   };
 }
@@ -148,8 +163,11 @@ function sweepContext(
 }
 
 describe("auth gating", () => {
+  afterEach(() => vi.restoreAllMocks());
+
   it.each([
     "/internal/github-reviews/claim",
+    "/internal/github-reviews/release-claim",
     "/internal/github-reviews/sweep",
     "/internal/github-reviews/close-out",
   ])("declares %s as github-bot-only service authorization", (path) => {
@@ -178,7 +196,7 @@ describe("handleClaimReviewGeneration", () => {
         prNumber: 42,
       }),
       {} as Env,
-      {},
+      NO_PARAMS,
       requestContext(db, GITHUB_BOT_PRINCIPAL)
     );
 
@@ -195,9 +213,52 @@ describe("handleClaimReviewGeneration", () => {
         prNumber: 0,
       }),
       {} as Env,
-      {},
+      NO_PARAMS,
       requestContext(db, GITHUB_BOT_PRINCIPAL)
     );
+
+    expect(response.status).toBe(400);
+  });
+});
+
+describe("handleReleaseReviewGeneration", () => {
+  const path = "/internal/github-reviews/release-claim";
+
+  function release(db: SqlDatabase, body: Record<string, unknown>) {
+    return handleReleaseReviewGeneration(
+      jsonRequest(`https://test.local${path}`, body),
+      {} as Env,
+      NO_PARAMS,
+      requestContext(db, GITHUB_BOT_PRINCIPAL)
+    );
+  }
+
+  it("rolls the claim back conditionally on the claiming generation", async () => {
+    const { db, releaseClaimBindings } = createFakeDb({ releaseClaimChanges: 1 });
+
+    const response = await release(db, { repoId: 555, prNumber: 42, generation: 7 });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ released: true });
+    // The rollback is bound to the claimed generation, so a newer claim that
+    // has already moved latest_generation on cannot match and is left alone.
+    expect(releaseClaimBindings).toHaveLength(1);
+    expect(releaseClaimBindings[0].slice(1)).toEqual([555, 42, 7, 7]);
+  });
+
+  it("reports no rollback when a newer claim already superseded this one", async () => {
+    const { db } = createFakeDb({ releaseClaimChanges: 0 });
+
+    const response = await release(db, { repoId: 555, prNumber: 42, generation: 7 });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ released: false });
+  });
+
+  it("rejects a request without a generation", async () => {
+    const { db } = createFakeDb();
+
+    const response = await release(db, { repoId: 555, prNumber: 42 });
 
     expect(response.status).toBe(400);
   });
@@ -218,13 +279,14 @@ describe("handleSweepStaleReviews", () => {
         generation: 3,
       }),
       {} as Env,
-      {},
+      NO_PARAMS,
       sweepContext(db, fetch, GITHUB_BOT_PRINCIPAL)
     );
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
       cancelledSessionIds: ["stale-1"],
+      deferredSessionIds: [],
       failedSessionIds: [],
     });
     expect(deletedSessionIds).toEqual(["stale-1"]);
@@ -244,12 +306,13 @@ describe("handleSweepStaleReviews", () => {
         generation: 3,
       }),
       {} as Env,
-      {},
+      NO_PARAMS,
       sweepContext(db, fetch, GITHUB_BOT_PRINCIPAL)
     );
 
     await expect(response.json()).resolves.toEqual({
       cancelledSessionIds: ["stale-409"],
+      deferredSessionIds: [],
       failedSessionIds: [],
     });
     expect(deletedSessionIds).toEqual(["stale-409"]);
@@ -272,12 +335,13 @@ describe("handleSweepStaleReviews", () => {
         generation: 3,
       }),
       {} as Env,
-      {},
+      NO_PARAMS,
       sweepContext(db, fetch, GITHUB_BOT_PRINCIPAL)
     );
 
     await expect(response.json()).resolves.toEqual({
       cancelledSessionIds: ["stale-404"],
+      deferredSessionIds: [],
       failedSessionIds: [],
     });
     expect(deletedSessionIds).toEqual(["stale-404"]);
@@ -305,13 +369,14 @@ describe("handleSweepStaleReviews", () => {
         generation: 3,
       }),
       {} as Env,
-      {},
+      NO_PARAMS,
       sweepContext(db, fetch, GITHUB_BOT_PRINCIPAL)
     );
 
     await expect(response.json()).resolves.toEqual({
       cancelledSessionIds: [],
-      failedSessionIds: ["stale-fresh-404"],
+      deferredSessionIds: ["stale-fresh-404"],
+      failedSessionIds: [],
     });
     expect(deletedSessionIds).toEqual([]);
     expect(listActiveDescendantIds).not.toHaveBeenCalled();
@@ -330,12 +395,13 @@ describe("handleSweepStaleReviews", () => {
         generation: 3,
       }),
       {} as Env,
-      {},
+      NO_PARAMS,
       sweepContext(db, fetch, GITHUB_BOT_PRINCIPAL)
     );
 
     await expect(response.json()).resolves.toEqual({
       cancelledSessionIds: [],
+      deferredSessionIds: [],
       failedSessionIds: ["stale-failed"],
     });
     expect(deletedSessionIds).toEqual([]);
@@ -361,12 +427,13 @@ describe("handleSweepStaleReviews", () => {
         generation: 3,
       }),
       {} as Env,
-      {},
+      NO_PARAMS,
       sweepContext(db, fetch, GITHUB_BOT_PRINCIPAL)
     );
 
     await expect(response.json()).resolves.toEqual({
       cancelledSessionIds: ["with-terminal-descendant"],
+      deferredSessionIds: [],
       failedSessionIds: ["with-bad-descendant"],
     });
     expect(deletedSessionIds).toEqual(["with-terminal-descendant"]);
@@ -382,7 +449,7 @@ describe("handleSweepStaleReviews", () => {
         generation: -1,
       }),
       {} as Env,
-      {},
+      NO_PARAMS,
       sweepContext(db, vi.fn(), GITHUB_BOT_PRINCIPAL)
     );
 
@@ -438,7 +505,8 @@ describe("handleCloseOutReview", () => {
 });
 
 describe("handleReviewOwnership / handleReviewLeaseRelease", () => {
-  const OWNERSHIP_PATH = "/sessions/session-1/review-ownership";
+  const SESSION_ID = "session-1";
+  const OWNERSHIP_PATH = `/sessions/${SESSION_ID}/review-ownership`;
   const SANDBOX_PRINCIPAL: Principal = { kind: "sandbox", sessionId: "session-1" };
 
   function ownershipRequest(method = "GET"): Request {
@@ -451,7 +519,7 @@ describe("handleReviewOwnership / handleReviewLeaseRelease", () => {
     const response = await handleReviewOwnership(
       ownershipRequest(),
       {} as Env,
-      { id: "session-1" },
+      { id: SESSION_ID },
       requestContext(db, SANDBOX_PRINCIPAL)
     );
 
@@ -466,7 +534,7 @@ describe("handleReviewOwnership / handleReviewLeaseRelease", () => {
     const response = await handleReviewOwnership(
       ownershipRequest(),
       {} as Env,
-      { id: "session-1" },
+      { id: SESSION_ID },
       requestContext(db, SANDBOX_PRINCIPAL)
     );
 
@@ -479,7 +547,7 @@ describe("handleReviewOwnership / handleReviewLeaseRelease", () => {
     const response = await handleReviewLeaseRelease(
       ownershipRequest("DELETE"),
       {} as Env,
-      { id: "session-1" },
+      { id: SESSION_ID },
       requestContext(fake.db, SANDBOX_PRINCIPAL)
     );
 
@@ -496,7 +564,7 @@ describe("handleReviewOwnership / handleReviewLeaseRelease", () => {
     ["no principal", undefined],
   ])("rejects %s on acquire and release", async (_name, principal) => {
     const { db } = createFakeDb({ leaseAcquireChanges: 1 });
-    const match = { id: "session-1" };
+    const match = { id: SESSION_ID };
 
     const acquire = await handleReviewOwnership(
       ownershipRequest(),
@@ -603,6 +671,8 @@ describe("handleReviewerToken", () => {
 });
 
 describe("sweep lease deferral", () => {
+  afterEach(() => vi.restoreAllMocks());
+
   it("retains a stale row whose session holds an unexpired submission lease", async () => {
     const { db, deletedSessionIds } = createFakeDb({
       staleSessionIds: ["leaseholder"],
@@ -617,13 +687,14 @@ describe("sweep lease deferral", () => {
         generation: 3,
       }),
       {} as Env,
-      {},
+      NO_PARAMS,
       sweepContext(db, fetch, GITHUB_BOT_PRINCIPAL)
     );
 
     await expect(response.json()).resolves.toEqual({
       cancelledSessionIds: [],
-      failedSessionIds: ["leaseholder"],
+      deferredSessionIds: ["leaseholder"],
+      failedSessionIds: [],
     });
     expect(deletedSessionIds).toEqual([]);
     // The cancel must never even be attempted against the leaseholder's DO.
@@ -645,12 +716,13 @@ describe("sweep lease deferral", () => {
         generation: 3,
       }),
       {} as Env,
-      {},
+      NO_PARAMS,
       sweepContext(db, fetch, GITHUB_BOT_PRINCIPAL)
     );
 
     await expect(response.json()).resolves.toEqual({
       cancelledSessionIds: ["expired-lease"],
+      deferredSessionIds: [],
       failedSessionIds: [],
     });
     expect(deletedSessionIds).toEqual(["expired-lease"]);

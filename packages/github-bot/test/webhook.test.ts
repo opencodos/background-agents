@@ -4,19 +4,20 @@ import type { Env } from "../src/types";
 
 vi.mock("../src/github-auth", () => ({
   generateInstallationToken: vi.fn().mockResolvedValue("installation-token"),
+  postCommitStatus: vi.fn().mockResolvedValue({ ok: true }),
   postReaction: vi.fn().mockResolvedValue(true),
   checkSenderPermission: vi.fn().mockResolvedValue({ hasPermission: true }),
-  postCommitStatus: vi.fn().mockResolvedValue({ ok: true }),
-  getPullRequestSnapshot: vi
-    .fn()
-    .mockResolvedValue({ ok: true, headSha: "abc123", state: "open", draft: false }),
-  generateAppJwt: vi.fn().mockResolvedValue("app-jwt"),
-  GITHUB_API_REQUEST_TIMEOUT_MS: 10_000,
-  REVIEW_STATUS_CONTEXT: "open-inspect",
-  REVIEW_PENDING_DESCRIPTION: "Review in progress",
+  getPullRequestSnapshot: vi.fn().mockResolvedValue({
+    ok: true,
+    headSha: "abc123",
+    state: "open",
+    draft: false,
+  }),
   REVIEW_COMPLETED_DESCRIPTION: "Review completed",
+  REVIEW_STALE_DESCRIPTION: "Review skipped: PR changed before submission",
+  REVIEW_PENDING_DESCRIPTION: "Review in progress",
   REVIEW_START_FAILED_DESCRIPTION: "Review failed to start",
-  REVIEW_NOT_PUBLISHED_DESCRIPTION: "Review did not publish — push again to retry",
+  REVIEW_STATUS_CONTEXT: "open-inspect",
   REVIEW_SUPERSEDED_DESCRIPTION: "Superseded by a newer commit",
 }));
 
@@ -454,10 +455,14 @@ describe("POST /webhooks/github", () => {
         return new Response(JSON.stringify({ repo: "test/repo", metadata: null }));
       }
       if (requestUrl.endsWith("/internal/github-reviews/claim")) {
-        return new Response(JSON.stringify({ generation: 1 }));
+        return Response.json({ generation: 1 });
       }
       if (requestUrl.endsWith("/internal/github-reviews/sweep")) {
-        return new Response(JSON.stringify({ cancelledSessionIds: [], failedSessionIds: [] }));
+        return Response.json({
+          cancelledSessionIds: [],
+          deferredSessionIds: [],
+          failedSessionIds: [],
+        });
       }
       if (requestUrl === "https://internal/sessions") {
         return new Response(JSON.stringify({ sessionId: "session-123", status: "created" }));
@@ -542,7 +547,7 @@ describe("POST /webhooks/github", () => {
 
   it("allows redelivery after async processing failure clears the marker", async () => {
     const body = JSON.stringify({
-      action: "opened",
+      action: "synchronize",
       pull_request: {
         number: 42,
         title: "Broken payload",
@@ -587,7 +592,7 @@ describe("POST /webhooks/github", () => {
     for (const [url, init] of controlPlaneFetch.mock.calls) {
       expect(url).toBe("https://internal/internal/github-event");
       expect(JSON.parse(init.body as string)).toMatchObject({
-        eventType: "pull_request.opened",
+        eventType: "pull_request.synchronize",
         repoOwner: "test",
         repoName: "repo",
         pullRequest: { number: 42 },

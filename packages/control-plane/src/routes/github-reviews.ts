@@ -6,21 +6,26 @@
  * (repoId, prNumber) before creating a review session, then — once its own
  * session is admitted — sweeps every session from an older generation:
  * cancelling the stale session's DO and its active descendants so at most
- * one review session per PR is ever running. Both routes are gated to the
- * github-bot service principal.
+ * one review session per PR is ever running. The claim, release-claim,
+ * sweep, and close-out routes are gated to the github-bot service principal;
+ * the review-ownership pair is the review agent's own submission-lease
+ * boundary and, like the review-token broker, is gated to the calling
+ * session's sandbox principal.
  */
 
 import { resolveAppName } from "@open-inspect/shared";
 import { Hono } from "hono";
 import { z } from "zod";
-import { parseBody } from "./body";
 import { getCachedInstallationToken, getGitHubReviewerAppConfig } from "../auth/github-app";
 import { SessionIndexStore } from "../db/session-index";
+import type { SqlDatabase } from "../db/sql-database";
 import { createLogger } from "../logger";
 import { admit, dispatch } from "../routing/admit";
 import type { ControlPlaneHonoEnv } from "../routing/hono-env";
 import { SessionInternalPaths } from "../session/contracts";
+import type { SessionRuntimeClient } from "../session/runtime-client";
 import type { Env } from "../types";
+import { parseBody } from "./body";
 import {
   error,
   GITHUB_SERVICE_ROUTE,
@@ -119,20 +124,67 @@ export async function handleClaimReviewGeneration(
 }
 
 /**
+ * POST /internal/github-reviews/release-claim
+ * Compensating counterpart to the claim: rolls `latest_generation` back by one
+ * when the github-bot's own session creation failed for a reason other than
+ * supersession, so the bump it made does not permanently outrank a review
+ * session that is still running from the previous generation.
+ *
+ * Conditional by construction — the update lands only while the caller's
+ * generation is still the latest. A newer trigger that has already claimed
+ * past it wins, and its claim is left untouched.
+ */
+export async function handleReleaseReviewGeneration(
+  request: Request,
+  _env: Env,
+  _params: object,
+  ctx: RequestContext
+): Promise<Response> {
+  const parsed = await parseBody(request, sweepRequestSchema, "Invalid release request body");
+  if (parsed instanceof Response) return parsed;
+  const { repoId, prNumber, generation } = parsed;
+
+  const result = await ctx.db
+    .prepare(
+      `UPDATE github_review_state
+         SET latest_generation = latest_generation - 1, updated_at = ?
+       WHERE repo_id = ? AND pr_number = ? AND latest_generation = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM github_review_sessions grs
+           WHERE grs.repo_id = github_review_state.repo_id
+             AND grs.pr_number = github_review_state.pr_number
+             AND grs.generation = ?
+         )`
+    )
+    .bind(Date.now(), repoId, prNumber, generation, generation)
+    .run();
+
+  const released = (result.meta?.changes ?? 0) > 0;
+  logger.info("review_claim.release", {
+    event: "review_claim.release",
+    repo_id: repoId,
+    pull_number: prNumber,
+    generation,
+    released,
+  });
+  return json({ released });
+}
+
+type StaleReviewCancellationOutcome = "cancelled" | "deferred" | "failed";
+
+/**
  * Cancel one stale review session's DO plus its active descendants
  * (mirroring handleCancelChild's cascade in routes/session-children.ts).
- * Returns whether the caller may delete the github_review_sessions row:
- * true when the session (and every descendant) reached a terminal state —
- * 2xx, 409 (already terminal), or 404 on a row older than
- * REVIEW_FENCE_ORPHAN_GRACE_MS (DO never initialized: a crashed create).
- * False on any other failure — including a 404 on a fresh row, whose create
- * may still be mid-init — so a later sweep retries.
+ *
+ * `cancelled` means the fence row may be deleted, `deferred` means a normal
+ * lease or initialization window retained it for a later sweep, and `failed`
+ * means cancellation was attempted but did not reach a terminal state.
  */
 async function cancelStaleReviewSession(
-  ctx: SessionRouteContext,
+  ctx: Pick<SessionRouteContext, "sessionRuntime">,
   sessionStore: SessionIndexStore,
   row: StaleReviewSessionRow
-): Promise<boolean> {
+): Promise<StaleReviewCancellationOutcome> {
   const sessionId = row.session_id;
   // An unexpired submission lease defers cancellation entirely: the holder
   // is mid-GitHub-write, and a cancel cannot fence an in-flight POST. The
@@ -148,7 +200,7 @@ async function cancelStaleReviewSession(
       session_id: sessionId,
       lease_expires_at: row.lease_expires_at,
     });
-    return false;
+    return "deferred";
   }
   const response = await ctx.sessionRuntime.fetch(sessionId, SessionInternalPaths.cancel, {
     method: "POST",
@@ -161,16 +213,16 @@ async function cancelStaleReviewSession(
         session_id: sessionId,
         age_ms: ageMs,
       });
-      return false;
+      return "deferred";
     }
     logger.warn("review_sweep.orphan_404", {
       event: "review_sweep.orphan_404",
       session_id: sessionId,
       age_ms: ageMs,
     });
-    return true;
+    return "cancelled";
   }
-  if (!response.ok && response.status !== 409) return false;
+  if (!response.ok && response.status !== 409) return "failed";
 
   const descendantIds = await sessionStore.listActiveDescendantIds(sessionId);
   let descendantsCancelled = true;
@@ -185,7 +237,7 @@ async function cancelStaleReviewSession(
       descendantsCancelled = false;
     }
   }
-  return descendantsCancelled;
+  return descendantsCancelled ? "cancelled" : "failed";
 }
 
 /**
@@ -218,13 +270,14 @@ export async function handleSweepStaleReviews(
 
   const sessionStore = new SessionIndexStore(ctx.db);
   const cancelledSessionIds: string[] = [];
+  const deferredSessionIds: string[] = [];
   const failedSessionIds: string[] = [];
 
   for (const row of stale.results) {
     const sessionId = row.session_id;
-    let cancelled: boolean;
+    let outcome: StaleReviewCancellationOutcome;
     try {
-      cancelled = await cancelStaleReviewSession(ctx, sessionStore, row);
+      outcome = await cancelStaleReviewSession(ctx, sessionStore, row);
     } catch (cancelError) {
       // A thrown DO transport or D1 error must not abort the sweep: report
       // this session as failed (row retained for the next sweep) and keep
@@ -234,9 +287,13 @@ export async function handleSweepStaleReviews(
         session_id: sessionId,
         error: cancelError instanceof Error ? cancelError.message : String(cancelError),
       });
-      cancelled = false;
+      outcome = "failed";
     }
-    if (!cancelled) {
+    if (outcome === "deferred") {
+      deferredSessionIds.push(sessionId);
+      continue;
+    }
+    if (outcome === "failed") {
       failedSessionIds.push(sessionId);
       continue;
     }
@@ -249,7 +306,7 @@ export async function handleSweepStaleReviews(
       .run();
   }
 
-  return json({ cancelledSessionIds, failedSessionIds });
+  return json({ cancelledSessionIds, deferredSessionIds, failedSessionIds });
 }
 
 /**
@@ -309,19 +366,15 @@ export async function handleCloseOutReview(
 }
 
 /**
- * GET /sessions/:id/review-ownership
- * Sandbox-token-authenticated ownership check: the review agent calls this
+ * POST /sessions/:id/review-ownership
+ * Sandbox-token-authenticated ownership check and lease acquisition: the
+ * review agent calls this
  * immediately before its final GitHub writes. `owned` is true only while the
  * calling session's registered generation is still the latest claimed one
  * for its PR — a superseded (or swept) session gets false and must exit
  * without posting. This is the submission-boundary fence that cancellation
  * alone cannot provide: a same-head successor passes the prompt's head-SHA
  * check, but never this one.
- *
- * The route policy requires a sandbox principal bound to `params.id`, but
- * the handler re-checks it directly: this is the submission fence's own
- * trust boundary, not incidental to it, so it does not rely solely on
- * admission being wired correctly.
  */
 export async function handleReviewOwnership(
   _request: Request,
@@ -330,6 +383,7 @@ export async function handleReviewOwnership(
   ctx: RequestContext
 ): Promise<Response> {
   const sessionId = params.id;
+  if (!sessionId) return error("Session ID required");
   if (ctx.principal?.kind !== "sandbox" || ctx.principal.sessionId !== sessionId) {
     return error("Unauthorized", 401);
   }
@@ -422,6 +476,7 @@ export async function handleReviewLeaseRelease(
   ctx: RequestContext
 ): Promise<Response> {
   const sessionId = params.id;
+  if (!sessionId) return error("Session ID required");
   if (ctx.principal?.kind !== "sandbox" || ctx.principal.sessionId !== sessionId) {
     return error("Unauthorized", 401);
   }
@@ -445,8 +500,8 @@ export async function handleReviewLeaseRelease(
  * another PR event ever arriving. Row-deletion rules match the sweep's.
  */
 export async function reapSupersededReviewSessions(
-  db: RequestContext["db"],
-  sessionRuntime: SessionRouteContext["sessionRuntime"]
+  db: SqlDatabase,
+  sessionRuntime: SessionRuntimeClient
 ): Promise<void> {
   const stale = await db
     .prepare(
@@ -455,6 +510,7 @@ export async function reapSupersededReviewSessions(
        JOIN github_review_state st
          ON st.repo_id = grs.repo_id AND st.pr_number = grs.pr_number
        WHERE grs.generation < st.latest_generation
+       ORDER BY grs.created_at ASC, grs.session_id ASC
        LIMIT 20`
     )
     .all<StaleReviewSessionRow>();
@@ -462,13 +518,9 @@ export async function reapSupersededReviewSessions(
 
   const sessionStore = new SessionIndexStore(db);
   for (const row of stale.results) {
-    let cancelled: boolean;
+    let outcome: StaleReviewCancellationOutcome;
     try {
-      cancelled = await cancelStaleReviewSession(
-        { db, sessionRuntime } as SessionRouteContext,
-        sessionStore,
-        row
-      );
+      outcome = await cancelStaleReviewSession({ sessionRuntime }, sessionStore, row);
     } catch (cancelError) {
       logger.warn("review_reaper.cancel_threw", {
         event: "review_reaper.cancel_threw",
@@ -477,7 +529,7 @@ export async function reapSupersededReviewSessions(
       });
       continue;
     }
-    if (!cancelled) continue;
+    if (outcome !== "cancelled") continue;
     await db
       .prepare(`DELETE FROM github_review_sessions WHERE session_id = ?`)
       .bind(row.session_id)
@@ -491,10 +543,18 @@ export async function reapSupersededReviewSessions(
 
 export const githubReviewRoutes = new Hono<ControlPlaneHonoEnv>();
 
+// Internal fence routes: admission narrows them to the verified github-bot
+// service principal, so no handler-level guard is needed.
 githubReviewRoutes.post(
   "/internal/github-reviews/claim",
   admit({ ...GITHUB_SERVICE_ROUTE, authorization: serviceAuthorized("github-bot") }),
   (c) => dispatch(c, handleClaimReviewGeneration)
+);
+
+githubReviewRoutes.post(
+  "/internal/github-reviews/release-claim",
+  admit({ ...GITHUB_SERVICE_ROUTE, authorization: serviceAuthorized("github-bot") }),
+  (c) => dispatch(c, handleReleaseReviewGeneration)
 );
 
 githubReviewRoutes.post(
@@ -509,7 +569,9 @@ githubReviewRoutes.post(
   (c) => dispatch(c, handleCloseOutReview)
 );
 
-githubReviewRoutes.get(
+// Submission-boundary fence, called by the review agent from the sandbox.
+// Both handlers additionally require the caller's own sandbox principal.
+githubReviewRoutes.post(
   "/sessions/:id/review-ownership",
   admit({ ...SCM_AGNOSTIC_SANDBOX_ROUTE, authorization: NO_AUTHORIZATION }),
   (c) => dispatch(c, handleReviewOwnership)

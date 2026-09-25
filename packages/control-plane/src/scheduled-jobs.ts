@@ -32,7 +32,7 @@ import type { Env } from "./types";
 
 /**
  * Every minute: the automation scheduler's tick, the autofix queue health
- * check, and this deployment's superseded-review reaper.
+ * check, and the superseded-review reaper.
  */
 export const SCHEDULER_TICK_CRON = "* * * * *";
 
@@ -63,8 +63,8 @@ export const SCHEDULED_JOBS: readonly ScheduledJob[] = [
       backgroundTasks.submit(() => checkAutofixQueueHealth(env, log), {
         name: "autofix_queue_health",
       });
-      // Fork-only: retire review sessions a newer push has superseded. Its
-      // failure must not cost the automation tick below its slot.
+      // Retire review sessions a newer generation has superseded. Its failure
+      // must not cost the automation tick below its slot.
       try {
         await reapSupersededReviewSessions(db, sessions);
       } catch (reaperError) {
