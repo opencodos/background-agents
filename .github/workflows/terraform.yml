@@ -71,17 +71,14 @@ jobs:
           # backend, not just two of them. A partial configuration used to report
           # has-secrets=true and then fail inside `terraform init` with an empty
           # access/secret key or an endpoint URL of "https://.r2.cloudflarestorage.com",
-          # instead of skipping with the notice below. CLOUDFLARE_ACCOUNT_ID and
-          # R2_BUCKET are read with the same `vars || secrets` precedence the init
-          # steps use, so a variable-configured deployment is not mistaken for an
-          # unconfigured one.
+          # instead of skipping with the notice below. CLOUDFLARE_ACCOUNT_ID is read
+          # with the same `vars || secrets` precedence the init steps use, so a
+          # variable-configured deployment is not mistaken for an unconfigured one.
           account_id="${{ vars.CLOUDFLARE_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}"
-          r2_bucket="${{ vars.R2_BUCKET || secrets.R2_BUCKET }}"
           if [ -n "${{ secrets.CLOUDFLARE_API_TOKEN }}" ] &&
             [ -n "${{ secrets.R2_ACCESS_KEY_ID }}" ] &&
             [ -n "${{ secrets.R2_SECRET_ACCESS_KEY }}" ] &&
-            [ -n "$account_id" ] &&
-            [ -n "$r2_bucket" ]; then
+            [ -n "$account_id" ]; then
             echo "has-secrets=true" >> $GITHUB_OUTPUT
           else
             echo "has-secrets=false" >> $GITHUB_OUTPUT
@@ -197,12 +194,10 @@ jobs:
       - name: Terraform Init
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}
-          R2_BUCKET: ${{ vars.R2_BUCKET || secrets.R2_BUCKET }}
         run: |
           terraform init \
             -backend-config="access_key=${{ secrets.R2_ACCESS_KEY_ID }}" \
             -backend-config="secret_key=${{ secrets.R2_SECRET_ACCESS_KEY }}" \
-            -backend-config="bucket=${R2_BUCKET}" \
             -backend-config="endpoints={s3=\"https://${CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com\"}"
         working-directory: ${{ env.TF_WORKING_DIR }}
 
@@ -400,12 +395,10 @@ jobs:
       - name: Terraform Init
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}
-          R2_BUCKET: ${{ vars.R2_BUCKET || secrets.R2_BUCKET }}
         run: |
           terraform init \
             -backend-config="access_key=${{ secrets.R2_ACCESS_KEY_ID }}" \
             -backend-config="secret_key=${{ secrets.R2_SECRET_ACCESS_KEY }}" \
-            -backend-config="bucket=${R2_BUCKET}" \
             -backend-config="endpoints={s3=\"https://${CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com\"}"
         working-directory: ${{ env.TF_WORKING_DIR }}
 
