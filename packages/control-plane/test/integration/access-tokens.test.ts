@@ -105,6 +105,47 @@ describe("personal access tokens", () => {
       });
     });
 
+    it("names its owner as the actor of the refused request's audit row", async () => {
+      // A token acts as its owner, so the audit trail must say who: a row with
+      // no actor would make every token request unattributable.
+      await assignRole("role_builtin_member");
+      const token = await issueToken();
+
+      expect((await skillRequest(token, "POST", "/skills/import")).status).toBe(403);
+      const audit = await env.DB.prepare(
+        `SELECT principal_kind, actor_user_id_snapshot, reason_code
+         FROM authorization_audit_events
+         WHERE action = 'authorization.request_denied' AND resource_id = '/skills/import'`
+      ).first();
+      expect(audit).toEqual({
+        principal_kind: "access-token",
+        actor_user_id_snapshot: USER_ID,
+        reason_code: "permission_required",
+      });
+    });
+
+    it("leaves the audit log readable once a token has acted", async () => {
+      // Every token request writes an audit row under its own principal kind,
+      // so a log that cannot parse that kind fails for everyone reading it.
+      await assignRole("role_builtin_member");
+      const token = await issueToken();
+      expect((await skillRequest(token, "POST", "/skills/import")).status).toBe(403);
+
+      // The token owner is the seeded browser user, promoted to read the log.
+      await assignRole("role_builtin_owner");
+      const response = await serviceFetch("https://test.local/audit-events");
+      expect(response.status).toBe(200);
+      const { events } = await response.json<{ events: Record<string, unknown>[] }>();
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          principalKind: "access-token",
+          actorUserIdSnapshot: USER_ID,
+          resourceId: "/skills/import",
+          reasonCode: "permission_required",
+        })
+      );
+    });
+
     it("refuses a suspended owner, whose browser session would be refused too", async () => {
       await assignRole("role_builtin_administrator");
       await env.DB.prepare("UPDATE users SET suspended_at = ? WHERE id = ?")

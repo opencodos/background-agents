@@ -1,5 +1,64 @@
+import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect } from "vitest";
 import { buildCodeReviewPrompt, buildCommentActionPrompt } from "../src/prompts";
+
+/**
+ * Runs the prompt's review-submission chain (session id through the lease
+ * release) under bash, with `curl` and `gh` replaced by stubs that record their
+ * calls. The review-token `curl` exits with `tokenCurlExit`, printing a valid
+ * token body first unless that is 22: `curl -f` withholds the body of an HTTP
+ * error. Every other call succeeds as it would for a fresh, owned review.
+ */
+function runReviewSubmission(prompt: string, headSha: string, tokenCurlExit: number) {
+  const start = prompt.indexOf('session_id="');
+  const chainEnd = '/review-ownership"\n\n';
+  const end = prompt.indexOf(chainEnd, start) + chainEnd.length;
+  const command = prompt.slice(start, end);
+
+  const dir = mkdtempSync(join(tmpdir(), "review-submission-"));
+  try {
+    const curlLog = join(dir, "curl.log");
+    const ghLog = join(dir, "gh.log");
+    const body = tokenCurlExit === 22 ? "" : `printf '{"token":"reviewer-token"}'; `;
+    writeFileSync(
+      join(dir, "curl"),
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> '${curlLog}'\n` +
+        `case "$*" in *review-token*) ${body}exit ${tokenCurlExit} ;; esac\n`
+    );
+    writeFileSync(
+      join(dir, "gh"),
+      `#!/bin/sh\nprintf '%s %s\\n' "$GH_TOKEN" "$*" >> '${ghLog}'\n` +
+        `case "$2" in\n` +
+        `  */reviews) printf 'https://github.test/review' ;;\n` +
+        `  */pulls/*) printf '%s open draft:false' '${headSha}' ;;\n` +
+        `esac\n`
+    );
+    chmodSync(join(dir, "curl"), 0o755);
+    chmodSync(join(dir, "gh"), 0o755);
+
+    // --norc: bash sources ~/.bashrc when its stdin is a socket, as Node's is.
+    const result = spawnSync("bash", ["--norc", "--noprofile", "-c", command], {
+      env: {
+        HOME: dir,
+        PATH: `${dir}:${process.env.PATH}`,
+        SESSION_CONFIG: '{"session_id":"sess-1"}',
+        CONTROL_PLANE_URL: "https://cp.test",
+        SANDBOX_AUTH_TOKEN: "sandbox-token",
+      },
+      encoding: "utf8",
+    });
+    return {
+      status: result.status,
+      curlCalls: existsSync(curlLog) ? readFileSync(curlLog, "utf8") : null,
+      ghCalls: existsSync(ghLog) ? readFileSync(ghLog, "utf8") : null,
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 describe("buildCodeReviewPrompt", () => {
   const baseParams = {
@@ -125,16 +184,39 @@ describe("buildCodeReviewPrompt", () => {
     expect(prompt).not.toContain("COMMENT|APPROVE|REQUEST_CHANGES");
   });
 
-  it("submits the review with the reviewer app's token when one is configured", () => {
+  describe("with a reviewer App", () => {
     const prompt = buildCodeReviewPrompt({ ...baseParams, hasReviewerApp: true });
 
-    // The token is fetched inside the guarded chain, after the ownership lease, so a superseded
-    // session never reaches it, and it scopes the review POST alone.
-    expect(prompt).toContain("$CONTROL_PLANE_URL/sessions/$session_id/review-token");
-    expect(prompt).toContain('GH_TOKEN="$review_token" gh api repos/acme/widgets/pulls/42/reviews');
-    expect(prompt.indexOf("/review-token")).toBeGreaterThan(prompt.indexOf("/review-ownership"));
-    // Statuses stay on the default credential: the reviewer app holds no statuses permission.
-    expect(prompt).not.toContain('GH_TOKEN="$review_token" gh api repos/acme/widgets/statuses');
+    it("submits the review with the reviewer App's token", () => {
+      const run = runReviewSubmission(prompt, baseParams.headSha, 0);
+
+      expect(run.status).toBe(0);
+      // The token is fetched inside the guarded chain, after the ownership lease, so a
+      // superseded session never reaches it.
+      expect(run.curlCalls?.split("\n")).toEqual([
+        "-fsS -H Authorization: Bearer sandbox-token https://cp.test/sessions/sess-1/review-ownership",
+        "-fsS -H Authorization: Bearer sandbox-token https://cp.test/sessions/sess-1/review-token",
+        "-fsS -X DELETE -H Authorization: Bearer sandbox-token https://cp.test/sessions/sess-1/review-ownership",
+        "",
+      ]);
+      expect(run.ghCalls).toContain(
+        "reviewer-token api repos/acme/widgets/pulls/42/reviews --method POST --input /tmp/review.json"
+      );
+      // Statuses stay on the default credential: the reviewer app holds no statuses permission.
+      expect(run.ghCalls).toContain("\n api repos/acme/widgets/statuses/abc123 --method POST");
+    });
+
+    // 22 is curl -f's exit on an HTTP error such as the 404 from a control
+    // plane without reviewer credentials; 18 is a transfer cut short after a
+    // complete body arrived. Neither may fall through to another identity.
+    it.each([22, 18])("does not submit the review when curl exits %i", (curlExit) => {
+      const run = runReviewSubmission(prompt, baseParams.headSha, curlExit);
+
+      expect(run.curlCalls).toContain("https://cp.test/sessions/sess-1/review-token");
+      expect(run.status).not.toBe(0);
+      expect(run.ghCalls).not.toContain("/reviews");
+      expect(run.ghCalls).not.toContain("/statuses/");
+    });
   });
 
   it("submits the review with the default credential when no reviewer app is configured", () => {
