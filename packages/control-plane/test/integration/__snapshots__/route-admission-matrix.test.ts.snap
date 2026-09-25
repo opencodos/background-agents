@@ -20,11 +20,11 @@ exports[`route admission matrix > admits a session-bound sandbox token on every 
   "POST /sessions/:id/slack-notify sandbox=400 wrong-token=401",
   "POST /sessions/:id/provider-auth/:provider/access-token sandbox=404 wrong-token=401",
   "POST /sessions/:id/provider-auth/:provider/runtime-credential sandbox=409 wrong-token=401",
+  "GET /sessions/:id/review-token sandbox=404 wrong-token=401",
   "GET /sessions/:id/commit-signing sandbox=200 wrong-token=401",
   "POST /sessions/:id/commit-signing sandbox=400 wrong-token=401",
   "POST /sessions/:id/review-ownership sandbox=409 wrong-token=401",
   "DELETE /sessions/:id/review-ownership sandbox=204 wrong-token=401",
-  "GET /sessions/:id/review-token sandbox=404 wrong-token=401",
 ]
 `;
 
@@ -36,6 +36,7 @@ exports[`route admission matrix > admits only the named bot on every exact-servi
   "POST /internal/github-reviews/release-claim github-bot=400 slack-bot=403 web=403",
   "POST /internal/github-reviews/sweep github-bot=400 slack-bot=403 web=403",
   "POST /internal/github-reviews/close-out github-bot=400 slack-bot=403 web=403",
+  "POST /internal/github-reviews/close-out/finalize github-bot=400 slack-bot=403 web=403",
 ]
 `;
 
@@ -48,9 +49,6 @@ exports[`route admission matrix > admits the workspace owner through every brows
   "POST /api/auth/sign-out owner=403",
   "GET /api/auth/error owner=200",
   "GET /internal/auth/sign-in-providers owner=200",
-  "GET /access-tokens owner=200",
-  "POST /access-tokens owner=400",
-  "DELETE /access-tokens/:id owner=404",
   "POST /sessions owner=201",
   "GET /sessions owner=200",
   "GET /sessions/inbox owner=200",
@@ -207,6 +205,9 @@ exports[`route admission matrix > admits the workspace owner through every brows
   "GET /members owner=200",
   "PUT /members/:id/role owner=400",
   "PUT /members/:id/status owner=400",
+  "GET /access-tokens owner=200",
+  "POST /access-tokens owner=400",
+  "DELETE /access-tokens/:id owner=404",
 ]
 `;
 
@@ -220,9 +221,6 @@ exports[`route admission matrix > rejects every credentialed route anonymously b
   "POST /api/auth/sign-out anonymous=401",
   "GET /api/auth/error anonymous=401",
   "GET /internal/auth/sign-in-providers anonymous=401",
-  "GET /access-tokens anonymous=401",
-  "POST /access-tokens anonymous=401",
-  "DELETE /access-tokens/:id anonymous=401",
   "POST /sessions anonymous=401",
   "GET /sessions anonymous=401",
   "GET /sessions/inbox anonymous=401",
@@ -320,6 +318,7 @@ exports[`route admission matrix > rejects every credentialed route anonymously b
   "DELETE /model-provider-account-defaults/:provider anonymous=401",
   "POST /sessions/:id/provider-auth/:provider/access-token anonymous=401",
   "POST /sessions/:id/provider-auth/:provider/runtime-credential anonymous=401",
+  "GET /sessions/:id/review-token anonymous=401",
   "GET /integration-settings/:id anonymous=401",
   "PUT /integration-settings/:id anonymous=401",
   "DELETE /integration-settings/:id anonymous=401",
@@ -391,6 +390,9 @@ exports[`route admission matrix > rejects every credentialed route anonymously b
   "GET /members anonymous=401",
   "PUT /members/:id/role anonymous=401",
   "PUT /members/:id/status anonymous=401",
+  "GET /access-tokens anonymous=401",
+  "POST /access-tokens anonymous=401",
+  "DELETE /access-tokens/:id anonymous=401",
   "POST /webhooks/sentry/:id anonymous=404",
   "POST /webhooks/automation/:id anonymous=415",
   "POST /internal/github-event anonymous=401",
@@ -399,8 +401,8 @@ exports[`route admission matrix > rejects every credentialed route anonymously b
   "POST /internal/github-reviews/release-claim anonymous=401",
   "POST /internal/github-reviews/sweep anonymous=401",
   "POST /internal/github-reviews/close-out anonymous=401",
+  "POST /internal/github-reviews/close-out/finalize anonymous=401",
   "POST /sessions/:id/review-ownership anonymous=401",
   "DELETE /sessions/:id/review-ownership anonymous=401",
-  "GET /sessions/:id/review-token anonymous=401",
 ]
 `;

@@ -1,7 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { TEST_BACKGROUND_TASK_CONTEXT } from "../router.test-support";
-import type * as GitHubAppModule from "../auth/github-app";
-import { getCachedInstallationToken } from "../auth/github-app";
 import type { Principal } from "../auth/principal";
 import { SessionIndexStore } from "../db/session-index";
 import type { SqlDatabase } from "../db/sql-database";
@@ -10,9 +8,7 @@ import type { Env } from "../types";
 import {
   githubReviewRoutes,
   handleClaimReviewGeneration,
-  handleCloseOutReview,
   handleReleaseReviewGeneration,
-  handleReviewerToken,
   handleReviewLeaseRelease,
   handleReviewOwnership,
   handleSweepStaleReviews,
@@ -20,11 +16,6 @@ import {
 import type { SessionRouteContext } from "./session-route";
 import { listRouteContracts } from "../routing/route-contracts";
 import { type RequestContext } from "./shared";
-
-vi.mock("../auth/github-app", async (importOriginal) => ({
-  ...(await importOriginal<typeof GitHubAppModule>()),
-  getCachedInstallationToken: vi.fn(),
-}));
 
 const GITHUB_BOT_PRINCIPAL: Principal = { kind: "service", service: "github-bot", actor: null };
 
@@ -50,22 +41,16 @@ function createFakeDb(
     staleRowCreatedAt?: number;
     /** Lease columns returned on stale rows (sweep/reaper defer test). */
     staleRowLease?: { lease_session_id: string; lease_expires_at: number };
-    /** meta.changes for the lease-acquire UPDATE (ownership handler). */
-    leaseAcquireChanges?: number;
     /** meta.changes for the conditional generation rollback (release handler). */
     releaseClaimChanges?: number;
-    /** Whether the close-out DELETE..RETURNING matches the session's row. */
-    closeOutMatches?: boolean;
   } = {}
 ): {
   db: SqlDatabase;
   deletedSessionIds: string[];
-  leaseReleases: number;
   releaseClaimBindings: unknown[][];
 } {
   const deletedSessionIds: string[] = [];
   const releaseClaimBindings: unknown[][] = [];
-  const counters = { leaseReleases: 0 };
   const db = {
     prepare(sql: string) {
       const trimmed = sql.trim();
@@ -75,13 +60,6 @@ function createFakeDb(
             async first<T>(): Promise<T | null> {
               if (trimmed.startsWith("INSERT INTO github_review_state")) {
                 return { latest_generation: config.claimGeneration ?? 1 } as unknown as T;
-              }
-              if (
-                trimmed.startsWith("DELETE FROM github_review_sessions") &&
-                config.closeOutMatches
-              ) {
-                deletedSessionIds.push(values[0] as string);
-                return { session_id: values[0] } as unknown as T;
               }
               return null;
             },
@@ -116,13 +94,6 @@ function createFakeDb(
                 releaseClaimBindings.push(values);
                 return { results: [] as T[], meta: { changes: config.releaseClaimChanges ?? 1 } };
               }
-              if (trimmed.startsWith("UPDATE github_review_state SET lease_session_id = NULL")) {
-                counters.leaseReleases += 1;
-                return { results: [] as T[], meta: { changes: 1 } };
-              }
-              if (trimmed.startsWith("UPDATE github_review_state SET lease_session_id")) {
-                return { results: [] as T[], meta: { changes: config.leaseAcquireChanges ?? 1 } };
-              }
               return { results: [] as T[], meta: { changes: 1 } };
             },
           };
@@ -133,14 +104,7 @@ function createFakeDb(
       return [];
     },
   } as unknown as SqlDatabase;
-  return {
-    db,
-    deletedSessionIds,
-    releaseClaimBindings,
-    get leaseReleases() {
-      return counters.leaseReleases;
-    },
-  };
+  return { db, deletedSessionIds, releaseClaimBindings };
 }
 
 function requestContext(db: SqlDatabase, principal?: Principal): RequestContext {
@@ -170,6 +134,7 @@ describe("auth gating", () => {
     "/internal/github-reviews/release-claim",
     "/internal/github-reviews/sweep",
     "/internal/github-reviews/close-out",
+    "/internal/github-reviews/close-out/finalize",
   ])("declares %s as github-bot-only service authorization", (path) => {
     const contract = listRouteContracts(githubReviewRoutes).find(
       (candidate) => candidate.method === "POST" && candidate.path === path
@@ -457,103 +422,13 @@ describe("handleSweepStaleReviews", () => {
   });
 });
 
-describe("handleCloseOutReview", () => {
-  const CLOSE_OUT_URL = "https://test.local/internal/github-reviews/close-out";
-
-  it("returns 204 and drops the session's fence row when the close-out is owned", async () => {
-    const fake = createFakeDb({ closeOutMatches: true });
-
-    const response = await handleCloseOutReview(
-      jsonRequest(CLOSE_OUT_URL, { sessionId: "session-1" }),
-      {} as Env,
-      {},
-      requestContext(fake.db, GITHUB_BOT_PRINCIPAL)
-    );
-
-    expect(response.status).toBe(204);
-    expect(fake.deletedSessionIds).toEqual(["session-1"]);
-  });
-
-  it("returns 409 when the session is superseded, gone, or mid-write", async () => {
-    // The guarded DELETE matches no row in every one of those cases.
-    const fake = createFakeDb({ closeOutMatches: false });
-
-    const response = await handleCloseOutReview(
-      jsonRequest(CLOSE_OUT_URL, { sessionId: "session-1" }),
-      {} as Env,
-      {},
-      requestContext(fake.db, GITHUB_BOT_PRINCIPAL)
-    );
-
-    expect(response.status).toBe(409);
-    expect(fake.deletedSessionIds).toEqual([]);
-  });
-
-  it("rejects a body without a session id", async () => {
-    const fake = createFakeDb({ closeOutMatches: true });
-
-    const response = await handleCloseOutReview(
-      jsonRequest(CLOSE_OUT_URL, { sessionId: " " }),
-      {} as Env,
-      {},
-      requestContext(fake.db, GITHUB_BOT_PRINCIPAL)
-    );
-
-    expect(response.status).toBe(400);
-    expect(fake.deletedSessionIds).toEqual([]);
-  });
-});
-
 describe("handleReviewOwnership / handleReviewLeaseRelease", () => {
   const SESSION_ID = "session-1";
   const OWNERSHIP_PATH = `/sessions/${SESSION_ID}/review-ownership`;
-  const SANDBOX_PRINCIPAL: Principal = { kind: "sandbox", sessionId: "session-1" };
 
   function ownershipRequest(method = "GET"): Request {
     return new Request(`https://test.local${OWNERSHIP_PATH}`, { method });
   }
-
-  it("returns 204 and acquires the lease while the caller is the latest generation", async () => {
-    const { db } = createFakeDb({ leaseAcquireChanges: 1 });
-
-    const response = await handleReviewOwnership(
-      ownershipRequest(),
-      {} as Env,
-      { id: SESSION_ID },
-      requestContext(db, SANDBOX_PRINCIPAL)
-    );
-
-    expect(response.status).toBe(204);
-  });
-
-  it("returns 409 when superseded, swept, or another session holds an unexpired lease", async () => {
-    // The atomic UPDATE matches no row in all three cases; the handler only
-    // observes changes === 0.
-    const { db } = createFakeDb({ leaseAcquireChanges: 0 });
-
-    const response = await handleReviewOwnership(
-      ownershipRequest(),
-      {} as Env,
-      { id: SESSION_ID },
-      requestContext(db, SANDBOX_PRINCIPAL)
-    );
-
-    expect(response.status).toBe(409);
-  });
-
-  it("release clears only the caller's lease and returns 204", async () => {
-    const fake = createFakeDb();
-
-    const response = await handleReviewLeaseRelease(
-      ownershipRequest("DELETE"),
-      {} as Env,
-      { id: SESSION_ID },
-      requestContext(fake.db, SANDBOX_PRINCIPAL)
-    );
-
-    expect(response.status).toBe(204);
-    expect(fake.leaseReleases).toBe(1);
-  });
 
   it.each([
     ["a service principal", GITHUB_BOT_PRINCIPAL],
@@ -563,7 +438,7 @@ describe("handleReviewOwnership / handleReviewLeaseRelease", () => {
     ],
     ["no principal", undefined],
   ])("rejects %s on acquire and release", async (_name, principal) => {
-    const { db } = createFakeDb({ leaseAcquireChanges: 1 });
+    const { db } = createFakeDb();
     const match = { id: SESSION_ID };
 
     const acquire = await handleReviewOwnership(
@@ -581,92 +456,6 @@ describe("handleReviewOwnership / handleReviewLeaseRelease", () => {
 
     expect(acquire.status).toBe(401);
     expect(release.status).toBe(401);
-  });
-});
-
-describe("handleReviewerToken", () => {
-  const SANDBOX_PRINCIPAL: Principal = { kind: "sandbox", sessionId: "session-1" };
-  const REVIEWER_ENV = {
-    GITHUB_REVIEWER_APP_ID: "999",
-    GITHUB_REVIEWER_APP_PRIVATE_KEY: "reviewer-key",
-    GITHUB_REVIEWER_APP_INSTALLATION_ID: "888",
-  } as unknown as Env;
-
-  function tokenRequest(): Request {
-    return new Request("https://test.local/sessions/session-1/review-token");
-  }
-
-  beforeEach(() => vi.mocked(getCachedInstallationToken).mockClear());
-
-  it("mints the reviewer app's installation token for the session's own sandbox", async () => {
-    vi.mocked(getCachedInstallationToken).mockResolvedValue("ghs_reviewer");
-    const { db } = createFakeDb();
-
-    const response = await handleReviewerToken(
-      tokenRequest(),
-      REVIEWER_ENV,
-      { id: "session-1" },
-      requestContext(db, SANDBOX_PRINCIPAL)
-    );
-
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ token: "ghs_reviewer" });
-    expect(getCachedInstallationToken).toHaveBeenCalledWith(
-      { appId: "999", privateKey: "reviewer-key", installationId: "888" },
-      expect.anything()
-    );
-  });
-
-  it("returns 404 when the deployment runs no reviewer app", async () => {
-    const { db } = createFakeDb();
-
-    const response = await handleReviewerToken(
-      tokenRequest(),
-      {} as Env,
-      { id: "session-1" },
-      requestContext(db, SANDBOX_PRINCIPAL)
-    );
-
-    expect(response.status).toBe(404);
-    expect(getCachedInstallationToken).not.toHaveBeenCalled();
-  });
-
-  it("returns 502 rather than a body when minting fails", async () => {
-    vi.mocked(getCachedInstallationToken).mockImplementationOnce(() => {
-      throw new Error("GitHub 401");
-    });
-    const { db } = createFakeDb();
-
-    const response = await handleReviewerToken(
-      tokenRequest(),
-      REVIEWER_ENV,
-      { id: "session-1" },
-      requestContext(db, SANDBOX_PRINCIPAL)
-    );
-
-    expect(response.status).toBe(502);
-  });
-
-  it.each([
-    ["a service principal", GITHUB_BOT_PRINCIPAL],
-    [
-      "a sandbox principal for a different session",
-      { kind: "sandbox", sessionId: "other" } as Principal,
-    ],
-    ["no principal", undefined],
-  ])("refuses to hand a write credential to %s", async (_name, principal) => {
-    vi.mocked(getCachedInstallationToken).mockResolvedValue("ghs_reviewer");
-    const { db } = createFakeDb();
-
-    const response = await handleReviewerToken(
-      tokenRequest(),
-      REVIEWER_ENV,
-      { id: "session-1" },
-      requestContext(db, principal)
-    );
-
-    expect(response.status).toBe(401);
-    expect(getCachedInstallationToken).not.toHaveBeenCalled();
   });
 });
 

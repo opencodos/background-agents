@@ -21,17 +21,18 @@ import {
   checkSenderPermission,
   getPullRequestApproval,
   getPullRequestSnapshot,
+  getReviewStatusState,
   REVIEW_PENDING_DESCRIPTION,
   REVIEW_SKIPPED_APPROVED_DESCRIPTION,
   REVIEW_START_FAILED_DESCRIPTION,
   REVIEW_STATUS_CONTEXT,
-  REVIEW_SUPERSEDED_DESCRIPTION,
 } from "./github-auth";
 import { buildCodeReviewPrompt, buildCommentActionPrompt } from "./prompts";
 import { resolveSessionTarget, type SessionTargetFields } from "./session-target";
 import { getGitHubConfig, type ResolvedGitHubConfig } from "./utils/integration-config";
 import { requestedReviewerPayloadSchema } from "./payload-schemas";
 import { containsBotMention, stripBotMention } from "./github-mention";
+import { closeOutReviewStatus } from "./review-close-out";
 import {
   claimReviewGeneration,
   releaseReviewGeneration,
@@ -70,19 +71,6 @@ export function isReviewRequestedForBot(
   if (!parsed.success) return false;
   const login = parsed.data.requested_reviewer?.login;
   return login !== undefined && acceptedLogins.includes(login);
-}
-
-/**
- * The account whose token submits reviews, and whether that is a second App.
- * `hasReviewerApp` gates the prompt's token fetch; `submittingLogin` decides
- * whether GitHub would refuse an approval as a self-review.
- */
-function resolveReviewIdentity(env: Env): { submittingLogin: string; hasReviewerApp: boolean } {
-  const reviewerLogin = env.GITHUB_REVIEWER_USERNAME?.trim();
-  return {
-    submittingLogin: reviewerLogin || env.GITHUB_BOT_USERNAME,
-    hasReviewerApp: Boolean(reviewerLogin),
-  };
 }
 
 async function createSession(
@@ -188,105 +176,64 @@ async function withReaction<T>(
 }
 
 interface ReviewStatusTarget {
-  log: Logger;
-  token: string;
   owner: string;
   repo: string;
+  prNumber: number;
   headSha: string;
-  userAgent: string;
-  meta: Record<string, unknown>;
 }
 
-async function postReviewStatus(
+/**
+ * Mark a just-admitted review as in progress. The one commit-status write made without the PR's
+ * submission lease: it is the start marker for the generation this handler has just admitted.
+ */
+async function postPendingReviewStatus(
+  log: Logger,
+  token: string,
   target: ReviewStatusTarget,
-  status: { state: "pending" | "error" | "success"; description: string }
+  userAgent: string,
+  meta: Record<string, unknown>
 ): Promise<void> {
   const result = await postCommitStatus(
-    target.token,
+    token,
     target.owner,
     target.repo,
     target.headSha,
     {
-      ...status,
+      state: "pending",
       context: REVIEW_STATUS_CONTEXT,
+      description: REVIEW_PENDING_DESCRIPTION,
     },
-    target.userAgent
+    userAgent
   );
-  const statusMeta = {
-    ...target.meta,
-    head_sha: target.headSha,
-    state: status.state,
-  };
+  const statusMeta = { ...meta, head_sha: target.headSha, state: "pending" };
   if (result.ok) {
-    target.log.debug("review_status.posted", statusMeta);
+    log.debug("review_status.posted", statusMeta);
     return;
   }
-  target.log.warn("review_status.failed", {
+  log.warn("review_status.failed", {
     ...statusMeta,
     ...(result.status === undefined ? {} : { github_status: result.status }),
     error: result.error,
   });
 }
 
-async function postPendingReviewStatus(
-  log: Logger,
-  token: string,
-  owner: string,
-  repo: string,
-  headSha: string,
-  userAgent: string,
-  meta: Record<string, unknown>
-): Promise<ReviewStatusTarget> {
-  const statusTarget: ReviewStatusTarget = { log, token, owner, repo, headSha, userAgent, meta };
-  await postReviewStatus(statusTarget, {
-    state: "pending",
-    description: REVIEW_PENDING_DESCRIPTION,
-  });
-  return statusTarget;
-}
-
-/**
- * Close out the review status on the head a push replaced.
- *
- * The review for that commit is cancelled by the sweep above, and nothing else ever returns to its
- * status — so without this it keeps "Review in progress" forever. Harmless on its own commit, but
- * it is how a repository accumulates permanently-pending checks, and it hides the one case that
- * matters: a status still pending on the *current* head.
- *
- * Best-effort by the same logic as the sweep: failing to tidy a superseded commit must never stop
- * the review that replaced it.
- */
-async function closeOutSupersededHeadStatus(
-  target: ReviewStatusTarget,
-  previousHeadSha: string | undefined
-): Promise<void> {
-  if (!previousHeadSha || previousHeadSha === target.headSha) return;
-  if (/^0+$/.test(previousHeadSha)) return; // the all-zero sha GitHub sends when there is no prior head
-  await postReviewStatus(
-    { ...target, headSha: previousHeadSha },
-    { state: "error", description: REVIEW_SUPERSEDED_DESCRIPTION }
-  );
-}
-
 /**
  * Deliver a review prompt with a callback context naming the commit its "pending" status sits on,
  * so the session's end comes back to `/callbacks/complete` however the agent stops — including the
- * endings (timeout, cancel, a lost sandbox) that never reach the prompt's own close-out step.
+ * endings (timeout, cancel, a lost sandbox) that never reach the prompt's own submission step.
+ *
+ * A session whose prompt never arrives has no turn to end, so no callback will ever close it out:
+ * its close-out is requested here instead, through the same lease as every other.
  */
 async function sendReviewPrompt(
   env: Env,
+  log: Logger,
   traceId: string,
   sessionId: string,
-  params: { content: string; authorId: string; prNumber: number },
-  statusTarget: ReviewStatusTarget
+  params: { content: string; authorId: string },
+  target: ReviewStatusTarget
 ): Promise<string> {
-  const callbackContext: GitHubReviewCallbackContext = {
-    source: "github",
-    owner: statusTarget.owner,
-    repo: statusTarget.repo,
-    prNumber: params.prNumber,
-    headSha: statusTarget.headSha,
-  };
+  const callbackContext: GitHubReviewCallbackContext = { source: "github", ...target };
   try {
     return await sendPrompt(env, traceId, sessionId, {
       content: params.content,
@@ -294,9 +241,13 @@ async function sendReviewPrompt(
       callbackContext,
     });
   } catch (error) {
-    await postReviewStatus(statusTarget, {
-      state: "error",
-      description: REVIEW_START_FAILED_DESCRIPTION,
+    await closeOutReviewStatus(env, log, traceId, {
+      sessionId,
+      request: {
+        owner: target.owner,
+        repo: target.repo,
+        description: REVIEW_START_FAILED_DESCRIPTION,
+      },
     });
     throw error;
   }
@@ -304,39 +255,83 @@ async function sendReviewPrompt(
 
 /**
  * Stand down an auto-review on a PR that already carries an approval, leaving nothing behind that
- * outlives the decision.
+ * outlives the decision. Best-effort throughout: no review will run either way, so a failure here
+ * degrades to a plain skip rather than a webhook error and a redelivery.
  *
- * Claiming a generation is what actually stops work: a review still running against the head this
- * push replaced is now both superseded and unwanted, and the claim alone fences it out of its final
- * GitHub write even if the sweep cannot reach it. The two commit statuses then close the loop —
- * the replaced head stops advertising a review that will never finish, and the new head reports
- * the skip rather than leaving a required context pending forever.
+ * The new head's "skipped" success is a terminal status written without the PR's submission lease
+ * — there is no session to hold it — so the ownership rule is kept by ordering and a read instead:
  *
- * Best-effort throughout: this runs on the path where no review will happen, so a failure here
- * must degrade to a plain skip rather than surface as a webhook error and a redelivery.
+ * 1. Claim a generation first. Every older review is now superseded: none can take the lease from
+ *    here on (its acquire answers 409), so none can start a status write after this point.
+ * 2. Write the skip only where the head's status is pending or absent. A review of this head that
+ *    already published, or was already closed out, keeps its own terminal status.
+ * 3. Sweep last, naming the repository. A review whose head this push replaced is closed out under
+ *    the lease ("Superseded by a newer commit"); a same-head review cancelled here finds the skip
+ *    already terminal, so its close-out writes nothing.
+ *
+ * Residual race: a writer that already held the lease when the claim landed — an agent
+ * mid-submission, or a granted close-out that has read "pending" — can land its write after the
+ * skip, because GitHub statuses have no compare-and-swap. The head then shows that review's own
+ * verdict, or its close-out's error, instead of the skip. Only a same-head review can do this, and
+ * only within one lease TTL of the claim.
  */
 async function standDownApprovedReview(
   env: Env,
   log: Logger,
   traceId: string,
   params: { repoId: number; prNumber: number },
-  statusTarget: ReviewStatusTarget,
-  previousHeadSha: string | undefined
+  target: { owner: string; repo: string; headSha: string },
+  token: string,
+  userAgent: string,
+  meta: Record<string, unknown>
 ): Promise<void> {
+  let generation: number | null = null;
   try {
-    const generation = await claimReviewGeneration(env, traceId, params);
-    await sweepStaleReviews(env, log, traceId, { ...params, generation });
+    generation = await claimReviewGeneration(env, traceId, params);
   } catch (error) {
-    log.warn("handler.approved_skip_sweep_failed", {
-      ...statusTarget.meta,
+    log.warn("handler.approved_skip_claim_failed", {
+      ...meta,
       error: error instanceof Error ? error : new Error(String(error)),
     });
   }
-  await closeOutSupersededHeadStatus(statusTarget, previousHeadSha);
-  await postReviewStatus(statusTarget, {
-    state: "success",
-    description: REVIEW_SKIPPED_APPROVED_DESCRIPTION,
-  });
+
+  const status = await getReviewStatusState(
+    token,
+    target.owner,
+    target.repo,
+    target.headSha,
+    userAgent
+  );
+  if (!status.ok) {
+    log.warn("handler.approved_skip_status_unreadable", { ...meta, error: status.error });
+  } else if (status.state === null || status.state === "pending") {
+    const result = await postCommitStatus(
+      token,
+      target.owner,
+      target.repo,
+      target.headSha,
+      {
+        state: "success",
+        context: REVIEW_STATUS_CONTEXT,
+        description: REVIEW_SKIPPED_APPROVED_DESCRIPTION,
+      },
+      userAgent
+    );
+    if (!result.ok) {
+      log.warn("handler.approved_skip_status_failed", { ...meta, error: result.error });
+    }
+  } else {
+    log.info("handler.approved_skip_status_kept", { ...meta, state: status.state });
+  }
+
+  if (generation !== null) {
+    await sweepStaleReviews(env, log, traceId, {
+      ...params,
+      generation,
+      owner: target.owner,
+      repo: target.repo,
+    });
+  }
 }
 
 type CallerGatingResult =
@@ -400,6 +395,19 @@ async function resolveCallerGating(
   }
 
   return { allowed: true, ghToken };
+}
+
+/**
+ * The account whose token submits reviews, and whether that is a second App.
+ * `hasReviewerApp` gates the prompt's token fetch; `submittingLogin` decides
+ * whether GitHub would refuse an approval as a self-review.
+ */
+function resolveReviewIdentity(env: Env): { submittingLogin: string; hasReviewerApp: boolean } {
+  const reviewerLogin = env.GITHUB_REVIEWER_USERNAME?.trim();
+  return {
+    submittingLogin: reviewerLogin || env.GITHUB_BOT_USERNAME,
+    hasReviewerApp: Boolean(reviewerLogin),
+  };
 }
 
 export async function handleReviewRequested(
@@ -523,17 +531,12 @@ export async function handleReviewRequested(
         repoId: repo.id,
         prNumber: pr.number,
         generation,
+        owner,
+        repo: repoName,
       });
 
-      const statusTarget = await postPendingReviewStatus(
-        log,
-        ghToken,
-        owner,
-        repoName,
-        pr.head.sha,
-        userAgent,
-        meta
-      );
+      const statusTarget = { owner, repo: repoName, prNumber: pr.number, headSha: pr.head.sha };
+      await postPendingReviewStatus(log, ghToken, statusTarget, userAgent, meta);
       log.info("session.created", { ...meta, session_id: sessionId, action: "review" });
 
       const reviewIdentity = resolveReviewIdentity(env);
@@ -556,13 +559,10 @@ export async function handleReviewRequested(
 
       const messageId = await sendReviewPrompt(
         env,
+        log,
         traceId,
         sessionId,
-        {
-          content: prompt,
-          authorId: `github:${payload.sender.id}`,
-          prNumber: pr.number,
-        },
+        { content: prompt, authorId: `github:${payload.sender.id}` },
         statusTarget
       );
       log.info("prompt.sent", {
@@ -647,9 +647,10 @@ export async function handlePullRequestReviewTrigger(
         log,
         traceId,
         { repoId: repo.id, prNumber: pr.number },
-        { log, token: ghToken, owner, repo: repoName, headSha: pr.head.sha, userAgent, meta },
-        // Present only on `synchronize`; the other trigger actions carry no prior head.
-        payload.before
+        { owner, repo: repoName, headSha: pr.head.sha },
+        ghToken,
+        userAgent,
+        meta
       );
       log.info("handler.pr_already_approved", meta);
       return { outcome: "skipped", skip_reason: "pr_approved" };
@@ -735,22 +736,12 @@ export async function handlePullRequestReviewTrigger(
         repoId: repo.id,
         prNumber: pr.number,
         generation,
-      });
-      await closeOutSupersededHeadStatus(
-        { log, token: ghToken, owner, repo: repoName, headSha: pr.head.sha, userAgent, meta },
-        // Present only on `synchronize`; the other trigger actions carry no prior head.
-        payload.before
-      );
-
-      const statusTarget = await postPendingReviewStatus(
-        log,
-        ghToken,
         owner,
-        repoName,
-        pr.head.sha,
-        userAgent,
-        meta
-      );
+        repo: repoName,
+      });
+
+      const statusTarget = { owner, repo: repoName, prNumber: pr.number, headSha: pr.head.sha };
+      await postPendingReviewStatus(log, ghToken, statusTarget, userAgent, meta);
       log.info("session.created", { ...meta, session_id: sessionId, action: "auto_review" });
 
       const reviewIdentity = resolveReviewIdentity(env);
@@ -773,13 +764,10 @@ export async function handlePullRequestReviewTrigger(
 
       const messageId = await sendReviewPrompt(
         env,
+        log,
         traceId,
         sessionId,
-        {
-          content: prompt,
-          authorId: `github:${sender.id}`,
-          prNumber: pr.number,
-        },
+        { content: prompt, authorId: `github:${sender.id}` },
         statusTarget
       );
       log.info("prompt.sent", {
