@@ -50,6 +50,8 @@ import {
   handleReviewRequested,
   handleIssueComment,
   handleReviewComment,
+  isReviewRequestedForBot,
+  reviewRequestLogins,
 } from "../src/handlers";
 import {
   generateInstallationToken,
@@ -336,6 +338,15 @@ describe("handlePullRequestReviewTrigger", () => {
     expect(sessionBody.title).toContain("Review PR #42");
     expect(sessionBody.scmLogin).toBe("alice");
     expect(sessionBody.scmAvatarUrl).toBe("https://avatars.githubusercontent.com/u/1001");
+    // The repository its status lives on, so a review that never starts can still be closed out.
+    expect(sessionBody.githubReview).toEqual({
+      repoId: 501,
+      prNumber: 42,
+      generation: 1,
+      headSha: "abc123",
+      owner: "acme",
+      repo: "widgets",
+    });
     // Identity travels via the signed actor assertion, never the body.
     expect(sessionBody).not.toHaveProperty("scmUserId");
     expect(sessionBody).not.toHaveProperty("spawnSource");
@@ -1136,6 +1147,30 @@ describe("handlePullRequestReviewTrigger", () => {
       "review_sweep.request_failed",
       expect.objectContaining({ status: 500 })
     );
+  });
+});
+
+describe("isReviewRequestedForBot", () => {
+  const requestFor = (login: string) => ({ requested_reviewer: { login } });
+
+  it("accepts the bot login and the configured reviewer App login", () => {
+    const env = { ...createMockEnv(), GITHUB_REVIEWER_USERNAME: " test-reviewer[bot] " } as Env;
+    const logins = reviewRequestLogins(env);
+
+    expect(isReviewRequestedForBot(requestFor("test-bot[bot]"), logins)).toBe(true);
+    expect(isReviewRequestedForBot(requestFor("test-reviewer[bot]"), logins)).toBe(true);
+    expect(isReviewRequestedForBot(requestFor("someone-else"), logins)).toBe(false);
+  });
+
+  it("accepts only the bot login when no reviewer App login is configured", () => {
+    for (const reviewer of [undefined, "", "   "]) {
+      const env = { ...createMockEnv(), GITHUB_REVIEWER_USERNAME: reviewer } as Env;
+      const logins = reviewRequestLogins(env);
+
+      expect(isReviewRequestedForBot(requestFor("test-bot[bot]"), logins)).toBe(true);
+      expect(isReviewRequestedForBot(requestFor("test-reviewer[bot]"), logins)).toBe(false);
+      expect(isReviewRequestedForBot(requestFor(""), logins)).toBe(false);
+    }
   });
 });
 

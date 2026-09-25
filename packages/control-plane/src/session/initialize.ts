@@ -10,6 +10,7 @@ import {
 } from "@open-inspect/shared/types/integrations";
 import { SessionIndexStore } from "../db/session-index";
 import { SessionInternalPaths } from "./contracts";
+import { SessionDraftExpiryClient } from "./abandoned-draft-sweep";
 import { createSessionRuntimeClient } from "./runtime-client";
 import { createLogger } from "../logger";
 import type { SessionSkillManifestInput } from "./skill-resolution";
@@ -103,6 +104,8 @@ export interface SessionInitInput {
     prNumber: number;
     generation: number;
     headSha: string;
+    owner?: string;
+    repo?: string;
   };
 }
 
@@ -194,11 +197,12 @@ export async function initializeSession(
   // obscure that boundary for one call site); on a later init failure the
   // orphaned review row is swept by the next claim's sweep (404 rule).
   if (input.githubReview) {
-    const { repoId, prNumber, generation, headSha } = input.githubReview;
+    const { repoId, prNumber, generation, headSha, owner, repo } = input.githubReview;
     const fenceResult = await ctx.db
       .prepare(
-        `INSERT INTO github_review_sessions (repo_id, pr_number, generation, session_id, head_sha, created_at)
-         SELECT ?, ?, ?, ?, ?, ? FROM github_review_state
+        `INSERT INTO github_review_sessions
+           (repo_id, pr_number, generation, session_id, head_sha, created_at, repo_owner, repo_name)
+         SELECT ?, ?, ?, ?, ?, ?, ?, ? FROM github_review_state
          WHERE repo_id = ? AND pr_number = ? AND latest_generation = ?`
       )
       .bind(
@@ -208,6 +212,8 @@ export async function initializeSession(
         input.sessionId,
         headSha,
         now,
+        owner ?? null,
+        repo ?? null,
         repoId,
         prNumber,
         generation
@@ -289,7 +295,14 @@ export async function initializeSession(
       }
     );
   } catch (transportError) {
-    await compensateFailedDoInit(sessionStore, ctx.db, input, ctx.trace_id);
+    // The runtime may have committed init — and scheduled sandbox warming —
+    // before the transport failed, so the fence row may still be the only
+    // handle a sweep or the reaper has on a live session. Delete it only once
+    // the session is confirmed unable to run.
+    await markSessionFailed(sessionStore, input.sessionId, ctx.trace_id);
+    if (input.githubReview && (await isSessionRetiredAfterLostInit(env, ctx, input.sessionId))) {
+      await deleteFailedReviewFence(ctx.db, input.githubReview, input.sessionId, ctx.trace_id);
+    }
     throw transportError;
   }
 
@@ -380,6 +393,27 @@ async function markSessionFailed(
       error:
         compensationError instanceof Error ? compensationError.message : String(compensationError),
     });
+  }
+}
+
+/**
+ * After a DO init whose response was lost: whether the session is confirmed
+ * unable to run — no runtime exists, or its never-prompted runtime has just
+ * been archived, which rejects any later prompt. Any other answer, including
+ * another failure, is not a confirmation.
+ */
+async function isSessionRetiredAfterLostInit(
+  env: Env,
+  ctx: RequestContext,
+  sessionId: string
+): Promise<boolean> {
+  try {
+    const outcome = await new SessionDraftExpiryClient(
+      createSessionRuntimeClient(env, ctx)
+    ).expireDraft(sessionId);
+    return outcome === "archived" || outcome === "missing";
+  } catch {
+    return false;
   }
 }
 
