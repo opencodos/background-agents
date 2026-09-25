@@ -136,17 +136,34 @@ All events are processed asynchronously via `executionCtx.waitUntil()`. The webh
 **Pull Request Review Trigger (Auto-Review):**
 
 1. Check `pull_request.draft` — skip draft PRs.
-2. Apply the configured trigger-user gate. The bot reviews bot-created PRs only when
-   `allowedTriggerUsers` includes its login.
-3. Post a pending `open-inspect` status on `pull_request.head.sha`.
+2. Apply the configured trigger-user gate. An event whose sender is the webhook App itself (a PR it
+   opened, a push to its own branch) bypasses both caller gates: an allowlist never names the bot,
+   and the collaborator-permission lookup 404s for a `[bot]` login.
+3. On any action but `opened`, read the PR's reviews. If a reviewer's latest verdict is a standing
+   approval, stand down: claim a generation and sweep (fencing out any review still running), post
+   `error` on the head a `synchronize` replaced, post `success` ("Skipped — PR already approved") on
+   the new head, and skip. An unreadable approval state fails open and reviews as normal.
 4. Post an eyes reaction on the PR.
-5. Create a session through the control plane.
-6. Send the code review prompt. The prompt posts the completed review, then replaces the status on
-   the same head SHA with `success` and links it to the review. The review is submitted by the
-   reviewer App when `GITHUB_REVIEWER_USERNAME` is set — its installation token comes from the
-   control plane's `/sessions/:id/review-token`, and the status writes keep the default credential.
-   Reviews of PRs opened by whichever App submits them use `COMMENT`, because GitHub does not allow
-   pull request authors to approve their own PRs.
+5. Re-read the PR from GitHub and skip when the head SHA, state, or draft flag no longer match the
+   webhook payload. This runs as the last step before the claim, so the narrowest possible window
+   remains in which a push or close can outrank the snapshot.
+6. Claim the next review generation for the PR from the control plane.
+7. Create a session through the control plane, fenced on that generation. A 409 means a newer
+   trigger already won, and the handler skips. Any other failure releases the claim — conditionally,
+   so a newer claim is never disturbed — before rethrowing.
+8. Sweep and cancel review sessions for the PR that hold an older generation. On `synchronize`, post
+   `error` on the head the push replaced (`before`): its review was just cancelled, so nothing else
+   would ever replace that head's pending status.
+9. Post a pending `open-inspect` status on `pull_request.head.sha`.
+10. Send the code review prompt. Before submitting, the prompt re-checks freshness and acquires a
+    submission lease from the control plane; a superseded session exits silently, because the newer
+    session owns that head SHA's status. On a freshness mismatch the prompt closes the pending
+    status out with `error` — no successor is writing to that SHA. On success it posts the review,
+    then replaces the status with `success` and links it to the review. The review is submitted by
+    the reviewer App when `GITHUB_REVIEWER_USERNAME` is set — its installation token comes from the
+    control plane's `/sessions/:id/review-token`, fetched under the lease, and the status writes
+    keep the default credential. Reviews of PRs opened by whichever App submits them use `COMMENT`,
+    because GitHub does not allow pull request authors to approve their own PRs.
 
 **Review Requested (compatibility path):**
 
@@ -156,9 +173,10 @@ App as the reviewer, so the button names it rather than the webhook App; both lo
 
 1. Check `requested_reviewer.login` matches `GITHUB_BOT_USERNAME` or `GITHUB_REVIEWER_USERNAME` —
    return early if not.
-2. Post a pending `open-inspect` status on `pull_request.head.sha`.
-3. Post an eyes reaction on the PR.
-4. Create a session through the control plane.
+2. Post an eyes reaction on the PR.
+3. Run the same freshness check, generation claim, fenced session creation (with conditional claim
+   release on failure), and stale-review sweep as the auto-review path.
+4. Post a pending `open-inspect` status on `pull_request.head.sha`.
 5. Send the code review prompt, which posts the successful status after the review.
 
 In both review flows, a review that ends without replacing its pending status is closed out by the
