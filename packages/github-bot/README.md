@@ -164,8 +164,10 @@ All events are processed asynchronously via `executionCtx.waitUntil()`. The webh
    lease again), post `success` ("Skipped — PR already approved") on the head if its status is
    pending or absent, then sweep, naming the repository, so the review of a replaced head is closed
    out under the lease. The skip is the one terminal status written without the lease; a same-head
-   writer that already held the lease when the claim landed can still overwrite it. An unreadable
-   approval state fails open and reviews as normal.
+   writer that already held the lease when the claim landed can still overwrite it. If the head's
+   status cannot be read or the skip cannot be written, it does not sweep and reviews as normal
+   instead, so the head is never left without a status. An unreadable approval state likewise fails
+   open and reviews as normal.
 4. Post an eyes reaction on the PR.
 5. Re-read the PR from GitHub and skip when the head SHA, state, or draft flag no longer match the
    webhook payload. This runs as the last step before the claim, so the narrowest possible window

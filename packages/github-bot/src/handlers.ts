@@ -255,8 +255,12 @@ async function sendReviewPrompt(
 
 /**
  * Stand down an auto-review on a PR that already carries an approval, leaving nothing behind that
- * outlives the decision. Best-effort throughout: no review will run either way, so a failure here
- * degrades to a plain skip rather than a webhook error and a redelivery.
+ * outlives the decision. Returns whether the head's status is established — the skip written, or a
+ * terminal status already there. Only then is the stand-down complete: when the status cannot be
+ * read or the skip cannot be written, it returns false before sweeping, and the caller reviews the
+ * PR as normal instead. A skip without its status would leave the head with no `open-inspect`
+ * status at all (a required check that never appears), or a swept same-head review's close-out
+ * publishing an error — and nothing would ever retry it.
  *
  * The new head's "skipped" success is a terminal status written without the PR's submission lease
  * — there is no session to hold it — so the ownership rule is kept by ordering and a read instead:
@@ -284,7 +288,7 @@ async function standDownApprovedReview(
   token: string,
   userAgent: string,
   meta: Record<string, unknown>
-): Promise<void> {
+): Promise<boolean> {
   let generation: number | null = null;
   try {
     generation = await claimReviewGeneration(env, traceId, params);
@@ -303,7 +307,9 @@ async function standDownApprovedReview(
     userAgent
   );
   if (!status.ok) {
+    // Not evidence the status is still pending: writing could replace a verdict.
     log.warn("handler.approved_skip_status_unreadable", { ...meta, error: status.error });
+    return false;
   } else if (status.state === null || status.state === "pending") {
     const result = await postCommitStatus(
       token,
@@ -319,6 +325,7 @@ async function standDownApprovedReview(
     );
     if (!result.ok) {
       log.warn("handler.approved_skip_status_failed", { ...meta, error: result.error });
+      return false;
     }
   } else {
     log.info("handler.approved_skip_status_kept", { ...meta, state: status.state });
@@ -332,6 +339,7 @@ async function standDownApprovedReview(
       repo: target.repo,
     });
   }
+  return true;
 }
 
 type CallerGatingResult =
@@ -642,7 +650,7 @@ export async function handlePullRequestReviewTrigger(
       // review outright is a worse failure than one redundant run.
       log.warn("handler.approval_check_failed", { ...meta, error: approval.error });
     } else if (approval.approved) {
-      await standDownApprovedReview(
+      const stoodDown = await standDownApprovedReview(
         env,
         log,
         traceId,
@@ -652,8 +660,13 @@ export async function handlePullRequestReviewTrigger(
         userAgent,
         meta
       );
-      log.info("handler.pr_already_approved", meta);
-      return { outcome: "skipped", skip_reason: "pr_approved" };
+      if (stoodDown) {
+        log.info("handler.pr_already_approved", meta);
+        return { outcome: "skipped", skip_reason: "pr_approved" };
+      }
+      // The skip could not be established; a review always leaves a status behind. Its own
+      // claim supersedes the stand-down's, and its sweep retires every older review.
+      log.info("handler.pr_approved_reviewing_anyway", meta);
     }
   }
 

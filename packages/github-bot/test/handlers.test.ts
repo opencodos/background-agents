@@ -828,8 +828,10 @@ describe("handlePullRequestReviewTrigger", () => {
     ).toEqual([["abc123", "success"]]);
   });
 
-  it("writes no skip when the head's status cannot be read", async () => {
-    // An unreadable status is not evidence it is still pending: writing could replace a verdict.
+  it("reviews as normal when the head's status cannot be read", async () => {
+    // An unreadable status is not evidence it is still pending, so no skip may be written over
+    // it — and a stand-down without its skip would leave the new head with no status at all, or
+    // a swept same-head review's close-out publishing an error. A review is the safe fallback.
     vi.mocked(getPullRequestApproval).mockResolvedValue({ ok: true, approved: true });
     vi.mocked(getReviewStatusState).mockResolvedValue({
       ok: false,
@@ -844,8 +846,42 @@ describe("handlePullRequestReviewTrigger", () => {
 
     const result = await handlePullRequestReviewTrigger(env, log, payload, "trace-0");
 
-    expect(result).toEqual({ outcome: "skipped", skip_reason: "pr_approved" });
-    expect(postCommitStatus).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ outcome: "processed", handler_action: "auto_review" });
+    const statuses = vi
+      .mocked(postCommitStatus)
+      .mock.calls.map(([, , , sha, status]) => [sha, status.state, status.description]);
+    expect(statuses).toEqual([["abc123", "pending", "Review in progress"]]);
+    // The only sweep is the review's own, after its session exists.
+    const cpFetch = getControlPlaneFetch(env);
+    const calledUrls = cpFetch.mock.calls.map(([url]: [string]) => url);
+    const sweeps = calledUrls.filter((url: string) => /github-reviews\/sweep$/.test(url));
+    expect(sweeps).toHaveLength(1);
+    expect(calledUrls.indexOf("https://internal/sessions")).toBeLessThan(
+      calledUrls.findIndex((url: string) => /github-reviews\/sweep$/.test(url))
+    );
+  });
+
+  it("reviews as normal when the skip status cannot be written", async () => {
+    vi.mocked(getPullRequestApproval).mockResolvedValue({ ok: true, approved: true });
+    vi.mocked(postCommitStatus)
+      .mockResolvedValueOnce({ ok: false, status: 502, error: "GitHub API returned 502" })
+      .mockResolvedValue({ ok: true });
+    const env = createMockEnv();
+    const log = createMockLogger();
+    const payload: PullRequestReviewTriggerPayload = {
+      ...pullRequestReviewTriggerPayload,
+      action: "synchronize",
+    };
+
+    const result = await handlePullRequestReviewTrigger(env, log, payload, "trace-0");
+
+    expect(result).toMatchObject({ outcome: "processed", handler_action: "auto_review" });
+    const cpFetch = getControlPlaneFetch(env);
+    const calledUrls = cpFetch.mock.calls.map(([url]: [string]) => url);
+    expect(calledUrls.indexOf("https://internal/sessions")).toBeLessThan(
+      calledUrls.findIndex((url: string) => /github-reviews\/sweep$/.test(url))
+    );
+    expect(vi.mocked(postCommitStatus).mock.calls.at(-1)?.[4]).toMatchObject({ state: "pending" });
   });
 
   it("still skips an approved PR when the claim fails, without sweeping", async () => {
