@@ -58,9 +58,10 @@ Auto-review is skipped when:
 - The event sender is not allowed to trigger the bot
 - Auto-review is disabled globally or for that repository
 - The event is a follow-up (push, reopen, or ready for review) on a PR that already carries a
-  standing approval. The bot cancels any review still running for the PR and posts a `success`
-  status, "Skipped — PR already approved", on the new head so a required check does not wait on a
-  review that was never started. Request a review or mention the bot to review it anyway.
+  standing approval. The bot cancels any review still running for the PR and, unless the head
+  already has a terminal status, posts a `success` status, "Skipped — PR already approved", on the
+  new head so a required check does not wait on a review that was never started. Request a review or
+  mention the bot to review it anyway.
 
 A PR opened, or pushed to, by the GitHub App itself is the App acting rather than a third party
 asking it to act, so it bypasses both caller gates and is reviewed.
@@ -71,9 +72,39 @@ automatic review path.
 ### What It Posts
 
 The agent can submit a general review comment, approve the PR, request changes, or add inline review
-comments when useful. Where the deployment configures a reviewer App, the review is submitted under
-that App's identity, so a pull request the main App opened can be approved rather than only
-commented on.
+comments when useful. By default, reviews of PRs opened by the main GitHub App use `COMMENT`: GitHub
+does not allow a PR author to approve their own PR. An optional separate reviewer App lets the
+review approve those PRs instead. Reviews of PRs authored by the reviewer App itself still use
+`COMMENT`.
+
+### Optional Separate Reviewer App
+
+Create a second GitHub App with only **Pull requests: Read & write** (GitHub also grants the
+mandatory Metadata read permission). Disable its webhooks and install it on the repositories you
+want reviewed. The main App continues to receive webhook events and handle other GitHub operations;
+the second App is only the review-submission identity.
+
+Set all four Terraform values together, or leave all four empty:
+
+- `github_reviewer_app_id`: the second App's ID
+- `github_reviewer_app_private_key`: its private key in PKCS#8 PEM format
+- `github_reviewer_app_installation_id`: its installation ID
+- `github_reviewer_username`: its exact bot login, such as `my-reviewer[bot]`
+
+The three credentials are control-plane bindings (`GITHUB_REVIEWER_APP_*`); the login is a GitHub
+bot binding (`GITHUB_REVIEWER_USERNAME`). For non-Terraform deployments, configure the same four
+values on their respective services. A login without all three credentials stops every review, while
+credentials without the login leave reviews on the main App's identity.
+
+The agent's submission script fetches a short-lived installation token from
+`GET /sessions/:id/review-token` using its sandbox token while it holds the PR's submission lease,
+immediately before submitting the review. The route authenticates the caller against that session
+and returns `Cache-Control: no-store`. Only the review POST uses this credential; other GitHub calls
+retain their existing credential. With no reviewer App configured, the endpoint returns 404 and the
+prompt omits the token fetch. When the GitHub bot has a reviewer login, any token-fetch failure,
+including that 404 from missing or partial reviewer credentials, stops the review rather than submit
+it under another identity: the script releases the lease and writes no status, and the review's
+close-out marks it as not published.
 
 ---
 
