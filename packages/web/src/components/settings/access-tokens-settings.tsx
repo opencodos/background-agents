@@ -23,10 +23,13 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 
+/** The expiry a new token gets unless the user picks another. */
+const DEFAULT_EXPIRY_DAYS = 90;
+
 /** Expiry choices, kept coarse: a free-form day count invites typos, not care. */
 const EXPIRY_OPTIONS = [
   { label: "30 days", days: 30 },
-  { label: "90 days", days: 90 },
+  { label: `${DEFAULT_EXPIRY_DAYS} days`, days: DEFAULT_EXPIRY_DAYS },
   { label: "1 year", days: ACCESS_TOKEN_MAX_TTL_DAYS },
   { label: "No expiry", days: undefined },
 ] as const;
@@ -45,14 +48,14 @@ export function AccessTokensSettings() {
   const [creating, setCreating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [name, setName] = useState("");
-  const [expiresInDays, setExpiresInDays] = useState<number | undefined>(90);
+  const [expiresInDays, setExpiresInDays] = useState<number | undefined>(DEFAULT_EXPIRY_DAYS);
   const [issued, setIssued] = useState<CreatedAccessToken | null>(null);
   const [pendingRevoke, setPendingRevoke] = useState<{ id: string; name: string } | null>(null);
 
   function resetForm() {
     setCreating(false);
     setName("");
-    setExpiresInDays(90);
+    setExpiresInDays(DEFAULT_EXPIRY_DAYS);
   }
 
   async function save() {

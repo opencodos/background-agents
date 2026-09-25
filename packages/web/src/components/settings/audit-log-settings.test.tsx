@@ -276,8 +276,8 @@ describe("AuditLogSettings", () => {
   });
 
   it("names an access token that recorded no actor", () => {
-    // Rows written before token requests resolved their owner carry no actor
-    // snapshot, so the principal kind is all the card can show.
+    // With no actor snapshot, the principal kind is all the card can show, so
+    // every kind needs its own label rather than a derived one.
     const card = renderSingle(
       createEvent("applied", { principalKind: "access-token", actorUserIdSnapshot: null })
     );

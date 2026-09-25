@@ -279,7 +279,7 @@ export function enforceRoutePrincipal(
       error("This credential may only read", 403),
       evidence,
       { kind: "principal-type" },
-      "access_token_read_only",
+      "credential_read_only",
       "This credential may only read"
     );
   }
@@ -314,10 +314,10 @@ async function enforceActiveUser(
     // actor here means enrollment was skipped, so never authorize it.
     return authorizationUnavailable();
   }
-  // An access token is its owner, so it loads the same role and suspension
-  // state a browser session would. Without this the token would carry no
-  // authorization at all, and `enforcePermissionRequirement` would wave every
-  // requirement through for want of a subject.
+  // `canonicalUserIdOf` rather than a local kind check: an access token acts as
+  // its owner, so it has to load that owner's authorization. Resolving the
+  // subject in one place is what keeps a new principal kind from silently
+  // skipping the suspension and permission steps below.
   const userId = canonicalUserIdOf(ctx.principal);
   if (!userId) return null;
   const requirement = { kind: "active-user" } as const;
@@ -435,13 +435,10 @@ async function finalizeServiceActor(
 }
 
 function authorizationUserId(ctx: RequestContext): string | null {
-  // An access token authorizes as its owner, exactly as `enforceActiveUser`
-  // loaded it. Returning null here would skip the permission check instead.
-  if (isSelfActingPrincipal(ctx.principal)) return ctx.principal.userId;
   if (ctx.principal?.kind === "service") {
     return ctx.principal.actor?.canonicalUserId ?? ctx.authorization?.userId ?? null;
   }
-  return null;
+  return canonicalUserIdOf(ctx.principal);
 }
 
 function actorlessGrantMatches(
@@ -752,9 +749,9 @@ export async function admitRoute(input: {
         if (ctx.principal.kind === "access-token") {
           // Deliberately not awaited: the credential's own request must not
           // wait on this bookkeeping write. Submitted here, not inside
-          // `authenticate()`, because core authentication depends only on
-          // the narrow auth port — `executionCtx` belongs to the full
-          // admission context.
+          // `authenticate()`, because core authentication depends only on the
+          // narrow auth port — `executionCtx` belongs to the full admission
+          // context.
           const accessTokenPrincipal = ctx.principal;
           ctx.executionCtx.submit(
             () =>
