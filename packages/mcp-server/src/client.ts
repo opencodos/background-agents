@@ -10,6 +10,9 @@
  * and manual automation trigger — because the control plane refuses an
  * access-token principal every other mutating method whatever this client
  * sends.
+ *
+ * The token is a bearer credential on every request, so the base URL has to be
+ * `https:` — or a loopback host, where nothing leaves the machine.
  */
 
 /** Longest control-plane response this client will buffer. */
@@ -33,13 +36,44 @@ export interface ControlPlaneClientConfig {
   timeoutMs?: number;
 }
 
+/**
+ * Hosts for which plain `http:` is accepted. The access token travels in an
+ * `Authorization` header on every request, so cleartext is only ever safe
+ * when the request cannot leave the machine — which is exactly the local
+ * development case that would otherwise have no way to run this server.
+ */
+const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+
+/**
+ * Resolve the configured base URL, refusing one that would transmit the token
+ * in cleartext. Checked before it is stored rather than at each `fetch`, so a
+ * misconfigured server fails at startup instead of leaking on its first call.
+ */
+function requireSecureBaseUrl(value: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new ControlPlaneError(`Control plane URL is not a valid URL: ${value}`, null);
+  }
+  const secure =
+    url.protocol === "https:" || (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname));
+  if (!secure) {
+    throw new ControlPlaneError(
+      `Control plane URL must use https (plain http only for a loopback host): ${value}`,
+      null
+    );
+  }
+  return value.replace(/\/+$/, "");
+}
+
 export class ControlPlaneClient {
   private readonly baseUrl: string;
   private readonly token: string;
   private readonly timeoutMs: number;
 
   constructor(config: ControlPlaneClientConfig) {
-    this.baseUrl = config.baseUrl.replace(/\/+$/, "");
+    this.baseUrl = requireSecureBaseUrl(config.baseUrl);
     this.token = config.token;
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   }

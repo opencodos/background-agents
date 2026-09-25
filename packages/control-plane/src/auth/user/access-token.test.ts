@@ -24,15 +24,21 @@ describe("readAccessTokenHeader", () => {
     expect(readAccessTokenHeader(headers(`Bearer ${VALID}`))).toBe(VALID);
   });
 
+  it("accepts case-insensitive Bearer schemes and multiple separator spaces", () => {
+    expect(readAccessTokenHeader(headers(`bearer ${VALID}`))).toBe(VALID);
+    expect(readAccessTokenHeader(headers(`BEARER   ${VALID}`))).toBe(VALID);
+  });
+
   it("ignores an absent or non-Bearer header", () => {
     expect(readAccessTokenHeader(headers())).toBeNull();
     expect(readAccessTokenHeader(headers(`Basic ${VALID}`))).toBeNull();
   });
 
   it("ignores a bearer credential that is not one of ours", () => {
-    // Sandbox tokens arrive on this same header (router.ts). Rejecting them on
-    // shape, before any lookup, is what lets them fall through to sandbox auth
-    // instead of being consumed here as a failed access token.
+    // Sandbox tokens arrive on this same header (see `routing/route-admission`).
+    // Rejecting them on shape, before any lookup, is what lets them fall
+    // through to sandbox auth instead of being consumed here as a failed
+    // access token.
     expect(readAccessTokenHeader(headers("Bearer deadbeefcafe"))).toBeNull();
     expect(readAccessTokenHeader(headers(`Bearer ${"a".repeat(64)}`))).toBeNull();
   });

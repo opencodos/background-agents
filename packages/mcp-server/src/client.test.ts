@@ -159,4 +159,26 @@ describe("ControlPlaneClient", () => {
 
     expect(fetchMock.mock.calls[0][0]).toBe(`${BASE_URL}/sessions`);
   });
+
+  it("refuses a plain-http control plane rather than sending the token in cleartext", () => {
+    const insecure = { baseUrl: "http://control-plane.example.com", token: TOKEN };
+    expect(() => new ControlPlaneClient(insecure)).toThrow(ControlPlaneError);
+    // Refused before construction completes, so no request is ever built.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["http://localhost:8787", "http://127.0.0.1:8787", "http://[::1]:8787"])(
+    "accepts plain http for a loopback control plane (%s)",
+    async (baseUrl) => {
+      fetchMock.mockResolvedValue(jsonResponse({}));
+      await new ControlPlaneClient({ baseUrl, token: TOKEN }).get("/sessions");
+
+      expect(fetchMock.mock.calls[0][0]).toBe(`${baseUrl}/sessions`);
+    }
+  );
+
+  it("refuses a base URL that is not a URL at all", () => {
+    const malformed = { baseUrl: "control-plane.example.com", token: TOKEN };
+    expect(() => new ControlPlaneClient(malformed)).toThrow(/not a valid URL/);
+  });
 });

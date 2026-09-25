@@ -58,11 +58,9 @@ async function createToken(
     expiresAt: expiresInDays === undefined ? null : Date.now() + expiresInDays * MS_PER_DAY,
   });
 
-  // The only response that carries the plaintext token, so it must not be
-  // retained by a browser or any intermediary.
-  const response = json(created, 201);
-  response.headers.set("Cache-Control", "private, no-store");
-  return response;
+  // The only response that carries the plaintext token. The route policy puts
+  // `private, no-store` on every response here, so no cache retains it.
+  return json(created, 201);
 }
 
 async function revokeToken(
@@ -79,20 +77,20 @@ async function revokeToken(
 
 export const accessTokenRoutes = new Hono<ControlPlaneHonoEnv>();
 
-accessTokenRoutes.get(
-  "/access-tokens",
-  admit({ ...SCM_AGNOSTIC_HUMAN_USER_ROUTE, authorization: ACTIVE_SELF }),
-  (c) => dispatch(c, listTokens)
-);
+/**
+ * One policy for all three routes. `private, no-store` is not incidental: the
+ * creation response carries the plaintext token, and a listing names a user's
+ * credentials and when each was last used. Neither belongs in a shared cache
+ * or a browser's disk cache.
+ */
+const TOKEN_ROUTE = admit({
+  ...SCM_AGNOSTIC_HUMAN_USER_ROUTE,
+  authorization: ACTIVE_SELF,
+  cacheControl: "private, no-store",
+});
 
-accessTokenRoutes.post(
-  "/access-tokens",
-  admit({ ...SCM_AGNOSTIC_HUMAN_USER_ROUTE, authorization: ACTIVE_SELF }),
-  (c) => dispatch(c, createToken)
-);
+accessTokenRoutes.get("/access-tokens", TOKEN_ROUTE, (c) => dispatch(c, listTokens));
 
-accessTokenRoutes.delete(
-  "/access-tokens/:id",
-  admit({ ...SCM_AGNOSTIC_HUMAN_USER_ROUTE, authorization: ACTIVE_SELF }),
-  (c) => dispatch(c, revokeToken)
-);
+accessTokenRoutes.post("/access-tokens", TOKEN_ROUTE, (c) => dispatch(c, createToken));
+
+accessTokenRoutes.delete("/access-tokens/:id", TOKEN_ROUTE, (c) => dispatch(c, revokeToken));

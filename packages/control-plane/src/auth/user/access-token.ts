@@ -11,7 +11,7 @@ import { isAccessTokenFormat } from "@open-inspect/shared/types/access-tokens";
 import { PersonalAccessTokenStore } from "../../db/personal-access-tokens";
 import type { SqlDatabase } from "../../db/sql-database";
 
-const BEARER_SCHEME = /^Bearer (.+)$/;
+const BEARER_SCHEME = /^Bearer +(.+)$/i;
 
 /**
  * Extracts a token from an Authorization header.

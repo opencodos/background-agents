@@ -2,26 +2,7 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { getServerAuthSession } from "@/lib/server-auth-session";
 import { controlPlaneUserFetch } from "@/lib/control-plane";
-
-/**
- * Relay a control-plane response without assuming it carries JSON.
- *
- * Parsing before checking would turn an empty or non-JSON upstream reply — a
- * transport-level 401, a gateway error — into a 500 here, losing the status
- * the caller needs to act on.
- */
-async function forward(response: Response): Promise<NextResponse> {
-  const text = await response.text();
-  if (!text) return new NextResponse(null, { status: response.status });
-  try {
-    return NextResponse.json(JSON.parse(text), { status: response.status });
-  } catch {
-    return NextResponse.json(
-      { error: "Unexpected response from control plane" },
-      { status: response.status >= 400 ? response.status : 502 }
-    );
-  }
-}
+import { relayJsonResponse } from "@/lib/control-plane-json-proxy";
 
 export async function GET() {
   const session = await getServerAuthSession();
@@ -30,7 +11,10 @@ export async function GET() {
   }
 
   try {
-    return await forward(await controlPlaneUserFetch("/access-tokens"));
+    // The shared relay marks every response `private, no-store`. A listing
+    // names a user's credentials and when each was last used, so that is
+    // required here rather than merely tidy.
+    return await relayJsonResponse(await controlPlaneUserFetch("/access-tokens"));
   } catch (error) {
     console.error("Failed to fetch access tokens:", error);
     return NextResponse.json({ error: "Failed to fetch access tokens" }, { status: 500 });
@@ -51,15 +35,14 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const response = await controlPlaneUserFetch("/access-tokens", {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
-    // Carries the plaintext token. Relayed without logging, and marked
-    // uncacheable so no intermediary or browser cache retains it.
-    const relayed = await forward(response);
-    relayed.headers.set("Cache-Control", "private, no-store");
-    return relayed;
+    // Carries the plaintext token: relayed without logging, and uncacheable
+    // by the same relay, so nothing between here and the browser retains it.
+    return await relayJsonResponse(
+      await controlPlaneUserFetch("/access-tokens", {
+        method: "POST",
+        body: JSON.stringify(body),
+      })
+    );
   } catch (error) {
     console.error("Failed to create access token:", error);
     return NextResponse.json({ error: "Failed to create access token" }, { status: 500 });

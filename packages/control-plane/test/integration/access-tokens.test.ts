@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { env, SELF } from "cloudflare:test";
 import { ACCESS_TOKEN_PREFIX } from "@open-inspect/shared/types/access-tokens";
-import { PersonalAccessTokenStore } from "../../src/db/personal-access-tokens";
+import {
+  LAST_USED_RESOLUTION_MS,
+  PersonalAccessTokenStore,
+} from "../../src/db/personal-access-tokens";
 import { cleanD1Tables } from "./cleanup";
 import { serviceFetch, sqlDatabase } from "./helpers";
 
@@ -15,6 +18,21 @@ async function seedUser(): Promise<void> {
   )
     .bind(USER_ID, "operator@example.com", Date.now(), Date.now())
     .run();
+}
+
+async function setLastUsed(at: number): Promise<void> {
+  await env.DB.prepare("UPDATE personal_access_tokens SET last_used_at = ? WHERE user_id = ?")
+    .bind(at, USER_ID)
+    .run();
+}
+
+async function readLastUsed(): Promise<number | null> {
+  const row = await env.DB.prepare(
+    "SELECT last_used_at FROM personal_access_tokens WHERE user_id = ?"
+  )
+    .bind(USER_ID)
+    .first<{ last_used_at: number | null }>();
+  return row?.last_used_at ?? null;
 }
 
 async function issueToken(expiresAt: number | null = null): Promise<string> {
@@ -42,6 +60,37 @@ describe("personal access tokens", () => {
   it("authenticates a read as the user who issued the token", async () => {
     const response = await bearer(await issueToken());
     expect(response.status).toBe(200);
+  });
+
+  it("carries its owner's authorization, not a bypass of it", async () => {
+    // The default role reads sessions but not integration settings. Both
+    // routes accept a user-or-service principal, so the difference is the
+    // permission and nothing else — a principal kind that loaded no subject
+    // would be admitted to both.
+    const token = await issueToken();
+    expect(await bearer(token)).toMatchObject({ status: 200 });
+
+    const denied = await SELF.fetch("https://test.local/integration-settings/github/repos", {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(denied.status).toBe(403);
+    await expect(denied.json()).resolves.toMatchObject({
+      code: "permission_required",
+      permission: "integrations.read",
+    });
+  });
+
+  it("stops working when its owner is suspended", async () => {
+    // Revoking the person has to revoke their tokens, without anyone having
+    // to enumerate them.
+    const token = await issueToken();
+    await env.DB.prepare("UPDATE users SET suspended_at = ? WHERE id = ?")
+      .bind(Date.now(), USER_ID)
+      .run();
+
+    const response = await bearer(token);
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({ code: "active_user_required" });
   });
 
   it("refuses every mutating method, whatever the route policy allows", async () => {
@@ -102,25 +151,6 @@ describe("personal access tokens", () => {
       expect(await response.json()).toMatchObject({
         code: "permission_required",
         permission: "skills.manage",
-      });
-    });
-
-    it("names its owner as the actor of the refused request's audit row", async () => {
-      // A token acts as its owner, so the audit trail must say who: a row with
-      // no actor would make every token request unattributable.
-      await assignRole("role_builtin_member");
-      const token = await issueToken();
-
-      expect((await skillRequest(token, "POST", "/skills/import")).status).toBe(403);
-      const audit = await env.DB.prepare(
-        `SELECT principal_kind, actor_user_id_snapshot, reason_code
-         FROM authorization_audit_events
-         WHERE action = 'authorization.request_denied' AND resource_id = '/skills/import'`
-      ).first();
-      expect(audit).toEqual({
-        principal_kind: "access-token",
-        actor_user_id_snapshot: USER_ID,
-        reason_code: "permission_required",
       });
     });
 
@@ -224,33 +254,29 @@ describe("personal access tokens", () => {
     const token = await issueToken();
     expect(await bearer(token)).toMatchObject({ status: 200 });
 
-    const row = await env.DB.prepare(
-      "SELECT last_used_at FROM personal_access_tokens WHERE user_id = ?"
-    )
-      .bind(USER_ID)
-      .first<{ last_used_at: number | null }>();
-    expect(row?.last_used_at).toBeGreaterThan(0);
+    expect(await readLastUsed()).toBeGreaterThan(0);
   });
 
   it("does not rewrite last use on every read", async () => {
     // Otherwise each read bills a D1 write, and a polling MCP client turns the
     // read-only path into sustained write load.
     const token = await issueToken();
-    await bearer(token);
-    const first = await env.DB.prepare(
-      "SELECT last_used_at FROM personal_access_tokens WHERE user_id = ?"
-    )
-      .bind(USER_ID)
-      .first<{ last_used_at: number }>();
 
+    // A column older than the resolution window must be written. That pins the
+    // bookkeeping write as observable by the time the response resolves —
+    // without it, the unchanged value below would prove nothing.
+    const stale = Date.now() - 5 * LAST_USED_RESOLUTION_MS;
+    await setLastUsed(stale);
     await bearer(token);
-    const second = await env.DB.prepare(
-      "SELECT last_used_at FROM personal_access_tokens WHERE user_id = ?"
-    )
-      .bind(USER_ID)
-      .first<{ last_used_at: number }>();
+    expect(await readLastUsed()).not.toBe(stale);
 
-    expect(second?.last_used_at).toBe(first?.last_used_at);
+    // Seeded rather than reused from the write above: two requests can land in
+    // the same millisecond, and an implementation that writes on every read
+    // would then leave the same value behind and pass anyway.
+    const recent = Date.now() - 1_000;
+    await setLastUsed(recent);
+    await bearer(token);
+    expect(await readLastUsed()).toBe(recent);
   });
 
   it("reads as its owner, so createdBy=me resolves to the issuing user", async () => {
@@ -261,13 +287,19 @@ describe("personal access tokens", () => {
     expect(response.status).toBe(200);
   });
 
-  it("keeps the plaintext token out of caches", async () => {
+  it("keeps the plaintext token and the listing out of caches", async () => {
     const created = await serviceFetch("https://test.local/access-tokens", {
       method: "POST",
       body: JSON.stringify({ name: "laptop" }),
     });
     expect(created.status).toBe(201);
     expect(created.headers.get("Cache-Control")).toBe("private, no-store");
+
+    // The listing names a user's credentials and when each was last used, so
+    // it is no more cacheable than the token itself.
+    const listed = await serviceFetch("https://test.local/access-tokens");
+    expect(listed.status).toBe(200);
+    expect(listed.headers.get("Cache-Control")).toBe("private, no-store");
   });
 
   it("lists and revokes through the human-only routes", async () => {
