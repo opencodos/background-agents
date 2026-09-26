@@ -160,14 +160,17 @@ All events are processed asynchronously via `executionCtx.waitUntil()`. The webh
    opened, a push to its own branch) bypasses both caller gates: an allowlist never names the bot,
    and the collaborator-permission lookup 404s for a `[bot]` login.
 3. On any action but `opened`, read the PR's reviews. If a reviewer's latest verdict is a standing
-   approval, stand down and skip: claim a generation (so no running review can take the submission
+   approval, stand down and skip. First re-read the PR as step 5 does; when the head, state, or
+   draft flag no longer match the event, do nothing and skip (a delayed event must not act on a
+   newer head's review). Otherwise claim a generation (so no running review can take the submission
    lease again), post `success` ("Skipped — PR already approved") on the head if its status is
    pending or absent, then sweep, naming the repository, so the review of a replaced head is closed
    out under the lease. The skip is the one terminal status written without the lease; a same-head
-   writer that already held the lease when the claim landed can still overwrite it. If the head's
-   status cannot be read or the skip cannot be written, it does not sweep and reviews as normal
-   instead, so the head is never left without a status. An unreadable approval state likewise fails
-   open and reviews as normal.
+   writer that already held the lease when the claim landed can still overwrite it. If the claim
+   fails, or the head's status cannot be read or the skip written, it does not sweep and reviews as
+   normal instead, releasing any claim it took first, so the head is never left without a status and
+   the previous review stays eligible to publish if the fallback cannot start. An unreadable
+   approval state likewise fails open and reviews as normal.
 4. Post an eyes reaction on the PR.
 5. Re-read the PR from GitHub and skip when the head SHA, state, or draft flag no longer match the
    webhook payload. This runs as the last step before the claim, so the narrowest possible window

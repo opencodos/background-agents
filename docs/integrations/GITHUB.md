@@ -59,11 +59,12 @@ Auto-review is skipped when:
   exempt; see below)
 - Auto-review is disabled globally or for that repository
 - The event is a follow-up (push, reopen, or ready for review) on a PR that already carries a
-  standing approval. The bot cancels any review still running for the PR and, unless the head
+  standing approval, and the event's head is still the PR's open, non-draft head (an event for an
+  older head is ignored). The bot cancels any review still running for the PR and, unless the head
   already has a terminal status, posts a `success` status, "Skipped — PR already approved", on the
-  new head so a required check does not wait on a review that was never started. If the head's
-  status cannot be read or the skip cannot be posted, the bot reviews the PR instead. Request a
-  review or mention the bot to review it anyway.
+  new head so a required check does not wait on a review that was never started. If the bot cannot
+  fence running reviews, read the head's status, or post the skip, it reviews the PR instead.
+  Request a review or mention the bot to review it anyway.
 
 A PR opened, or pushed to, by the GitHub App itself is the App acting rather than a third party
 asking it to act, so it bypasses both caller gates and is reviewed.
@@ -321,9 +322,11 @@ list.
 Auto-review runs for non-draft PRs when opened, reopened, synchronized by a push, or marked ready.
 It is skipped for draft PRs, disabled repositories, event senders who are not allowed to trigger the
 bot (the GitHub App's own PRs and pushes bypass that gate), and follow-up events on PRs that already
-carry a standing approval (the head then shows "Skipped — PR already approved"). Check the latest
-event's sender, the PR's approvals, and the configured repository scope when an update does not
-start a review.
+carry a standing approval. On such a head the `open-inspect` status shows "Skipped — PR already
+approved" when it was pending or absent; a terminal status already there (for example a finished
+review) is left unchanged, and when the status could not be read or written the bot reviewed the PR
+instead. Check the latest event's sender, the PR's approvals, and the configured repository scope
+when an update does not start a review.
 
 ### A mention did not start a session
 

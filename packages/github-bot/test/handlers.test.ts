@@ -895,12 +895,20 @@ describe("handlePullRequestReviewTrigger", () => {
     expect(vi.mocked(postCommitStatus).mock.calls.at(-1)?.[4]).toMatchObject({ state: "pending" });
   });
 
-  it("still skips an approved PR when the claim fails, without sweeping", async () => {
-    // Nothing is going to run either way; a claim failure must degrade to a plain skip rather than
-    // surface as a webhook error and earn a redelivery.
+  it("reviews as normal, writing no skip, when the stand-down's claim fails", async () => {
+    // Without the claim nothing fences an in-flight same-head review out of the lease, so an
+    // unleased skip could be overwritten by it. The normal review path claims for itself.
     vi.mocked(getPullRequestApproval).mockResolvedValue({ ok: true, approved: true });
     const env = createMockEnv();
-    getControlPlaneFetch(env).mockResolvedValue(new Response("boom", { status: 500 }));
+    const cpFetch = getControlPlaneFetch(env);
+    const fallback = cpFetch.getMockImplementation()!;
+    let claims = 0;
+    cpFetch.mockImplementation((url: string, init: unknown) => {
+      if (url === "https://internal/internal/github-reviews/claim" && claims++ === 0) {
+        return Promise.resolve(new Response("boom", { status: 500 }));
+      }
+      return fallback(url, init);
+    });
     const log = createMockLogger();
     const payload: PullRequestReviewTriggerPayload = {
       ...pullRequestReviewTriggerPayload,
@@ -909,10 +917,99 @@ describe("handlePullRequestReviewTrigger", () => {
 
     const result = await handlePullRequestReviewTrigger(env, log, payload, "trace-0");
 
-    expect(result).toEqual({ outcome: "skipped", skip_reason: "pr_approved" });
+    expect(result).toMatchObject({ outcome: "processed", handler_action: "auto_review" });
     expect(
-      getControlPlaneFetch(env).mock.calls.some(([url]) => /github-reviews\/sweep$/.test(url))
-    ).toBe(false);
+      vi.mocked(postCommitStatus).mock.calls.map(([, , , , status]) => status.description)
+    ).toEqual(["Review in progress"]);
+  });
+
+  it.each([
+    ["the head's status cannot be read", "read"],
+    ["the skip cannot be written", "write"],
+  ])("releases the stand-down's unused claim when %s", async (_name, failure) => {
+    // Its claim superseded the previous review; if the fallback review then cannot start, that
+    // review must still be able to publish.
+    vi.mocked(getPullRequestApproval).mockResolvedValue({ ok: true, approved: true });
+    if (failure === "read") {
+      vi.mocked(getReviewStatusState).mockResolvedValue({
+        ok: false,
+        error: "GitHub API returned 502",
+      });
+    } else {
+      vi.mocked(postCommitStatus)
+        .mockResolvedValueOnce({ ok: false, status: 502, error: "GitHub API returned 502" })
+        .mockResolvedValue({ ok: true });
+    }
+    const env = createMockEnv();
+    const log = createMockLogger();
+    const payload: PullRequestReviewTriggerPayload = {
+      ...pullRequestReviewTriggerPayload,
+      action: "synchronize",
+    };
+
+    await handlePullRequestReviewTrigger(env, log, payload, "trace-0");
+
+    const cpFetch = getControlPlaneFetch(env);
+    const urls = cpFetch.mock.calls.map(([url]: [string]) => url);
+    const release = urls.indexOf("https://internal/internal/github-reviews/release-claim");
+    expect(release).toBeGreaterThan(-1);
+    expect(JSON.parse(cpFetch.mock.calls[release][1].body)).toEqual({
+      repoId: 501,
+      prNumber: 42,
+      generation: 1,
+    });
+    // Released before the fallback review starts.
+    expect(release).toBeLessThan(urls.indexOf("https://internal/sessions"));
+  });
+
+  it("does nothing for an approved event whose head is no longer the PR's head", async () => {
+    // A delayed `synchronize` for an old head must not claim past, sweep, or mark the review of
+    // the head the PR is at now.
+    vi.mocked(getPullRequestApproval).mockResolvedValue({ ok: true, approved: true });
+    vi.mocked(getPullRequestSnapshot).mockResolvedValue({
+      ok: true,
+      headSha: "newer456",
+      state: "open",
+      draft: false,
+    });
+    const env = createMockEnv();
+    const log = createMockLogger();
+    const payload: PullRequestReviewTriggerPayload = {
+      ...pullRequestReviewTriggerPayload,
+      action: "synchronize",
+    };
+
+    const result = await handlePullRequestReviewTrigger(env, log, payload, "trace-0");
+
+    expect(result).toEqual({ outcome: "skipped", skip_reason: "stale_head_sha" });
+    expect(getControlPlaneFetch(env).mock.calls.some(([url]) => /github-reviews\//.test(url))).toBe(
+      false
+    );
+    expect(postCommitStatus).not.toHaveBeenCalled();
+  });
+
+  it("does nothing for an approved event once the PR has closed", async () => {
+    vi.mocked(getPullRequestApproval).mockResolvedValue({ ok: true, approved: true });
+    vi.mocked(getPullRequestSnapshot).mockResolvedValue({
+      ok: true,
+      headSha: "abc123",
+      state: "closed",
+      draft: false,
+    });
+    const env = createMockEnv();
+    const log = createMockLogger();
+    const payload: PullRequestReviewTriggerPayload = {
+      ...pullRequestReviewTriggerPayload,
+      action: "reopened",
+    };
+
+    const result = await handlePullRequestReviewTrigger(env, log, payload, "trace-0");
+
+    expect(result).toEqual({ outcome: "skipped", skip_reason: "stale_head_sha" });
+    expect(getControlPlaneFetch(env).mock.calls.some(([url]) => /github-reviews\//.test(url))).toBe(
+      false
+    );
+    expect(postCommitStatus).not.toHaveBeenCalled();
   });
 
   it("reviews as normal when the approval lookup fails", async () => {

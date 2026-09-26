@@ -262,18 +262,24 @@ async function sendReviewPrompt(
 
 /**
  * Stand down an auto-review on a PR that already carries an approval, leaving nothing behind that
- * outlives the decision. Returns whether the head's status is established — the skip written, or a
- * terminal status already there. Only then is the stand-down complete: when the status cannot be
- * read or the skip cannot be written, it returns false before sweeping, and the caller reviews the
- * PR as normal instead. A skip without its status would leave the head with no `open-inspect`
- * status at all (a required check that never appears), or a swept same-head review's close-out
- * publishing an error — and nothing would ever retry it.
+ * outlives the decision. The outcome tells the caller what to do next:
+ *
+ * - `stood_down`: the head's status is established — the skip written, or a terminal status
+ *   already there — and older reviews are fenced and swept. Skip the review.
+ * - `stale`: the live PR no longer matches the event (another head, closed, or back to draft).
+ *   Nothing was claimed, swept, or written: a delayed event must not act on a newer head's review.
+ * - `review`: the skip could not be established safely, so review the PR as normal instead. A
+ *   stand-down without its status would leave the head with no `open-inspect` status at all (a
+ *   required check that never appears), or a swept same-head review's close-out publishing an
+ *   error — and nothing would ever retry it. The claim is released first when it was taken, so
+ *   the previous review can still publish if the fallback review cannot start.
  *
  * The new head's "skipped" success is a terminal status written without the PR's submission lease
  * — there is no session to hold it — so the ownership rule is kept by ordering and a read instead:
  *
  * 1. Claim a generation first. Every older review is now superseded: none can take the lease from
- *    here on (its acquire answers 409), so none can start a status write after this point.
+ *    here on (its acquire answers 409), so none can start a status write after this point. With
+ *    no claim nothing is fenced, so no skip is written.
  * 2. Write the skip only where the head's status is pending or absent. A review of this head that
  *    already published, or was already closed out, keeps its own terminal status.
  * 3. Sweep last, naming the repository. A review whose head this push replaced is closed out under
@@ -295,8 +301,29 @@ async function standDownApprovedReview(
   token: string,
   userAgent: string,
   meta: Record<string, unknown>
-): Promise<boolean> {
-  let generation: number | null = null;
+): Promise<"stood_down" | "stale" | "review"> {
+  // The same freshness check the review path makes before its claim. An unreadable PR is left to
+  // that path, which makes the check again and skips on its own terms.
+  const freshness = await getPullRequestSnapshot(
+    token,
+    target.owner,
+    target.repo,
+    params.prNumber,
+    userAgent
+  );
+  if (!freshness.ok) return "review";
+  if (freshness.headSha !== target.headSha || freshness.state !== "open" || freshness.draft) {
+    log.debug("handler.stale_head_sha", {
+      ...meta,
+      current_head_sha: freshness.headSha,
+      expected_head_sha: target.headSha,
+      state: freshness.state,
+      draft: freshness.draft,
+    });
+    return "stale";
+  }
+
+  let generation: number;
   try {
     generation = await claimReviewGeneration(env, traceId, params);
   } catch (error) {
@@ -304,8 +331,8 @@ async function standDownApprovedReview(
       ...meta,
       error: error instanceof Error ? error : new Error(String(error)),
     });
+    return "review";
   }
-
   const status = await getReviewStatusState(
     token,
     target.owner,
@@ -316,7 +343,8 @@ async function standDownApprovedReview(
   if (!status.ok) {
     // Not evidence the status is still pending: writing could replace a verdict.
     log.warn("handler.approved_skip_status_unreadable", { ...meta, error: status.error });
-    return false;
+    await releaseReviewGeneration(env, log, traceId, { ...params, generation });
+    return "review";
   } else if (status.state === null || status.state === "pending") {
     const result = await postCommitStatus(
       token,
@@ -332,21 +360,20 @@ async function standDownApprovedReview(
     );
     if (!result.ok) {
       log.warn("handler.approved_skip_status_failed", { ...meta, error: result.error });
-      return false;
+      await releaseReviewGeneration(env, log, traceId, { ...params, generation });
+      return "review";
     }
   } else {
     log.info("handler.approved_skip_status_kept", { ...meta, state: status.state });
   }
 
-  if (generation !== null) {
-    await sweepStaleReviews(env, log, traceId, {
-      ...params,
-      generation,
-      owner: target.owner,
-      repo: target.repo,
-    });
-  }
-  return true;
+  await sweepStaleReviews(env, log, traceId, {
+    ...params,
+    generation,
+    owner: target.owner,
+    repo: target.repo,
+  });
+  return "stood_down";
 }
 
 type CallerGatingResult =
@@ -664,7 +691,7 @@ export async function handlePullRequestReviewTrigger(
       // review outright is a worse failure than one redundant run.
       log.warn("handler.approval_check_failed", { ...meta, error: approval.error });
     } else if (approval.approved) {
-      const stoodDown = await standDownApprovedReview(
+      const standDown = await standDownApprovedReview(
         env,
         log,
         traceId,
@@ -674,12 +701,13 @@ export async function handlePullRequestReviewTrigger(
         userAgent,
         meta
       );
-      if (stoodDown) {
+      if (standDown === "stale") return { outcome: "skipped", skip_reason: "stale_head_sha" };
+      if (standDown === "stood_down") {
         log.info("handler.pr_already_approved", meta);
         return { outcome: "skipped", skip_reason: "pr_approved" };
       }
       // The skip could not be established; a review always leaves a status behind. Its own
-      // claim supersedes the stand-down's, and its sweep retires every older review.
+      // claim supersedes any the stand-down left, and its sweep retires every older review.
       log.info("handler.pr_approved_reviewing_anyway", meta);
     }
   }
