@@ -16,11 +16,19 @@ function routeFor(method: string, path: string) {
 
 describe("route policy table", () => {
   it("publishes the complete canonical route catalog", () => {
-    expect(routes).toHaveLength(191);
+    expect(routes).toHaveLength(192);
 
     const paths = routes.map((route) => route.path);
-    expect(new Set(paths).size).toBe(146);
-    expect(new Set(routes.map((route) => `${route.method}:${route.path}`)).size).toBe(191);
+    expect(new Set(paths).size).toBe(147);
+    expect(new Set(routes.map((route) => `${route.method}:${route.path}`)).size).toBe(192);
+  });
+
+  it("gates run analytics with analytics.read", () => {
+    const route = routeFor("GET", "/analytics/runs");
+    expect(route?.authorization).toMatchObject({
+      kind: "active-user",
+      allOf: [{ permission: "analytics.read" }],
+    });
   });
 
   it("declares every path in the literal-or-parameter grammar", () => {
