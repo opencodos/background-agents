@@ -206,6 +206,7 @@ describe("postCommitStatus", () => {
           context: "open-inspect",
           description: "Review in progress",
         }),
+        signal: expect.any(AbortSignal),
       }
     );
   });
@@ -231,7 +232,11 @@ describe("postCommitStatus", () => {
   });
 
   it("returns GitHub's status code when the status is rejected", async () => {
-    vi.mocked(globalThis.fetch).mockResolvedValue(new Response("Forbidden", { status: 403 }));
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(JSON.stringify({ message: "Resource not accessible by integration" }), {
+        status: 403,
+      })
+    );
 
     const result = await postCommitStatus("test-token", "acme", "widgets", "abc123", {
       state: "pending",
@@ -670,6 +675,30 @@ describe("getReviewStatusState", () => {
       ok: true,
       state: null,
     });
+  });
+
+  it("reads the review context from a later page when the commit has many contexts", async () => {
+    // F5: the combined status serves at most 100 contexts per page.
+    const otherContexts = Array.from({ length: 100 }, (_, index) => ({
+      context: `ci/check-${index}`,
+      state: "success",
+    }));
+    vi.mocked(globalThis.fetch)
+      .mockResolvedValueOnce(Response.json({ total_count: 101, statuses: otherContexts }))
+      .mockResolvedValueOnce(
+        Response.json({
+          total_count: 101,
+          statuses: [{ context: "open-inspect", state: "success" }],
+        })
+      );
+
+    await expect(getReviewStatusState("test-token", "acme", "widgets", "abc123")).resolves.toEqual({
+      ok: true,
+      state: "success",
+    });
+    expect(vi.mocked(globalThis.fetch).mock.calls[1][0]).toBe(
+      "https://api.github.com/repos/acme/widgets/commits/abc123/status?per_page=100&page=2"
+    );
   });
 
   it("reports a non-2xx response as unreadable", async () => {

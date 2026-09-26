@@ -178,6 +178,10 @@ variable "github_app_installation_id" {
   type        = string
 }
 
+# =============================================================================
+# GitHub Bot Configuration
+# =============================================================================
+
 variable "github_reviewer_app_id" {
   description = "App ID of the second GitHub App whose token submits code reviews. Empty disables it."
   type        = string
@@ -196,10 +200,6 @@ variable "github_reviewer_app_installation_id" {
   type        = string
   default     = ""
 }
-
-# =============================================================================
-# GitHub Bot Configuration
-# =============================================================================
 
 variable "enable_github_bot" {
   description = "Enable the GitHub bot worker. Requires github_webhook_secret and github_bot_username."
@@ -227,7 +227,7 @@ variable "github_bot_username" {
 
 variable "github_reviewer_username" {
   description = <<-EOT
-    Login of the reviewer GitHub App (e.g., 'codos-reviewer[bot]'). Set together with the
+    Login of the reviewer GitHub App (e.g., 'my-reviewer[bot]'). Set together with the
     three github_reviewer_app_* values: the login decides whether a review may approve, the
     credentials mint the token that submits it, and either one alone breaks every review.
   EOT
@@ -237,15 +237,15 @@ variable "github_reviewer_username" {
   validation {
     condition = (
       (
-        length(var.github_reviewer_username) > 0 &&
-        length(var.github_reviewer_app_id) > 0 &&
-        length(var.github_reviewer_app_private_key) > 0 &&
-        length(var.github_reviewer_app_installation_id) > 0
+        length(trimspace(var.github_reviewer_username)) > 0 &&
+        length(trimspace(var.github_reviewer_app_id)) > 0 &&
+        length(trimspace(var.github_reviewer_app_private_key)) > 0 &&
+        length(trimspace(var.github_reviewer_app_installation_id)) > 0
         ) || (
-        length(var.github_reviewer_username) == 0 &&
-        length(var.github_reviewer_app_id) == 0 &&
-        length(var.github_reviewer_app_private_key) == 0 &&
-        length(var.github_reviewer_app_installation_id) == 0
+        length(trimspace(var.github_reviewer_username)) == 0 &&
+        length(trimspace(var.github_reviewer_app_id)) == 0 &&
+        length(trimspace(var.github_reviewer_app_private_key)) == 0 &&
+        length(trimspace(var.github_reviewer_app_installation_id)) == 0
       )
     )
     error_message = "Set github_reviewer_username and all three github_reviewer_app_* values together, or leave all four empty."

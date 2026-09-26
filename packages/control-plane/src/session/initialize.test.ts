@@ -396,6 +396,91 @@ describe("initializeSession", () => {
       expect(stubFetchMock).not.toHaveBeenCalled();
     });
 
+    it("deletes the review fence when the D1 session insert fails", async () => {
+      const { db, deletes } = createReviewDb({ latestGeneration: 1 });
+      createMock.mockRejectedValue(new Error("D1 unavailable"));
+
+      await expect(initializeSession(createEnv(), reviewInput, reviewCtx(db))).rejects.toThrow(
+        "D1 unavailable"
+      );
+
+      expect(deletes).toEqual([[7, 9, 1]]);
+      expect(stubFetchMock).not.toHaveBeenCalled();
+    });
+
+    it("deletes the review fence when DO init returns a non-ok response", async () => {
+      const { db, deletes } = createReviewDb({ latestGeneration: 1 });
+      stubFetchMock.mockResolvedValue(new Response("unavailable", { status: 503 }));
+
+      await expect(initializeSession(createEnv(), reviewInput, reviewCtx(db))).rejects.toThrow(
+        "Failed to initialize session DO: 503"
+      );
+
+      expect(deletes).toEqual([[7, 9, 1]]);
+      expect(updateStatusMock).toHaveBeenCalledWith("session-123", "failed");
+    });
+
+    /** DO init rejects in transport; the draft-expiry probe answers with `probe`. */
+    function initRejectsThenProbe(probe: () => Promise<Response>) {
+      return vi.fn(async (req: Request) =>
+        req.url.includes("/internal/expire-draft")
+          ? probe()
+          : Promise.reject(new Error("transport"))
+      );
+    }
+
+    it("retains the review fence when DO init throws and the session cannot be confirmed idle", async () => {
+      // The runtime may have committed init and scheduled warming before the transport failed.
+      const { db, deletes } = createReviewDb({ latestGeneration: 1 });
+      stubFetchMock = initRejectsThenProbe(() => Promise.reject(new Error("still down")));
+
+      await expect(initializeSession(createEnv(), reviewInput, reviewCtx(db))).rejects.toThrow(
+        "transport"
+      );
+
+      expect(deletes).toEqual([]);
+      expect(updateStatusMock).toHaveBeenCalledWith("session-123", "failed");
+    });
+
+    it("retains the review fence when DO init throws but the session reports it is not a draft", async () => {
+      const { db, deletes } = createReviewDb({ latestGeneration: 1 });
+      stubFetchMock = initRejectsThenProbe(async () =>
+        Response.json({ outcome: "not_draft", status: "active" })
+      );
+
+      await expect(initializeSession(createEnv(), reviewInput, reviewCtx(db))).rejects.toThrow(
+        "transport"
+      );
+
+      expect(deletes).toEqual([]);
+    });
+
+    it("retains the review fence when DO init throws and no session exists yet", async () => {
+      // F9: an init still in flight can land after a 404, so it proves nothing.
+      const { db, deletes } = createReviewDb({ latestGeneration: 1 });
+      stubFetchMock = initRejectsThenProbe(async () => Response.json({}, { status: 404 }));
+
+      await expect(initializeSession(createEnv(), reviewInput, reviewCtx(db))).rejects.toThrow(
+        "transport"
+      );
+
+      expect(deletes).toEqual([]);
+    });
+
+    it("deletes the review fence when DO init throws and its never-prompted session was archived", async () => {
+      const { db, deletes } = createReviewDb({ latestGeneration: 1 });
+      stubFetchMock = initRejectsThenProbe(async () =>
+        Response.json({ outcome: "archived", status: "archived" })
+      );
+
+      await expect(initializeSession(createEnv(), reviewInput, reviewCtx(db))).rejects.toThrow(
+        "transport"
+      );
+
+      expect(deletes).toEqual([[7, 9, 1]]);
+      expect(updateStatusMock).toHaveBeenCalledWith("session-123", "failed");
+    });
+
     it("completes when the generation is still the latest after DO init", async () => {
       const { db, deletes } = createReviewDb({ latestGeneration: 1 });
 
@@ -425,6 +510,7 @@ describe("initializeSession", () => {
       );
       expect(cancelCalls).toHaveLength(1);
       expect(deletes).toHaveLength(1);
+      expect(updateStatusMock).toHaveBeenCalledWith("session-123", "failed");
     });
 
     it("retains the fence row when the self-cancel is not confirmed", async () => {
@@ -439,6 +525,7 @@ describe("initializeSession", () => {
         ReviewGenerationSupersededError
       );
       expect(deletes).toEqual([]);
+      expect(updateStatusMock).toHaveBeenCalledWith("session-123", "failed");
     });
   });
 });

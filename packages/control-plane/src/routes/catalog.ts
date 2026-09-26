@@ -16,6 +16,7 @@ import { browserAuthRoutes } from "./browser-auth";
 import { commitSigningRoutes } from "./commit-signing";
 import { environmentSecretsRoutes } from "./environment-secrets";
 import { environmentRoutes } from "./environments";
+import { githubReviewerTokenRoutes } from "./github-reviewer-token";
 import { githubReviewRoutes } from "./github-reviews";
 import { healthRoutes } from "./health";
 import { imageBuildRoutes } from "./image-builds";
@@ -40,7 +41,6 @@ export const catalog: readonly RouteModule[] = [
 
   browserAuthRoutes,
   signInProviderRoutes,
-  accessTokenRoutes,
 
   // Session management, then the agent-initiated Slack notification
   sessionRoutes,
@@ -66,6 +66,9 @@ export const catalog: readonly RouteModule[] = [
   modelProviderAccountRoutes,
   // Delivery of stored provider secrets to sandboxes (Anthropic)
   providerRuntimeCredentialRoutes,
+
+  // Reviewer GitHub App installation token brokered to review sandboxes
+  githubReviewerTokenRoutes,
 
   // Integration settings
   integrationSettingsRoutes,
@@ -99,6 +102,10 @@ export const catalog: readonly RouteModule[] = [
 
   // Workspace roles, members, and current-user authorization
   rbacRoutes,
+
+  // Personal access tokens (human-only credential management; no path
+  // overlap with any other module, so registration order is immaterial here)
+  accessTokenRoutes,
 
   // Webhooks (public routes — auth handled per-route)
   webhookRoutes,

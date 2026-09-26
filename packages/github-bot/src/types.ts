@@ -27,9 +27,9 @@ export interface Env {
   GITHUB_BOT_USERNAME: string;
 
   /**
-   * Login of the separate reviewer App whose token submits reviews (e.g.,
-   * "codos-reviewer[bot]"). Set together with the control plane's
-   * GITHUB_REVIEWER_APP_* secrets, or left unset on both.
+   * Login of the optional reviewer GitHub App (e.g., "my-reviewer[bot]"),
+   * whose installation token submits reviews. Unset means the main App
+   * reviews under its own identity.
    */
   GITHUB_REVIEWER_USERNAME?: string;
 

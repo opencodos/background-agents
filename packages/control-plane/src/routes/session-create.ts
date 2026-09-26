@@ -282,9 +282,9 @@ export async function handleCreateSession(
     vncEnabled,
     sandboxSettings,
     spawnSource,
-    githubReview: body.githubReview,
     managedSkillsManifest,
     providerAuth,
+    githubReview: body.githubReview,
   };
 
   try {

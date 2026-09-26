@@ -29,6 +29,7 @@ import type { Env } from "./types";
 // The job bodies are mocked; the cron constants stay the production values so
 // the Terraform parity check below reads what the Worker really registers.
 vi.mock("./autofix/queue-health", () => ({ checkAutofixQueueHealth: vi.fn(async () => {}) }));
+vi.mock("./routes/github-reviews", () => ({ reapSupersededReviewSessions: vi.fn(async () => {}) }));
 vi.mock("./image-builds/scheduler", async (importOriginal) => ({
   ...(await importOriginal<typeof ImageBuildScheduler>()),
   runImageBuildScheduler: vi.fn(async () => ({})),
@@ -45,7 +46,6 @@ vi.mock("./session/abandoned-draft-sweep", async (importOriginal) => ({
   }),
   SessionDraftExpiryClient: vi.fn(),
 }));
-vi.mock("./routes/github-reviews", () => ({ reapSupersededReviewSessions: vi.fn(async () => {}) }));
 
 const { schedulerTick, sweepRun } = vi.hoisted(() => ({
   schedulerTick: vi.fn(async () => ({})),
@@ -108,7 +108,12 @@ describe("SCHEDULED_JOBS", () => {
 
     expect(Scheduler).toHaveBeenCalledWith(deps.db, deps.env, deps.backgroundTasks);
     expect(schedulerTick).toHaveBeenCalledTimes(1);
-    expect(reapSupersededReviewSessions).toHaveBeenCalledWith(deps.db, deps.sessions);
+    expect(reapSupersededReviewSessions).toHaveBeenCalledWith(
+      deps.db,
+      deps.sessions,
+      deps.env,
+      deps.backgroundTasks
+    );
     expect(deps.submitted.map((entry) => entry.name)).toEqual(["autofix_queue_health"]);
     expect(checkAutofixQueueHealth).not.toHaveBeenCalled();
     await deps.submitted[0]!.task();

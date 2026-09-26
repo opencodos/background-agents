@@ -4,8 +4,9 @@ CREATE TABLE github_review_state (
   latest_generation INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   -- Submission lease: held by the latest generation's session for the
-  -- duration of its final GitHub writes. Claims are refused while an
-  -- unexpired lease is held, serializing claim-vs-submit.
+  -- duration of its final GitHub writes. Claims may advance while a lease is
+  -- held; the lease defers stale-session cancellation and prevents a
+  -- successor from acquiring ownership until release or expiry.
   lease_session_id TEXT,
   lease_expires_at INTEGER,
   PRIMARY KEY (repo_id, pr_number)

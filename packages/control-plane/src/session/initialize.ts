@@ -10,6 +10,7 @@ import {
 } from "@open-inspect/shared/types/integrations";
 import { SessionIndexStore } from "../db/session-index";
 import { SessionInternalPaths } from "./contracts";
+import { SessionDraftExpiryClient } from "./abandoned-draft-sweep";
 import { createSessionRuntimeClient } from "./runtime-client";
 import { createLogger } from "../logger";
 import type { SessionSkillManifestInput } from "./skill-resolution";
@@ -90,6 +91,10 @@ export interface SessionInitInput {
   spawnDepth?: number;
   automationId?: string | null;
   automationRunId?: string | null;
+  managedSkillsManifest?: SessionSkillManifestInput;
+  managedSkillsSourceSessionId?: string;
+  /** Complete, immutable provider routing snapshot resolved by the caller. */
+  providerAuth: SessionModelProviderAuthInput[];
 
   // GitHub review-generation fence (design: review-supersede). Present only
   // for github-bot-created review sessions; routes/session-create.ts rejects
@@ -99,11 +104,9 @@ export interface SessionInitInput {
     prNumber: number;
     generation: number;
     headSha: string;
+    owner?: string;
+    repo?: string;
   };
-  managedSkillsManifest?: SessionSkillManifestInput;
-  managedSkillsSourceSessionId?: string;
-  /** Complete, immutable provider routing snapshot resolved by the caller. */
-  providerAuth: SessionModelProviderAuthInput[];
 }
 
 /**
@@ -194,11 +197,12 @@ export async function initializeSession(
   // obscure that boundary for one call site); on a later init failure the
   // orphaned review row is swept by the next claim's sweep (404 rule).
   if (input.githubReview) {
-    const { repoId, prNumber, generation, headSha } = input.githubReview;
+    const { repoId, prNumber, generation, headSha, owner, repo } = input.githubReview;
     const fenceResult = await ctx.db
       .prepare(
-        `INSERT INTO github_review_sessions (repo_id, pr_number, generation, session_id, head_sha, created_at)
-         SELECT ?, ?, ?, ?, ?, ? FROM github_review_state
+        `INSERT INTO github_review_sessions
+           (repo_id, pr_number, generation, session_id, head_sha, created_at, repo_owner, repo_name)
+         SELECT ?, ?, ?, ?, ?, ?, ?, ? FROM github_review_state
          WHERE repo_id = ? AND pr_number = ? AND latest_generation = ?`
       )
       .bind(
@@ -208,6 +212,8 @@ export async function initializeSession(
         input.sessionId,
         headSha,
         now,
+        owner ?? null,
+        repo ?? null,
         repoId,
         prNumber,
         generation
@@ -218,33 +224,38 @@ export async function initializeSession(
     }
   }
 
-  // Step 2: D1 index (must succeed before DO init starts sandbox warming)
+  // Step 2: D1 index (must succeed before runtime init starts sandbox warming)
   const sessionStore = new SessionIndexStore(ctx.db);
-  await sessionStore.create({
-    id: input.sessionId,
-    title: input.title || null,
-    repoOwner: input.repoOwner,
-    repoName: input.repoName,
-    harness: input.harness,
-    model: input.model,
-    reasoningEffort: input.reasoningEffort,
-    baseBranch,
-    repositories,
-    environmentId: input.environmentId ?? null,
-    status: "created",
-    parentSessionId: input.parentSessionId,
-    spawnSource: input.spawnSource,
-    spawnDepth: input.spawnDepth,
-    automationId: input.automationId,
-    automationRunId: input.automationRunId,
-    scmLogin: input.scmLogin || null,
-    userId: input.platformUserId,
-    createdAt: now,
-    updatedAt: now,
-    skillManifest: input.managedSkillsManifest,
-    skillManifestSourceSessionId: input.managedSkillsSourceSessionId,
-    providerAuth: input.providerAuth,
-  });
+  try {
+    await sessionStore.create({
+      id: input.sessionId,
+      title: input.title || null,
+      repoOwner: input.repoOwner,
+      repoName: input.repoName,
+      harness: input.harness,
+      model: input.model,
+      reasoningEffort: input.reasoningEffort,
+      baseBranch,
+      repositories,
+      environmentId: input.environmentId ?? null,
+      status: "created",
+      parentSessionId: input.parentSessionId,
+      spawnSource: input.spawnSource,
+      spawnDepth: input.spawnDepth,
+      automationId: input.automationId,
+      automationRunId: input.automationRunId,
+      scmLogin: input.scmLogin || null,
+      userId: input.platformUserId,
+      createdAt: now,
+      updatedAt: now,
+      skillManifest: input.managedSkillsManifest,
+      skillManifestSourceSessionId: input.managedSkillsSourceSessionId,
+      providerAuth: input.providerAuth,
+    });
+  } catch (error) {
+    await deleteFailedReviewFence(ctx.db, input.githubReview, input.sessionId, ctx.trace_id);
+    throw error;
+  }
 
   // Step 3: runtime init
   let initResponse: Response;
@@ -284,12 +295,19 @@ export async function initializeSession(
       }
     );
   } catch (transportError) {
+    // The runtime may have committed init — and scheduled sandbox warming —
+    // before the transport failed, so the fence row may still be the only
+    // handle a sweep or the reaper has on a live session. Delete it only once
+    // the session is confirmed unable to run.
     await markSessionFailed(sessionStore, input.sessionId, ctx.trace_id);
+    if (input.githubReview && (await isSessionRetiredAfterLostInit(env, ctx, input.sessionId))) {
+      await deleteFailedReviewFence(ctx.db, input.githubReview, input.sessionId, ctx.trace_id);
+    }
     throw transportError;
   }
 
   if (!initResponse.ok) {
-    await markSessionFailed(sessionStore, input.sessionId, ctx.trace_id);
+    await compensateFailedDoInit(sessionStore, ctx.db, input, ctx.trace_id);
     const errorText = await initResponse.text().catch(() => "unknown");
     logger.error("DO init failed", {
       session_id: input.sessionId,
@@ -300,8 +318,8 @@ export async function initializeSession(
     throw new Error(`Failed to initialize session DO: ${initResponse.status}`);
   }
 
-  // Step 4: re-verify the review generation now that the DO exists. Between
-  // the fence insert (Step 1) and DO init (Step 3), a newer generation's
+  // Step 4: re-verify the review generation now that the runtime exists.
+  // Between the fence insert (Step 1) and runtime init (Step 3), a newer
   // sweep may have hit this session's not-yet-initialized DO, received a
   // 404, and deleted our fence row as an orphan — leaving this session live
   // but invisible to every future sweep. Re-checking after init closes that
@@ -349,11 +367,36 @@ export async function initializeSession(
           trace_id: ctx.trace_id,
         });
       }
+      await markSessionFailed(sessionStore, input.sessionId, ctx.trace_id);
       throw new ReviewGenerationSupersededError();
     }
+    await markReviewAdmitted(ctx, input.sessionId);
   }
 
   return { sessionId: input.sessionId, status: "created" };
+}
+
+/**
+ * Record that this review's session exists and is the PR's latest review:
+ * from now on it, not an older review of the same head, owns that head's
+ * status. Best-effort — the session is already live — so a failure is only
+ * logged; until then an older review of the head may still close it out,
+ * which this review's own leased success replaces.
+ */
+async function markReviewAdmitted(ctx: RequestContext, sessionId: string): Promise<void> {
+  try {
+    await ctx.db
+      .prepare("UPDATE github_review_sessions SET admitted_at = ? WHERE session_id = ?")
+      .bind(Date.now(), sessionId)
+      .run();
+  } catch (markError) {
+    logger.error("Failed to mark review session admitted", {
+      event: "review_fence.admit_failed",
+      session_id: sessionId,
+      trace_id: ctx.trace_id,
+      error: markError instanceof Error ? markError.message : String(markError),
+    });
+  }
 }
 
 /**
@@ -370,6 +413,69 @@ async function markSessionFailed(
   } catch (compensationError) {
     logger.error("Failed to mark session as failed after DO init error", {
       session_id: sessionId,
+      trace_id: traceId,
+      error:
+        compensationError instanceof Error ? compensationError.message : String(compensationError),
+    });
+  }
+}
+
+/**
+ * After a DO init whose response was lost: whether the session is confirmed
+ * unable to run — its never-prompted runtime has just been archived, which
+ * rejects any later prompt. Any other answer, including a 404 or another
+ * failure, is not a confirmation; the reaper decides such a row after its
+ * grace period.
+ */
+async function isSessionRetiredAfterLostInit(
+  env: Env,
+  ctx: RequestContext,
+  sessionId: string
+): Promise<boolean> {
+  try {
+    const outcome = await new SessionDraftExpiryClient(
+      createSessionRuntimeClient(env, ctx)
+    ).expireDraft(sessionId);
+    // A 404 is no proof: an init still in flight can create the runtime after it.
+    return outcome === "archived";
+  } catch {
+    return false;
+  }
+}
+
+async function compensateFailedDoInit(
+  sessionStore: SessionIndexStore,
+  db: RequestContext["db"],
+  input: Pick<SessionInitInput, "sessionId" | "githubReview">,
+  traceId: string
+): Promise<void> {
+  await Promise.all([
+    markSessionFailed(sessionStore, input.sessionId, traceId),
+    deleteFailedReviewFence(db, input.githubReview, input.sessionId, traceId),
+  ]);
+}
+
+async function deleteFailedReviewFence(
+  db: RequestContext["db"],
+  review: SessionInitInput["githubReview"],
+  sessionId: string,
+  traceId: string
+): Promise<void> {
+  if (!review) return;
+  try {
+    await db
+      .prepare(
+        "DELETE FROM github_review_sessions WHERE repo_id = ? AND pr_number = ? AND generation = ?"
+      )
+      .bind(review.repoId, review.prNumber, review.generation)
+      .run();
+  } catch (compensationError) {
+    logger.error("Failed to delete review fence after DO init error", {
+      event: "review_fence.init_compensation_failed",
+      session_id: sessionId,
+      repo_id: review.repoId,
+      pr_number: review.prNumber,
+      generation: review.generation,
       trace_id: traceId,
       error:
         compensationError instanceof Error ? compensationError.message : String(compensationError),

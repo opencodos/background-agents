@@ -48,8 +48,9 @@ Key design decisions:
 
 - **Results from the sandbox, endings from the control plane**: The bot calls the control plane to
   create sessions and send prompts, and the agent posts results to GitHub directly from the sandbox.
-  The one call back is the control plane's `GITHUB_BOT` binding to `POST /callbacks/complete`, sent
-  when a review session's turn ends, so the bot can close out a status the agent never replaced (see
+  The calls back are the control plane's `GITHUB_BOT` binding to `POST /callbacks/complete`, sent
+  when a review session's turn ends, and to `POST /callbacks/review-close-out`, sent by its reaper
+  to retry a close-out, so the bot can close out a status the agent never replaced (see
   [Review Close-Out](#review-close-out)).
 - **No session reuse**: Every non-duplicate webhook delivery creates a fresh session. Delivery
   dedupe is handled separately in KV using `X-GitHub-Delivery`.
@@ -68,21 +69,21 @@ The bot is deployed via Terraform as a standalone Cloudflare Worker alongside th
 
 ### Environment Bindings
 
-| Binding                      | Type                  | Description                                                                           |
-| ---------------------------- | --------------------- | ------------------------------------------------------------------------------------- |
-| `GITHUB_KV`                  | KV namespace          | Delivery dedupe store keyed by `X-GitHub-Delivery`                                    |
-| `AUTOFIX_QUEUE`              | Queue                 | Durable handoff for pull request feedback eligible for Autofix                        |
-| `CONTROL_PLANE`              | Service binding       | Fetcher to the control plane worker                                                   |
-| `DEPLOYMENT_NAME`            | Plain text            | Deployment identifier for logging                                                     |
-| `DEFAULT_MODEL`              | Plain text            | Model ID for new sessions (e.g., `anthropic/claude-haiku-4-5`)                        |
-| `GITHUB_BOT_USERNAME`        | Plain text            | Bot's GitHub login (e.g., `my-app[bot]`) for @mention detection and loop prevention   |
-| `GITHUB_REVIEWER_USERNAME`   | Plain text            | Reviewer App's login (e.g., `codos-reviewer[bot]`), when a second App submits reviews |
-| `GITHUB_APP_ID`              | Secret                | GitHub App ID for JWT generation                                                      |
-| `GITHUB_APP_PRIVATE_KEY`     | Secret                | GitHub App private key (must be PKCS#8 format)                                        |
-| `GITHUB_APP_INSTALLATION_ID` | Secret                | GitHub App installation ID for token exchange                                         |
-| `GITHUB_WEBHOOK_SECRET`      | Secret                | Shared secret for verifying webhook signatures                                        |
-| `SERVICE_AUTH_SECRET`        | Secret                | Per-service sig1 signing secret for control-plane requests                            |
-| `LOG_LEVEL`                  | Plain text (optional) | Log level override (`debug`, `info`, `warn`, `error`)                                 |
+| Binding                      | Type                  | Description                                                                         |
+| ---------------------------- | --------------------- | ----------------------------------------------------------------------------------- |
+| `GITHUB_KV`                  | KV namespace          | Delivery dedupe store keyed by `X-GitHub-Delivery`                                  |
+| `AUTOFIX_QUEUE`              | Queue                 | Durable handoff for pull request feedback eligible for Autofix                      |
+| `CONTROL_PLANE`              | Service binding       | Fetcher to the control plane worker                                                 |
+| `DEPLOYMENT_NAME`            | Plain text            | Deployment identifier for logging                                                   |
+| `DEFAULT_MODEL`              | Plain text            | Model ID for new sessions (e.g., `anthropic/claude-haiku-4-5`)                      |
+| `GITHUB_BOT_USERNAME`        | Plain text            | Bot's GitHub login (e.g., `my-app[bot]`) for @mention detection and loop prevention |
+| `GITHUB_REVIEWER_USERNAME`   | Plain text (optional) | Reviewer App login (e.g., `my-reviewer[bot]`); unset uses the main App              |
+| `GITHUB_APP_ID`              | Secret                | GitHub App ID for JWT generation                                                    |
+| `GITHUB_APP_PRIVATE_KEY`     | Secret                | GitHub App private key (must be PKCS#8 format)                                      |
+| `GITHUB_APP_INSTALLATION_ID` | Secret                | GitHub App installation ID for token exchange                                       |
+| `GITHUB_WEBHOOK_SECRET`      | Secret                | Shared secret for verifying webhook signatures                                      |
+| `SERVICE_AUTH_SECRET`        | Secret                | Per-service sig1 signing secret for control-plane requests                          |
+| `LOG_LEVEL`                  | Plain text (optional) | Log level override (`debug`, `info`, `warn`, `error`)                               |
 
 ### GitHub App Configuration
 
@@ -103,6 +104,25 @@ permission list.
 **Webhook URL**: `https://open-inspect-github-bot-{suffix}.{account}.workers.dev/webhooks/github`
 
 **Webhook secret**: Must match `GITHUB_WEBHOOK_SECRET` in the Terraform configuration.
+
+### Optional Reviewer App
+
+GitHub refuses to let a PR author approve their own PR. To let the bot approve PRs opened by the
+main App, install a second App with only **Pull requests: Read & write** (plus GitHub's mandatory
+Metadata read permission), with webhooks disabled. Set `github_reviewer_username` and all three
+`github_reviewer_app_*` Terraform variables together, or leave all four empty. Use the reviewer's
+exact bot login, such as `my-reviewer[bot]`. See the
+[two-App setup](../../docs/integrations/GITHUB.md#optional-separate-reviewer-app).
+
+The control plane holds the reviewer's App credentials and brokers its installation token through
+the sandbox-authenticated `GET /sessions/:id/review-token` route. The bot receives only
+`GITHUB_REVIEWER_USERNAME`; the review's submission script fetches the token while it holds the PR's
+submission lease, just before the review POST, and sets `GH_TOKEN` for that command alone. Status
+writes and the lease keep their existing credential. No reviewer App means no token fetch and a
+self-authored PR still gets `COMMENT`. The same self-review check applies to the reviewer App if it
+authored the PR. With a reviewer login set, any token-fetch failure (including the route's 404 when
+the control plane lacks some reviewer credential, or an empty token) releases the lease and writes
+nothing; the review's close-out then terminalizes its pending status.
 
 ### Sandbox Prerequisites
 
@@ -136,17 +156,55 @@ All events are processed asynchronously via `executionCtx.waitUntil()`. The webh
 **Pull Request Review Trigger (Auto-Review):**
 
 1. Check `pull_request.draft` — skip draft PRs.
-2. Apply the configured trigger-user gate. The bot reviews bot-created PRs only when
-   `allowedTriggerUsers` includes its login.
-3. Post a pending `open-inspect` status on `pull_request.head.sha`.
+2. Apply the configured trigger-user gate. An event whose sender is the webhook App itself (a PR it
+   opened, a push to its own branch) bypasses both caller gates: an allowlist never names the bot,
+   and the collaborator-permission lookup 404s for a `[bot]` login.
+3. On any action but `opened`, read the PR's reviews. If a reviewer's latest verdict is a standing
+   approval, stand down and skip. First re-read the PR as step 5 does; when the head, state, or
+   draft flag no longer match the event, do nothing and skip (a delayed event must not act on a
+   newer head's review). Otherwise claim a generation (so no running review can take the submission
+   lease again), post `success` ("Skipped — PR already approved") on the head if its status is
+   pending or absent, then sweep, naming the repository, so the review of a replaced head is closed
+   out under the lease. The skip is the one terminal status written without the lease; a same-head
+   writer that already held the lease when the claim landed can still overwrite it. If the claim
+   fails, or the head's status cannot be read or the skip written, it does not sweep and reviews as
+   normal instead, releasing any claim it took first, so the head is never left without a status and
+   the previous review stays eligible to publish if the fallback cannot start. An unreadable
+   approval state likewise fails open and reviews as normal.
 4. Post an eyes reaction on the PR.
-5. Create a session through the control plane.
-6. Send the code review prompt. The prompt posts the completed review, then replaces the status on
-   the same head SHA with `success` and links it to the review. The review is submitted by the
-   reviewer App when `GITHUB_REVIEWER_USERNAME` is set — its installation token comes from the
-   control plane's `/sessions/:id/review-token`, and the status writes keep the default credential.
-   Reviews of PRs opened by whichever App submits them use `COMMENT`, because GitHub does not allow
-   pull request authors to approve their own PRs.
+5. Re-read the PR from GitHub and skip when the head SHA, state, or draft flag no longer match the
+   webhook payload. This runs as the last step before the claim, so the narrowest possible window
+   remains in which a push or close can outrank the snapshot.
+6. Claim the next review generation for the PR from the control plane.
+7. Create a session through the control plane, fenced on that generation. A 409 means a newer
+   trigger already won, and the handler skips. Any other failure releases the claim — conditionally,
+   so a newer claim is never disturbed — before rethrowing.
+8. Sweep and cancel review sessions for the PR that hold an older generation, naming the repository.
+   An older review whose head a push replaced keeps its fence row with a close-out request, so its
+   pending status is closed out like any other ending (see [Review Close-Out](#review-close-out)).
+9. Post a pending `open-inspect` status on `pull_request.head.sha`. This is the only status write
+   made without the PR's submission lease.
+10. Send the code review prompt. Its submission step is one shell script that first takes the PR's
+    submission lease from the control plane: a 423 (another holder's lease is live) is retried for
+    up to 100 seconds, and a 409 (superseded, or the turn was already closed out) exits without
+    writing. Holding the lease, the script re-checks the PR; if the head, state, or draft flag
+    changed, it posts `error` ("Review skipped: PR changed before submission") and stops. Otherwise
+    it fetches the reviewer App's token when one is configured, posts the review, then replaces the
+    status with `success` linked to that review. It releases the lease either way, and writes no
+    status on any other failure: the review's close-out does. Reviews of PRs opened by whichever App
+    submits them use `COMMENT`, because GitHub does not allow pull request authors to approve their
+    own PRs.
+
+If the control plane rejects the prompt (a 4xx), the handler requests the session's close-out
+itself, with "Review failed to start" as its description. A transport failure or 5xx is ambiguous
+(the prompt may have arrived), so it records nothing and leaves the review to the control plane's
+reaper, as it does when the close-out request itself fails: the session is created with the PR's
+repository on its fence row, and a latest review that has no close-out after 10 minutes gets a
+provisional "Review failed to start" marker, and then its session is asked to archive itself as an
+unprompted draft (so no prompt can start it). While the marker is provisional the agent's lease
+request gets 423 (wait), and no close-out is granted. The marker is withdrawn if the session turns
+out to hold a prompt or to be active; otherwise it becomes a close-out request and runs like any
+other. A lost archive answer leaves it provisional, and the next tick asks again.
 
 **Review Requested (compatibility path):**
 
@@ -156,9 +214,10 @@ App as the reviewer, so the button names it rather than the webhook App; both lo
 
 1. Check `requested_reviewer.login` matches `GITHUB_BOT_USERNAME` or `GITHUB_REVIEWER_USERNAME` —
    return early if not.
-2. Post a pending `open-inspect` status on `pull_request.head.sha`.
-3. Post an eyes reaction on the PR.
-4. Create a session through the control plane.
+2. Post an eyes reaction on the PR.
+3. Run the same freshness check, generation claim, fenced session creation (with conditional claim
+   release on failure), and stale-review sweep as the auto-review path.
+4. Post a pending `open-inspect` status on `pull_request.head.sha`.
 5. Send the code review prompt, which posts the successful status after the review.
 
 In both review flows, a review that ends without replacing its pending status is closed out by the
@@ -176,22 +235,42 @@ bot (see [Review Close-Out](#review-close-out)).
 
 ### Review Close-Out
 
+Every terminal `open-inspect` status is written by the holder of its PR's submission lease: the
+review's agent (its `success`, or the stale-PR `error`), or a close-out holding the lease as
+`close-out:<sessionId>:<nonce>` — a fresh id per grant. A close-out replaces only a status that is
+still `pending`.
+
 A review prompt carries a `github` callback context naming the PR and the head SHA its pending
 status sits on. When the session's turn ends — published, timed out as stuck, cancelled, or lost its
 sandbox — the control plane signs a completion callback with this bot's `SERVICE_AUTH_SECRET` and
-sends it to `POST /callbacks/complete`. The bot acknowledges it, then:
+sends it to `POST /callbacks/complete`. The bot then:
 
-1. Claims the close-out from the control plane (`POST /internal/github-reviews/close-out`). It is
-   granted only while the session is still its PR's latest review and holds no live submission
-   lease, and granting it deletes the session's fence row, so the agent can no longer acquire the
-   lease and publish afterwards. A declined claim writes nothing: a successor owns the status.
-2. Reads the commit's combined status; anything but a still-pending `open-inspect` is left alone.
-3. Leaves a merged or closed PR alone.
-4. Posts `error` with `Review did not finish: <the session's reason>`, or "Review did not publish"
-   for a turn that ended successfully without replacing the status.
+1. Requests the close-out (`POST /internal/github-reviews/close-out`) before acknowledging, and
+   answers 503 if the control plane cannot record it, so the callback is redelivered. The request is
+   stored on the session's fence row; from then on the agent can no longer take the lease.
+2. On `200` it holds the lease, named by the grant's `grantId`. `202` means another holder's lease
+   is live, or a superseded session is not yet confirmed cancelled; `409` means nothing is owed (a
+   newer admitted review of the same head owns the status, or it was already closed out). Neither
+   writes anything now: the control plane's reaper re-drives owed close-outs every minute through
+   `POST /callbacks/review-close-out`, least recently attempted first, until each is granted.
+3. After acknowledging, it reads the commit's `open-inspect` status (paging through the combined
+   status) and leaves a terminal one alone, and leaves a merged or closed PR alone. A commit with no
+   `open-inspect` status at all still gets the terminal write.
+4. Otherwise it posts `error`: "Superseded by a newer commit" for a review a push replaced;
+   `Review did not finish: <the session's reason>`; or "Review did not publish" for a turn that
+   ended successfully without replacing the status. It never starts that write with less than a
+   request timeout plus 5 seconds of the lease left.
+5. It finalizes its grant (`POST /internal/github-reviews/close-out/finalize` with the `grantId`):
+   `done` once GitHub shows a terminal status, which deletes the fence row, or `retry`, which
+   releases the lease and keeps the row for the reaper. Any failed status write is `retry`, logged
+   as an error. Either outcome acts only while that grant still holds the lease, so a late finalize
+   from an earlier attempt is a no-op.
 
-A session that never processes its prompt produces no completion, and a callback that fails both
-delivery attempts is not retried; those statuses stay pending.
+The reaper also records a close-out for a superseded review whose head no newer admitted review has
+taken over before retiring it, so a head a push replaced is closed out even when the successor's
+sweep never ran. Fence rows that owe no close-out are dropped after a day; a recorded close-out is
+retried for a week, then given up with an error log (never while a close-out holds the lease). A
+completion callback that fails both delivery attempts is never recorded; that status stays pending.
 
 ### Session Target
 

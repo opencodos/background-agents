@@ -73,14 +73,17 @@ claude mcp add open-inspect \
   -- node /absolute/path/to/packages/mcp-server/dist/index.js
 ```
 
-| Variable                         | Purpose                            |
-| -------------------------------- | ---------------------------------- |
-| `OPEN_INSPECT_CONTROL_PLANE_URL` | Control plane worker URL           |
-| `OPEN_INSPECT_TOKEN`             | Personal access token (`oi_pat_…`) |
+| Variable                         | Purpose                               |
+| -------------------------------- | ------------------------------------- |
+| `OPEN_INSPECT_CONTROL_PLANE_URL` | Control plane worker URL (`https://`) |
+| `OPEN_INSPECT_TOKEN`             | Personal access token (`oi_pat_…`)    |
 
-Both are required; the process exits with a message on stderr if either is missing. A `401` from any
-tool means the token was rejected — mistyped, revoked, or expired. Issue a new one and update the
-client config.
+Both are required; the process exits with a message on stderr if either is missing. The URL must be
+`https://`, because the token travels in an `Authorization` header on every request; plain `http://`
+is accepted only for a loopback host (`localhost`, `127.0.0.1`, `[::1]`), where the request never
+leaves the machine. Anything else is refused at startup rather than on the first call. A `401` from
+any tool means the token was rejected — mistyped, revoked, or expired. Issue a new one and update
+the client config.
 
 Note that `claude mcp add` does not validate that `--env` values are non-empty. If you populate them
 from a command, check that the command actually printed something first.

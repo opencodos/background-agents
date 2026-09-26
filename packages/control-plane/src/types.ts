@@ -45,9 +45,9 @@ export interface EnvConfig {
   GITHUB_APP_PRIVATE_KEY?: string;
   GITHUB_APP_INSTALLATION_ID?: string;
 
-  // Second GitHub App, holding only pull-request write, whose installation
-  // token submits code reviews. Absent ⇒ reviews submit as the main App and
-  // cannot approve its own pull requests.
+  // Optional second GitHub App whose installation token submits code reviews,
+  // brokered to review sandboxes by GET /sessions/:id/review-token. All three
+  // unset means the deployment runs no reviewer App.
   GITHUB_REVIEWER_APP_ID?: string;
   GITHUB_REVIEWER_APP_PRIVATE_KEY?: string;
   GITHUB_REVIEWER_APP_INSTALLATION_ID?: string;

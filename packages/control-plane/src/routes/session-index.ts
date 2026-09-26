@@ -17,8 +17,8 @@ import {
   sessionListResponseSchema,
   sessionReadActionSchema,
 } from "@open-inspect/shared/types/sessions";
-import { isCanonicalUserId } from "@open-inspect/shared/user-id";
 import { canonicalUserIdOf } from "../auth/principal";
+import { isCanonicalUserId } from "@open-inspect/shared/user-id";
 import { SessionIndexStore } from "../db/session-index";
 import {
   error,
@@ -109,7 +109,6 @@ export async function handleListSessions(
 
   const store = new SessionIndexStore(ctx.db);
   const listStartedAt = Date.now();
-
   const result = await store.list({
     status,
     excludeStatus,

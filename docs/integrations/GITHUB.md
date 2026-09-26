@@ -1,8 +1,8 @@
 # GitHub Integration
 
 Open-Inspect's GitHub integration lets your team start agent work from pull requests. The GitHub Bot
-can automatically review new PRs and respond when you mention it in PR comments or inline review
-threads.
+can automatically review non-draft PRs when they are opened, reopened, updated, or marked ready, and
+it can respond when you mention it in PR comments or inline review threads.
 
 This guide is for people using the GitHub integration day to day. If you are installing the GitHub
 App or deploying the bot worker, start with
@@ -14,7 +14,8 @@ App or deploying the bot worker, start with
 ## Quick Start
 
 1. Make sure the GitHub App is installed on the repository.
-2. To get an automatic review, open a non-draft PR in a repository where auto-review is enabled.
+2. To get automatic reviews, open or update a non-draft PR in a repository where auto-review is
+   enabled.
 3. To ask for analysis or a reply, mention the bot in a PR comment:
    ```text
    @my-app[bot] can you explain why the checkout test is failing?
@@ -29,7 +30,7 @@ App or deploying the bot worker, start with
 
 | Workflow                  | How it works                                                               |
 | ------------------------- | -------------------------------------------------------------------------- |
-| Auto-review new PRs       | Review non-draft PRs when they are opened, if auto-review is enabled       |
+| Auto-review PR changes    | Review non-draft PRs when opened, reopened, updated, or marked ready       |
 | Respond to PR comments    | Mention the bot in a PR conversation comment                               |
 | Respond to review threads | Mention the bot in an inline review comment                                |
 | Post back to GitHub       | Submit a PR review, reply to a review thread, or post a PR summary comment |
@@ -44,8 +45,9 @@ App bot through the PR reviewer picker. Use auto-review or `@mention` comments i
 
 ### When It Runs
 
-When **Auto-review new PRs** is enabled, Open-Inspect starts a review session for newly opened,
-non-draft PRs in enabled repositories. The agent inspects the PR diff and posts a GitHub review.
+When **Auto-review PR changes** is enabled, Open-Inspect starts a review session when a non-draft PR
+is opened, reopened, synchronized by a push, or marked ready for review in an enabled repository.
+Each new trigger supersedes any older review session for the same PR.
 
 ### When It Skips
 
@@ -53,21 +55,60 @@ Auto-review is skipped when:
 
 - The PR is a draft
 - The repository is outside the configured GitHub Bot scope
-- The PR opener is not allowed to trigger the bot
+- The event sender is not allowed to trigger the bot (events sent by the GitHub App itself are
+  exempt; see below)
 - Auto-review is disabled globally or for that repository
+- The event is a follow-up (push, reopen, or ready for review) on a PR that already carries a
+  standing approval, and the event's head is still the PR's open, non-draft head (an event for an
+  older head is ignored). The bot cancels any review still running for the PR and, unless the head
+  already has a terminal status, posts a `success` status, "Skipped — PR already approved", on the
+  new head so a required check does not wait on a review that was never started. If the bot cannot
+  fence running reviews, read the head's status, or post the skip, it reviews the PR instead.
+  Request a review or mention the bot to review it anyway.
 
-A PR opened by the GitHub App itself is the App acting rather than a third party asking it to act,
-so it bypasses both caller gates and is reviewed.
+A PR opened, or pushed to, by the GitHub App itself is the App acting rather than a third party
+asking it to act, so it bypasses both caller gates and is reviewed.
 
-Converting a draft PR to ready for review does not start the same auto-review path. If you need a
-follow-up after a draft becomes ready, mention the bot in a PR comment.
+Draft PR events are skipped, but marking a draft ready emits `ready_for_review` and starts the
+automatic review path.
 
 ### What It Posts
 
 The agent can submit a general review comment, approve the PR, request changes, or add inline review
-comments when useful. Where the deployment configures a reviewer App, the review is submitted under
-that App's identity, so a pull request the main App opened can be approved rather than only
-commented on.
+comments when useful. By default, reviews of PRs opened by the main GitHub App use `COMMENT`: GitHub
+does not allow a PR author to approve their own PR. An optional separate reviewer App lets the
+review approve those PRs instead. Reviews of PRs authored by the reviewer App itself still use
+`COMMENT`.
+
+### Optional Separate Reviewer App
+
+Create a second GitHub App with only **Pull requests: Read & write** (GitHub also grants the
+mandatory Metadata read permission). Disable its webhooks and install it on the repositories you
+want reviewed. The main App continues to receive webhook events and handle other GitHub operations;
+the second App is only the review-submission identity.
+
+Set all four Terraform values together, or leave all four empty:
+
+- `github_reviewer_app_id`: the second App's ID
+- `github_reviewer_app_private_key`: its private key in PKCS#8 PEM format
+- `github_reviewer_app_installation_id`: its installation ID
+- `github_reviewer_username`: its exact bot login, such as `my-reviewer[bot]`
+
+The three credentials are control-plane bindings (`GITHUB_REVIEWER_APP_*`); the login is a GitHub
+bot binding (`GITHUB_REVIEWER_USERNAME`). For non-Terraform deployments, configure the same four
+values on their respective services. A login without all three credentials stops every review, while
+credentials without the login leave reviews on the main App's identity.
+
+The agent's submission script fetches a short-lived installation token from
+`GET /sessions/:id/review-token` using its sandbox token while it holds the PR's submission lease,
+immediately before submitting the review. The route authenticates the caller against that session,
+issues the token only to review sessions the GitHub bot created (any other session's sandbox,
+including a GitHub bot comment session, gets 403), and returns `Cache-Control: no-store`. Only the
+review POST uses this credential; other GitHub calls retain their existing credential. With no
+reviewer App configured, the endpoint returns 404 and the prompt omits the token fetch. When the
+GitHub bot has a reviewer login, any token-fetch failure, including that 404 from missing or partial
+reviewer credentials, stops the review rather than submit it under another identity: the script
+releases the lease and writes no status, and the review's close-out marks it as not published.
 
 ---
 
@@ -138,7 +179,7 @@ Open the web app and go to **Settings > Integrations > GitHub** to configure the
 | ------------------------ | ------------------------------------------------------------------------------------- |
 | Default model            | Model used for GitHub-started sessions when a repository does not override it         |
 | Default reasoning effort | Reasoning depth used with the selected default model                                  |
-| Auto-review new PRs      | Whether new non-draft PRs should be reviewed automatically                            |
+| Auto-review PR changes   | Whether opened, reopened, updated, or newly-ready non-draft PRs are reviewed          |
 | Repository Scope         | Whether the bot responds in all accessible repositories or only selected repositories |
 | Allowed Trigger Users    | Who can trigger the bot from GitHub                                                   |
 
@@ -243,9 +284,11 @@ Important limitations:
 
 ### Bot Behavior
 
-- Auto-review skips draft PRs. A PR the GitHub App opened is still reviewed — it bypasses the caller
-  gates rather than being skipped by them. Manual `@mention` triggers are still evaluated through
-  the normal repository and user gates.
+- Auto-review skips draft PRs and follow-up events on already-approved PRs. It runs again for
+  qualifying pushes, reopen events, and draft-to-ready transitions; a PR the GitHub App opened is
+  reviewed, bypassing the caller gates; manual `@mention` triggers remain separate.
+- With PR Feedback Autofix enabled, an Autofix push can trigger another review. Autofix's per-PR
+  attempt limit bounds that feedback loop, but each iteration still consumes review compute.
 - The bot ignores bot-authored comments, ordinary issue comments, and comments that do not mention
   the bot.
 - If the bot cannot load its GitHub integration settings, it fails closed and does not start direct
@@ -276,11 +319,14 @@ list.
 
 ### Auto-review did not run
 
-Auto-review only runs for newly opened, non-draft PRs. It is skipped for draft PRs, disabled
-repositories, and users who are not allowed to trigger the bot. A PR the GitHub App itself opened is
-not skipped.
-
-If a PR was converted from draft to ready for review, mention the bot in a PR comment instead.
+Auto-review runs for non-draft PRs when opened, reopened, synchronized by a push, or marked ready.
+It is skipped for draft PRs, disabled repositories, event senders who are not allowed to trigger the
+bot (the GitHub App's own PRs and pushes bypass that gate), and follow-up events on PRs that already
+carry a standing approval. On such a head the `open-inspect` status shows "Skipped — PR already
+approved" when it was pending or absent; a terminal status already there (for example a finished
+review) is left unchanged, and when the status could not be read or written the bot reviewed the PR
+instead. Check the latest event's sender, the PR's approvals, and the configured repository scope
+when an update does not start a review.
 
 ### A mention did not start a session
 

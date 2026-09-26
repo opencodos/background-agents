@@ -20,6 +20,7 @@ const claimReviewGenerationResponseSchema = z.object({
 
 const sweepStaleReviewsResponseSchema = z.object({
   cancelledSessionIds: z.array(z.string()),
+  deferredSessionIds: z.array(z.string()),
   failedSessionIds: z.array(z.string()),
 });
 
@@ -52,15 +53,67 @@ export async function claimReviewGeneration(
 }
 
 /**
+ * Roll back a generation this bot claimed but never used, because its own
+ * session creation failed for a reason other than supersession.
+ *
+ * Without this, the abandoned bump permanently outranks a review session
+ * still running from the previous generation: that session fails its
+ * ownership check and never submits, while no replacement exists. The control
+ * plane applies the rollback only while the claim is still the latest and
+ * unused, so a newer trigger's claim is never disturbed.
+ *
+ * Best-effort: a failed compensation must not mask the original create error,
+ * so this never throws.
+ */
+export async function releaseReviewGeneration(
+  env: Env,
+  log: Logger,
+  traceId: string,
+  params: ReviewIdentity & { generation: number }
+): Promise<void> {
+  const meta = {
+    trace_id: traceId,
+    repo_id: params.repoId,
+    pull_number: params.prNumber,
+    generation: params.generation,
+  };
+  try {
+    const response = await signedControlPlaneFetch(env, {
+      method: "POST",
+      url: "https://internal/internal/github-reviews/release-claim",
+      body: JSON.stringify({
+        repoId: params.repoId,
+        prNumber: params.prNumber,
+        generation: params.generation,
+      }),
+      traceId,
+    });
+    if (!response.ok) {
+      log.warn("review_claim.release_failed", { ...meta, status: response.status });
+      return;
+    }
+    log.info("review_claim.released", meta);
+  } catch (error) {
+    log.warn("review_claim.release_error", {
+      ...meta,
+      error: error instanceof Error ? error : new Error(String(error)),
+    });
+  }
+}
+
+/**
  * Cancel every review session recorded for this PR with a generation older
- * than `generation`. Best-effort: a sweep failure must never block the new
- * review session that was already created, so this never throws.
+ * than `generation`. `owner`/`repo` let the control plane record a close-out
+ * for a review whose head a push replaced, so its pending status is closed
+ * out under the submission lease like any other ending. Best-effort: a sweep
+ * failure must never block the new review session that was already created,
+ * so this never throws.
  */
 export async function sweepStaleReviews(
   env: Env,
   log: Logger,
   traceId: string,
-  params: ReviewIdentity & { generation: number }
+  params: ReviewIdentity & { generation: number; owner: string; repo: string }
 ): Promise<void> {
   const meta = {
     trace_id: traceId,
@@ -77,6 +130,8 @@ export async function sweepStaleReviews(
         repoId: params.repoId,
         prNumber: params.prNumber,
         generation: params.generation,
+        owner: params.owner,
+        repo: params.repo,
       }),
       traceId,
     });
@@ -93,6 +148,7 @@ export async function sweepStaleReviews(
       log.warn("review_sweep.partial_failure", {
         ...meta,
         cancelled_session_ids: parsed.data.cancelledSessionIds,
+        deferred_session_ids: parsed.data.deferredSessionIds,
         failed_session_ids: parsed.data.failedSessionIds,
       });
       return;
@@ -100,6 +156,7 @@ export async function sweepStaleReviews(
     log.info("review_sweep.completed", {
       ...meta,
       cancelled_session_ids: parsed.data.cancelledSessionIds,
+      deferred_session_ids: parsed.data.deferredSessionIds,
     });
   } catch (error) {
     log.warn("review_sweep.error", {

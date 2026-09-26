@@ -21,7 +21,7 @@ import type { SqlDatabase } from "./sql-database";
  * use?", so minute resolution is ample and spares the write path a row update
  * per request.
  */
-const LAST_USED_RESOLUTION_MS = 60_000;
+export const LAST_USED_RESOLUTION_MS = 60_000;
 
 /** A token row resolved during authentication. */
 export interface AccessTokenIdentity {
