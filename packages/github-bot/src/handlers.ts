@@ -51,6 +51,9 @@ export type HandlerResult =
 /** Session creation was rejected because a newer review claimed the PR's generation first. */
 class ReviewSupersededError extends Error {}
 
+/** The control plane answered a prompt with a 4xx: the prompt was definitely not accepted. */
+class PromptRejectedError extends Error {}
+
 /**
  * The logins a review request may name to reach this bot: the webhook App itself and, when a
  * second App submits the reviews, that App too — it is the one GitHub lists as the reviewer, so
@@ -151,7 +154,10 @@ async function sendPrompt(
   });
   if (!response.ok) {
     const body = await response.text();
-    throw new Error(`Prompt delivery failed: ${response.status} ${body}`);
+    const message = `Prompt delivery failed: ${response.status} ${body}`;
+    throw response.status >= 400 && response.status < 500
+      ? new PromptRejectedError(message)
+      : new Error(message);
   }
   const result = sendPromptResponseSchema.safeParse(await response.json());
   if (!result.success) {
@@ -229,8 +235,12 @@ async function postPendingReviewStatus(
  * so the session's end comes back to `/callbacks/complete` however the agent stops — including the
  * endings (timeout, cancel, a lost sandbox) that never reach the prompt's own submission step.
  *
- * A session whose prompt never arrives has no turn to end, so no callback will ever close it out:
- * its close-out is requested here instead, through the same lease as every other.
+ * A session whose prompt never arrives has no turn to end, so no callback will ever close it out.
+ * When the control plane definitively rejected the prompt (a 4xx), its close-out is requested
+ * here, through the same lease as every other. Any other failure — a transport error, a 5xx, an
+ * unreadable answer — is ambiguous: the prompt may have been accepted, and recording a close-out
+ * would fence out a live review. Those are left to the control plane's reaper, which asks the
+ * session itself after a grace period and closes it out only if it holds no prompt.
  */
 async function sendReviewPrompt(
   env: Env,
@@ -248,14 +258,16 @@ async function sendReviewPrompt(
       callbackContext,
     });
   } catch (error) {
-    await closeOutReviewStatus(env, log, traceId, {
-      sessionId,
-      request: {
-        owner: target.owner,
-        repo: target.repo,
-        description: REVIEW_START_FAILED_DESCRIPTION,
-      },
-    });
+    if (error instanceof PromptRejectedError) {
+      await closeOutReviewStatus(env, log, traceId, {
+        sessionId,
+        request: {
+          owner: target.owner,
+          repo: target.repo,
+          description: REVIEW_START_FAILED_DESCRIPTION,
+        },
+      });
+    }
     throw error;
   }
 }

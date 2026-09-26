@@ -444,7 +444,7 @@ describe("handlePullRequestReviewTrigger", () => {
     expect(postCommitStatus).not.toHaveBeenCalled();
   });
 
-  it("closes out through the lease when prompt delivery fails", async () => {
+  it("closes out through the lease when the control plane rejects the prompt", async () => {
     const env = createMockEnv();
     const cpFetch = getControlPlaneFetch(env);
     cpFetch.mockImplementation((url: string) => {
@@ -463,7 +463,7 @@ describe("handlePullRequestReviewTrigger", () => {
         );
       }
       if (/\/sessions\/.+\/prompt$/.test(url)) {
-        return Promise.resolve(new Response("Unavailable", { status: 503 }));
+        return Promise.resolve(new Response("Not promptable", { status: 409 }));
       }
       return Promise.resolve(new Response("Not found", { status: 404 }));
     });
@@ -475,7 +475,7 @@ describe("handlePullRequestReviewTrigger", () => {
         pullRequestReviewTriggerPayload,
         "trace-prompt-failed"
       )
-    ).rejects.toThrow("Prompt delivery failed: 503 Unavailable");
+    ).rejects.toThrow("Prompt delivery failed: 409 Not promptable");
 
     expect(controlPlaneBodies(cpFetch, CLOSE_OUT_URL)).toEqual([
       {
@@ -500,7 +500,43 @@ describe("handlePullRequestReviewTrigger", () => {
     ]);
   });
 
-  it("writes no error status for a failed prompt delivery the close-out defers", async () => {
+  it.each([
+    ["an error response", () => Promise.resolve(new Response("Unavailable", { status: 503 }))],
+    ["a transport failure", () => Promise.reject(new Error("connection reset"))],
+  ])(
+    "leaves a prompt delivery lost to %s to the reaper, recording nothing",
+    async (_name, send) => {
+      // F8: the prompt may have arrived; closing it out here would fence out a live review.
+      const env = createMockEnv();
+      const cpFetch = getControlPlaneFetch(env);
+      cpFetch.mockImplementation((url: string) => {
+        const supersession = defaultReviewSupersessionResponse(url);
+        if (supersession) return Promise.resolve(supersession);
+        if (url === "https://internal/sessions") {
+          return Promise.resolve(Response.json({ sessionId: "session-123", status: "created" }));
+        }
+        if (/\/sessions\/.+\/prompt$/.test(url)) return send();
+        return Promise.resolve(Response.json({ repo: "acme/widgets", metadata: null }));
+      });
+
+      await expect(
+        handlePullRequestReviewTrigger(
+          env,
+          createMockLogger(),
+          pullRequestReviewTriggerPayload,
+          "trace-prompt-lost"
+        )
+      ).rejects.toThrow();
+
+      expect(controlPlaneBodies(cpFetch, CLOSE_OUT_URL)).toEqual([]);
+      const errorStatuses = vi
+        .mocked(postCommitStatus)
+        .mock.calls.filter(([, , , , status]) => status.state === "error");
+      expect(errorStatuses).toEqual([]);
+    }
+  );
+
+  it("writes no error status for a rejected prompt the close-out defers", async () => {
     const env = createMockEnv();
     const cpFetch = getControlPlaneFetch(env);
     cpFetch.mockImplementation((url: string) => {
@@ -513,7 +549,7 @@ describe("handlePullRequestReviewTrigger", () => {
         return Promise.resolve(Response.json({ sessionId: "session-123", status: "created" }));
       }
       if (/\/sessions\/.+\/prompt$/.test(url)) {
-        return Promise.resolve(new Response("Unavailable", { status: 503 }));
+        return Promise.resolve(new Response("Not promptable", { status: 409 }));
       }
       return Promise.resolve(Response.json({ repo: "acme/widgets", metadata: null }));
     });
@@ -525,7 +561,7 @@ describe("handlePullRequestReviewTrigger", () => {
         pullRequestReviewTriggerPayload,
         "trace-prompt-deferred"
       )
-    ).rejects.toThrow("Prompt delivery failed: 503 Unavailable");
+    ).rejects.toThrow("Prompt delivery failed: 409 Not promptable");
 
     const errorStatuses = vi
       .mocked(postCommitStatus)
@@ -1365,7 +1401,7 @@ describe("handleReviewRequested", () => {
     );
   });
 
-  it("posts pending, then closes out through the lease, when prompt delivery fails", async () => {
+  it("posts pending, then closes out through the lease, when the prompt is rejected", async () => {
     const env = createMockEnv();
     const cpFetch = getControlPlaneFetch(env);
     cpFetch.mockImplementation((url: string) => {
@@ -1384,14 +1420,14 @@ describe("handleReviewRequested", () => {
         );
       }
       if (/\/sessions\/.+\/prompt$/.test(url)) {
-        return Promise.resolve(new Response("Unavailable", { status: 503 }));
+        return Promise.resolve(new Response("Bad request", { status: 400 }));
       }
       return Promise.resolve(new Response("Not found", { status: 404 }));
     });
 
     await expect(
       handleReviewRequested(env, createMockLogger(), reviewRequestedPayload, "trace-review-failed")
-    ).rejects.toThrow("Prompt delivery failed: 503 Unavailable");
+    ).rejects.toThrow("Prompt delivery failed: 400 Bad request");
 
     expect(postCommitStatus).toHaveBeenNthCalledWith(
       1,
