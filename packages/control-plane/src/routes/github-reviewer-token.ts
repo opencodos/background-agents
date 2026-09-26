@@ -56,6 +56,25 @@ async function handleReviewerToken(
     return error("Reviewer token is only issued to GitHub bot sessions", 403);
   }
 
+  // Fork-only, depends on #1370's github_review_sessions: GitHub bot sessions also answer
+  // comments and never submit a review there, so only a registered review session (one with a
+  // review fence row) gets the reviewer credential. Goes upstream once #1370 and #1862 merge.
+  const reviewFence = await ctx.db
+    .prepare("SELECT 1 FROM github_review_sessions WHERE session_id = ? LIMIT 1")
+    .bind(params.id)
+    .first();
+  if (!reviewFence) {
+    logger.warn("review_token.session_not_eligible", {
+      event: "review_token.session_not_eligible",
+      session_id: params.id,
+      spawn_source: session.spawnSource,
+      review_fence: false,
+      request_id: ctx.request_id,
+      trace_id: ctx.trace_id,
+    });
+    return error("Reviewer token is only issued to GitHub review sessions", 403);
+  }
+
   try {
     const token = await getCachedInstallationToken(reviewerAppConfig, {
       cacheStore: env.REPOS_CACHE,

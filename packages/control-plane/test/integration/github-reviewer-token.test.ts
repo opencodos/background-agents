@@ -46,6 +46,19 @@ function fetchReviewToken(sessionName: string, token: string, bindings: WorkerBi
   );
 }
 
+/**
+ * Fork-only (depends on #1370's github_review_sessions): register `sessionId` as a review session,
+ * the way a fenced create does, so the broker treats it as one.
+ */
+async function registerReviewFence(sessionId: string): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO github_review_sessions (repo_id, pr_number, generation, session_id, head_sha, created_at)
+     VALUES (1, 1, 1, ?, 'sha', ?)`
+  )
+    .bind(sessionId, Date.now())
+    .run();
+}
+
 describe("reviewer app token broker", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -90,6 +103,7 @@ describe("reviewer app token broker", () => {
 
     const { stub } = await initNamedSession(sessionName, { spawnSource: "github-bot" });
     await seedSandboxAuth(stub, { authToken: "sandbox-token", sandboxId: "sandbox-1" });
+    await registerReviewFence(sessionName);
 
     const response = await fetchReviewToken(sessionName, "sandbox-token", {
       ...withReviewerApp(`reviewer-${suffix}`, `ri-${suffix}`),
@@ -132,6 +146,7 @@ describe("reviewer app token broker", () => {
     const other = `other-session-${suffix}`;
     const { stub } = await initNamedSession(reviewed, { spawnSource: "github-bot" });
     await seedSandboxAuth(stub, { authToken: "reviewed-token", sandboxId: "sandbox-1" });
+    await registerReviewFence(reviewed);
     const { stub: otherStub } = await initNamedSession(other, { spawnSource: "github-bot" });
     await seedSandboxAuth(otherStub, { authToken: "other-token", sandboxId: "sandbox-2" });
 
@@ -141,16 +156,23 @@ describe("reviewer app token broker", () => {
     expect(await response.text()).not.toContain("reviewer-installation-token");
   });
 
-  it("mints for a session the GitHub bot created through the session API", async () => {
+  it("mints for a review session the GitHub bot created through the session API", async () => {
     const suffix = `created-${Date.now()}`;
     await cacheInstallationToken(
       `reviewer-${suffix}`,
       `ri-${suffix}`,
       "reviewer-installation-token"
     );
+    const claim = await serviceFetch("https://test.local/internal/github-reviews/claim", {
+      service: "github-bot",
+      method: "POST",
+      body: JSON.stringify({ repoId: 1, prNumber: 1 }),
+    });
+    const { generation } = await claim.json<{ generation: number }>();
     const body = JSON.stringify({
       title: "GitHub: Review PR #1",
       model: "anthropic/claude-haiku-4-5",
+      githubReview: { repoId: 1, prNumber: 1, generation, headSha: "sha" },
     });
     const created = await serviceFetch("https://test.local/sessions", {
       service: "github-bot",
@@ -171,6 +193,36 @@ describe("reviewer app token broker", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ token: "reviewer-installation-token" });
+  });
+
+  it("refuses a GitHub bot session that is not a review (no review fence)", async () => {
+    // Fork-only (depends on #1370): comment-triggered GitHub bot sessions share the spawn source
+    // but never submit a review, so they get no reviewer credential.
+    const suffix = `comment-${Date.now()}`;
+    await cacheInstallationToken(
+      `reviewer-${suffix}`,
+      `ri-${suffix}`,
+      "reviewer-installation-token"
+    );
+    const created = await serviceFetch("https://test.local/sessions", {
+      service: "github-bot",
+      method: "POST",
+      actor: "github:1001",
+      body: JSON.stringify({ title: "GitHub: PR #1 comment", model: "anthropic/claude-haiku-4-5" }),
+    });
+    expect(created.status).toBe(201);
+    const { sessionId } = await created.json<{ sessionId: string }>();
+    const stub = env.SESSION.get(env.SESSION.idFromName(sessionId));
+    await seedSandboxAuth(stub, { authToken: "sandbox-token", sandboxId: "sandbox-1" });
+
+    const response = await fetchReviewToken(
+      sessionId,
+      "sandbox-token",
+      withReviewerApp(`reviewer-${suffix}`, `ri-${suffix}`)
+    );
+
+    expect(response.status).toBe(403);
+    expect(await response.text()).not.toContain("reviewer-installation-token");
   });
 
   it.each(["user", "agent", "automation", "slack-bot", "linear-bot"] as const)(
