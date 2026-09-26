@@ -394,6 +394,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     sessionCoreRepository,
     messageRepository,
     artifactRepository,
+    usageRepository,
     messenger,
     sessionIndexStore,
     new SessionStatusProjectionStore(db),
@@ -522,6 +523,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     repository: messageRepository,
     eventRepository,
     artifactRepository,
+    usageRepository,
     messageQueue,
     stopExecution: () => executionStop.stop(),
     parseArtifactMetadata: (artifact) => parseArtifactMetadata(artifact, log),
@@ -857,6 +859,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     listEvents: (_request, url) => messagesHandler.listEvents(url),
     listArtifacts: (_request, url) => messagesHandler.listArtifacts(url),
     listMessages: (_request, url) => messagesHandler.listMessages(url),
+    listUsage: (_request, url) => messagesHandler.listUsage(url),
     createPr: (request, _url, requestLog) => pullRequestHandler.createPr(request, requestLog),
     pullRequestArtifactSnapshot: (request, url) =>
       pullRequestHandler.pullRequestArtifactSnapshot(request, url),
