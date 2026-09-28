@@ -36,6 +36,7 @@ function sandboxRow(overrides: Partial<SandboxRow> = {}): SandboxRow {
     boot_phase: null,
     boot_seq: null,
     fenced: 0,
+    startup_rejected: 0,
     created_at: 1000,
     ...overrides,
   };
@@ -469,6 +470,46 @@ describe("SandboxRepository boot state (SQLite)", () => {
     return { db, sql, repository, set };
   }
 
+  describe("rejectProviderStartup", () => {
+    const generation = { sandboxId: "sb-1", createdAt: 1000 };
+
+    it.each(["spawning", "connecting", "ready", "failed", "stopped", "stale"])(
+      "fences %s and persists cleanup responsibility",
+      (status) => {
+        const { repository, set } = createSqliteRepository();
+        set(
+          "status = ?, modal_sandbox_id = 'sb-1', fenced = ?, auth_token_hash = 'hash', active_socket_id = 'socket'",
+          status,
+          status === "failed" ? 1 : 0
+        );
+        expect(repository.rejectProviderStartup(generation, "sb-rejected")).toBe(
+          ["spawning", "connecting", "ready"].includes(status) ? "failed" : "retained"
+        );
+        expect(repository.getSandbox()).toMatchObject({
+          status: ["stopped", "stale"].includes(status) ? status : "failed",
+          startup_rejected: 1,
+          fenced: 1,
+          modal_object_id: "sb-rejected",
+          auth_token_hash: "",
+          auth_token: null,
+          active_socket_id: "",
+        });
+        expect(repository.markSandboxReady(generation)).toBe(false);
+      }
+    );
+
+    it("records confirmed cleanup without retaining an obligation and rejects superseded writes", () => {
+      const { repository, set } = createSqliteRepository();
+      set("status = 'connecting', modal_sandbox_id = 'sb-1', modal_object_id = 'old'");
+      expect(repository.rejectProviderStartup(generation, null)).toBe("failed");
+      expect(repository.getSandbox()?.modal_object_id).toBeNull();
+      expect(repository.rejectProviderStartup({ ...generation, createdAt: 999 }, "late")).toBe(
+        "superseded"
+      );
+      expect(repository.getSandbox()?.modal_object_id).toBeNull();
+    });
+  });
+
   describe("commitProviderStartup", () => {
     const generation = { sandboxId: "sb-1", createdAt: 1000 };
 
@@ -511,6 +552,26 @@ describe("SandboxRepository boot state (SQLite)", () => {
         status: "failed",
         modal_object_id: "provider-1",
       });
+    });
+
+    it("coerces malformed returned statuses instead of asserting them", () => {
+      const log = createLog();
+      const repository = new SandboxRepository(
+        {
+          exec: () => ({
+            toArray: () => [{ status: "unexpected" }],
+            one: () => null,
+          }),
+        },
+        log,
+        TEST_ENCRYPTION_KEY
+      );
+
+      expect(repository.commitProviderStartup(generation, "provider-1", true)).toBe("failed");
+      expect(log.warn).toHaveBeenCalledWith(
+        "sandbox.status.unrecognized",
+        expect.objectContaining({ status: "unexpected" })
+      );
     });
   });
 

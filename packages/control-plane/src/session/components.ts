@@ -23,6 +23,7 @@
 
 import { resolveAppName } from "@open-inspect/shared/app-name";
 import { DEFAULT_MODEL } from "@open-inspect/shared/models";
+import { sandboxPromptBlockReason } from "@open-inspect/shared/types/sandbox-shutdown";
 import { generateId, hashToken, encryptToken } from "../auth/crypto";
 import { getUserAuth } from "../auth/user/runtime";
 import { resolveSandboxBackendName } from "../sandbox/provider-name";
@@ -505,7 +506,8 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     alarmScheduler,
     executionStop,
     getExecutionTimeoutMs,
-    () => lifecycleManager.mayProcessQueuedWork()
+    () => lifecycleManager.mayProcessQueuedWork(),
+    () => sandboxPromptBlockReason(lifecycleManager.shutdownSnapshot())
   );
 
   // Tier 7 — services over the queue and lifecycle.
@@ -527,6 +529,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     messageQueue,
     stopExecution: () => executionStop.stop(),
     parseArtifactMetadata: (artifact) => parseArtifactMetadata(artifact, log),
+    transaction,
   });
   const autofixHandler = new AutofixHandler(messageQueue);
   const budgetService = new SessionBudgetService(
@@ -859,7 +862,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     listEvents: (_request, url) => messagesHandler.listEvents(url),
     listArtifacts: (_request, url) => messagesHandler.listArtifacts(url),
     listMessages: (_request, url) => messagesHandler.listMessages(url),
-    listUsage: (_request, url) => messagesHandler.listUsage(url),
+    exportTrace: (_request, url) => messagesHandler.exportTrace(url),
     createPr: (request, _url, requestLog) => pullRequestHandler.createPr(request, requestLog),
     pullRequestArtifactSnapshot: (request, url) =>
       pullRequestHandler.pullRequestArtifactSnapshot(request, url),
@@ -980,6 +983,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
           async () => {
             await wsManager.expireAuthorizationLeases(Date.now());
             await alarmScheduler.rehydrate();
+            await lifecycleManager.rearmRejectedStartupCleanupAlarm();
             await terminalMessageProjection.rearm();
           },
           {
@@ -1065,7 +1069,7 @@ function createLifecycleManager(deps: LifecycleManagerDeps): SandboxLifecycleMan
   };
 
   const sandboxDashboardUrlBuilder =
-    sandboxBackend === "modal"
+    sandboxBackend === "modal" || sandboxBackend === "modal-vm"
       ? (providerObjectId: string) =>
           resolveSandboxDashboardUrl(sandboxDashboardSettings, providerObjectId)
       : undefined;

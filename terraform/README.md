@@ -46,8 +46,11 @@ brew install terraform
 # Modal CLI (for Modal deployments)
 pip install modal
 
-# Node.js >= 24 (for building workers)
+# Node.js >= 24 (for building workers). node@24 is keg-only, so put it on PATH
+# (add the export to your shell profile to keep it across sessions).
 brew install node@24
+export PATH="$(brew --prefix node@24)/bin:$PATH"
+node --version  # must print v24 or newer
 ```
 
 ### 2. Cloudflare Setup
@@ -189,8 +192,8 @@ workflows prefer a non-empty variable, then the same-named secret, then the exis
 one exists. Existing secret-only deployments continue to work; an empty variable falls back to the
 secret rather than clearing it. `CLASSIFICATION_MODEL` remains variable-only.
 
-See [the CI/CD setup guide](../docs/GETTING_STARTED.md#step-10-set-up-cicd-optional) for the
-complete variable list and bulk upload examples using `gh variable set` and `gh secret set`.
+See [the CI/CD setup guide](../docs/GETTING_STARTED.md#set-up-cicd-optional) for the complete
+variable list and bulk upload examples using `gh variable set` and `gh secret set`.
 
 Add these secrets to your repository settings:
 

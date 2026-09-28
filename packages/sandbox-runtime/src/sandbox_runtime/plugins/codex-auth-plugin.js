@@ -6,9 +6,13 @@
  * refresh tokens are persisted centrally in D1 rather than being lost when
  * ephemeral sandboxes terminate.
  *
- * Auto-loaded from .opencode/plugins/ - OpenCode discovers project plugins
- * and deduplicates by provider ID (last wins), so this replaces the built-in.
+ * Auto-loaded from .opencode/plugins/. OpenCode runs the built-in model hook
+ * first, then this hook; our auth loader brokers the managed credential.
  */
+
+import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 import { createProviderTokenBroker } from "./provider-token-broker.js";
 
@@ -60,6 +64,69 @@ const PERMANENT_SUBSCRIPTION_ERROR_CODES = new Set([
   "reconnect_required",
 ]);
 
+const DEFAULT_MODELS_URL = "https://models.opencode.ai";
+const validRate = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0;
+
+// Mirror OpenCode's models.dev cost conversion. These are model-price
+// equivalents, not charges incurred by a ChatGPT subscription.
+function catalogCost(raw) {
+  if (!raw || !validRate(raw.input) || !validRate(raw.output)) return null;
+  const convert = (cost) => ({
+    input: cost.input,
+    output: cost.output,
+    cache: {
+      read: validRate(cost.cache_read) ? cost.cache_read : 0,
+      write: validRate(cost.cache_write) ? cost.cache_write : 0,
+    },
+  });
+  const result = convert(raw);
+  if (Array.isArray(raw.tiers)) {
+    result.tiers = raw.tiers
+      .filter(
+        (tier) =>
+          validRate(tier?.input) &&
+          validRate(tier?.output) &&
+          tier.tier?.type === "context" &&
+          validRate(tier.tier.size)
+      )
+      .map((tier) => ({ ...convert(tier), tier: tier.tier }));
+  }
+  if (validRate(raw.context_over_200k?.input) && validRate(raw.context_over_200k?.output)) {
+    result.experimentalOver200K = convert(raw.context_over_200k);
+  }
+  return result;
+}
+
+async function openAiCatalogModels() {
+  const source = process.env.OPENCODE_MODELS_URL || DEFAULT_MODELS_URL;
+  // Matches ModelsDev.Service in pinned OpenCode 1.18.29; our image refreshes this cache.
+  const cachePath =
+    process.env.OPENCODE_MODELS_PATH ||
+    (source === DEFAULT_MODELS_URL
+      ? join(process.env.XDG_CACHE_HOME || join(homedir(), ".cache"), "opencode", "models.json")
+      : null);
+  if (!cachePath) {
+    console.warn(
+      "OpenCode model prices unavailable; set OPENCODE_MODELS_PATH for a custom catalog"
+    );
+    return null;
+  }
+  try {
+    const catalog = JSON.parse(await readFile(cachePath, "utf8"));
+    const models = catalog?.openai?.models;
+    if (!models || typeof models !== "object" || Array.isArray(models)) {
+      throw new Error("OpenAI models missing from cached catalog");
+    }
+    return models;
+  } catch (error) {
+    console.warn(
+      "OpenCode model prices unavailable in cache; leaving OAuth model costs at zero",
+      error
+    );
+    return null;
+  }
+}
+
 const ALLOWED_MODELS = new Set([
   "gpt-5.1-codex-max",
   "gpt-5.1-codex-mini",
@@ -71,12 +138,8 @@ const ALLOWED_MODELS = new Set([
   "gpt-6-astra",
   "gpt-6-sol",
   "gpt-6-luna",
-  "gpt-5.3-codex",
-  "gpt-5.3-codex-spark",
   "gpt-5.1-codex",
 ]);
-
-const PLATFORM_MODEL_ALIASES = new Map([["gpt-5.3-codex-spark", "gpt-5.3-codex"]]);
 
 // Latched for the rest of the sandbox's life once the subscription is spent, so
 // a doomed Codex call is not repeated on every later turn.
@@ -410,24 +473,13 @@ function whenAborted(signal) {
 function spilloverHeaders(headers, apiKey) {
   const next = new Headers(headers);
   for (const name of CHATGPT_ONLY_HEADERS) next.delete(name);
-  // A source Request's content-length describes the subscription body, which a
-  // Spark alias rewrite changes; forwarding it makes the transport reject the
-  // fallback before it is sent. content-encoding never describes this
-  // already-decoded string body.
+  // The body was buffered to a decoded string, which fetch sizes itself. A
+  // content-length or content-encoding copied from the caller describes the
+  // original bytes, and a disagreeing length makes the transport reject the
+  // fallback before it is sent.
   for (const name of TRANSPORT_HEADERS) next.delete(name);
   next.set("authorization", `Bearer ${apiKey}`);
   return next;
-}
-
-function platformFallbackBody(body) {
-  if (typeof body !== "string") return body;
-  try {
-    const parsed = JSON.parse(body);
-    const platformModel = PLATFORM_MODEL_ALIASES.get(parsed?.model);
-    return platformModel ? JSON.stringify({ ...parsed, model: platformModel }) : body;
-  } catch {
-    return body;
-  }
 }
 
 /** Re-materialize a response whose body was read to classify a 429. */
@@ -478,7 +530,6 @@ async function fetchFallback(fallbackUrl, baseInit, headers, apiKey, reason = nu
   try {
     response = await fetch(fallbackUrl, {
       ...baseInit,
-      body: platformFallbackBody(baseInit.body),
       headers: spilloverHeaders(headers, apiKey),
     });
   } catch (error) {
@@ -522,55 +573,29 @@ function isPermanentSubscriptionTokenFailure(error) {
 
 export const CodexAuthProxy = async (input) => {
   return {
+    provider: {
+      id: "openai",
+      async models(provider, context) {
+        if (context.auth?.type !== "oauth") return provider.models;
+        const catalog = await openAiCatalogModels();
+        // The built-in hook filters models and zeroes OAuth prices first.
+        const models = Object.fromEntries(
+          Object.entries(provider.models)
+            .filter(([modelId]) => ALLOWED_MODELS.has(modelId))
+            .map(([modelId, model]) => {
+              const cost = catalogCost(catalog?.[modelId]?.cost);
+              return [modelId, cost ? { ...model, cost } : model];
+            })
+        );
+        return models;
+      },
+    },
     auth: {
       provider: "openai",
       methods: [],
-      async loader(getAuth, provider) {
+      async loader(getAuth) {
         const auth = await getAuth();
         if (auth.type !== "oauth") return {};
-
-        // Filter to allowed Codex models
-        for (const modelId of Object.keys(provider.models)) {
-          if (!ALLOWED_MODELS.has(modelId)) {
-            delete provider.models[modelId];
-          }
-        }
-
-        // Inject GPT 5.3 Codex models if missing
-        if (!provider.models["gpt-5.3-codex"]) {
-          provider.models["gpt-5.3-codex"] = {
-            name: "GPT 5.3 Codex",
-            attachment: false,
-            reasoning: false,
-            temperature: false,
-            options: {},
-            variants: {},
-            limit: { context: 1000000, output: 1000000 },
-            cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
-          };
-        }
-
-        if (!provider.models["gpt-5.3-codex-spark"]) {
-          provider.models["gpt-5.3-codex-spark"] = {
-            name: "GPT 5.3 Codex Spark",
-            attachment: false,
-            reasoning: false,
-            temperature: false,
-            options: {},
-            variants: {},
-            limit: { context: 1000000, output: 1000000 },
-            cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
-          };
-        }
-
-        // Zero out costs (Codex is subscription-based)
-        for (const model of Object.values(provider.models)) {
-          model.cost = {
-            input: 0,
-            output: 0,
-            cache: { read: 0, write: 0 },
-          };
-        }
 
         const setAuth = async (body) => {
           await input.client.auth.set({ path: { id: "openai" }, body });

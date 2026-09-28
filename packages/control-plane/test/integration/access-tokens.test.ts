@@ -7,6 +7,8 @@ import {
   LAST_USED_RESOLUTION_MS,
   PersonalAccessTokenStore,
 } from "../../src/db/personal-access-tokens";
+import { TeamMembershipStore } from "../../src/db/team-memberships";
+import { TeamStore } from "../../src/db/teams";
 import { cleanD1Tables } from "./cleanup";
 import { serviceFetch, sqlDatabase } from "./helpers";
 
@@ -313,6 +315,46 @@ describe("personal access tokens", () => {
       headers: { Authorization: `Bearer ${token}` },
     });
     expect(response.status).toBe(200);
+  });
+
+  it("reads its owner's teams, and never joins one", async () => {
+    // Team routes resolve the viewer from the admitted principal. A token is
+    // its owner there too: the same teams, the same capabilities.
+    const teams = new TeamStore(sqlDatabase(env.DB));
+    const mine = await teams.create({ slug: "mine", name: "Mine", joinPolicy: "open" });
+    const open = await teams.create({ slug: "open", name: "Open", joinPolicy: "open" });
+    await new TeamMembershipStore(sqlDatabase(env.DB)).add(mine.id, USER_ID, "lead");
+    const token = await issueToken();
+    const read = (path: string, method = "GET") =>
+      SELF.fetch(`https://test.local${path}`, {
+        method,
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: method === "GET" ? undefined : "{}",
+      });
+
+    for (const path of ["/me/teams", "/teams"]) {
+      const response = await read(path);
+      expect(response.status, path).toBe(200);
+      await expect(response.json(), path).resolves.toMatchObject({
+        teams: [{ id: mine.id }],
+      });
+    }
+    const detail = await read(`/teams/${mine.id}`);
+    expect(detail.status).toBe(200);
+    await expect(detail.json()).resolves.toMatchObject({
+      id: mine.id,
+      capabilities: { canManageMembers: true },
+    });
+    expect((await read(`/teams/${mine.id}/members`)).status).toBe(200);
+    // A team the owner cannot see stays hidden from the token as well.
+    expect((await read(`/teams/${open.id}`)).status).toBe(404);
+
+    // Membership changes stay human-only, even where the owner may make them.
+    expect((await read(`/teams/${open.id}/join`, "POST")).status).toBe(403);
+    expect((await read(`/teams/${mine.id}/members/${USER_ID}`, "DELETE")).status).toBe(403);
+    expect(await new TeamMembershipStore(sqlDatabase(env.DB)).listForUser(USER_ID)).toEqual(
+      new Map([[mine.id, "lead"]])
+    );
   });
 
   it("keeps the plaintext token and the listing out of caches", async () => {
