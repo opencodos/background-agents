@@ -1627,6 +1627,8 @@ export class Scheduler {
     );
 
     const sessionInput: SessionInitInput = {
+      ownerTeamId: null,
+      visibility: "workspace",
       sessionId,
       ...target,
       title: `[Auto] ${automation.name}`,

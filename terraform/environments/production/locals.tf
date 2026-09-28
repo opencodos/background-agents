@@ -1,6 +1,6 @@
 locals {
   name_suffix              = var.deployment_name
-  use_modal_backend        = var.sandbox_provider == "modal"
+  use_modal_backend        = contains(["modal", "modal-vm"], var.sandbox_provider)
   use_daytona_backend      = var.sandbox_provider == "daytona"
   use_vercel_backend       = var.sandbox_provider == "vercel"
   use_opencomputer_backend = var.sandbox_provider == "opencomputer"
@@ -93,6 +93,9 @@ locals {
   effective_web_app_url = (
     var.web_platform == "vercel" ? module.web_app[0].production_url : local.web_app_url
   )
+
+  # Documentation site URL, when it serves a hostname of its own
+  docs_custom_domain_url = var.docs_custom_domain != null ? "https://${var.docs_custom_domain}" : null
 
   # Worker script paths (deterministic output locations)
   control_plane_script_path = "${var.project_root}/packages/control-plane/dist/index.js"
