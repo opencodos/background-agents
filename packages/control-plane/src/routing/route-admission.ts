@@ -618,7 +618,9 @@ async function enforceTeamRequirement(
   ctx: RequestContext,
   evidence: AuthorizationEvidence
 ): Promise<AuthorizationFailure | null> {
-  if (ctx.principal?.kind !== "user") {
+  // An access token resolves its owner's team access, as it does every other
+  // requirement; the method gate has already refused its writes.
+  if (!isSelfActingPrincipal(ctx.principal)) {
     return authorizationDenial(
       json({ error: "Forbidden", code: "service_capability_required" }, 403),
       evidence,
