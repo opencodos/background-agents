@@ -20,7 +20,6 @@ import {
   generateInstallationToken,
   getPullRequestSnapshot,
   getReviewStatusState,
-  GITHUB_API_REQUEST_TIMEOUT_MS,
   postCommitStatus,
   REVIEW_DID_NOT_FINISH_PREFIX,
   REVIEW_NOT_PUBLISHED_DESCRIPTION,
@@ -29,13 +28,8 @@ import {
 } from "./github-auth";
 import { signedControlPlaneFetch } from "./internal-auth";
 import type { Logger } from "./logger";
+import { leaseWriteDeadline } from "./review-supersession";
 import type { Env } from "./types";
-
-/**
- * Slack kept between the last status write and the lease's expiry: a write is started only while
- * at least one full request timeout plus this margin of the lease remains.
- */
-const CLOSE_OUT_LEASE_MARGIN_MS = 5_000;
 
 /** Why a review's turn ended, recorded once so every later attempt writes the same thing. */
 export interface ReviewCloseOutRequest {
@@ -166,11 +160,7 @@ async function writeTerminalStatus(
   meta: Record<string, unknown>
 ): Promise<{ outcome: ReviewCloseOutOutcome; finalize: "done" | "retry" }> {
   const { owner, repo, prNumber, headSha } = grant;
-  const deadline =
-    grant.requestedAt +
-    grant.leaseExpiresInMs -
-    GITHUB_API_REQUEST_TIMEOUT_MS -
-    CLOSE_OUT_LEASE_MARGIN_MS;
+  const deadline = leaseWriteDeadline(grant);
   const userAgent = resolveAppName(env);
   const token = await generateInstallationToken({
     appId: env.GITHUB_APP_ID,

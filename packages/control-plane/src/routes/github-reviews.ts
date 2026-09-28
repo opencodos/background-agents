@@ -14,12 +14,17 @@
  * session id, only while its session is the latest generation and its turn
  * has not been closed out. A close-out takes it under `close-out:<sessionId>:…`,
  * only while that session's fence row is the newest row for its head. The
- * only unleased status write is the admitting handler's "pending".
+ * admitting handler's "pending" start marker takes it under
+ * `start-marker:<sessionId>:…`, on the agent's terms but only for
+ * START_MARKER_LEASE_MS, so no close-out reads a head while that review's
+ * start marker may still land on it — given that GitHub lands a write within
+ * the bot's request timeout or never, the assumption its lease write deadline
+ * rests on.
  *
- * The claim, release-claim, sweep, and close-out routes are gated to the
- * github-bot service principal; the review-ownership pair is the review
- * agent's own submission-lease boundary and is gated to the calling session's
- * sandbox principal.
+ * The claim, release-claim, sweep, start-marker, and close-out routes are
+ * gated to the github-bot service principal; the review-ownership pair is the
+ * review agent's own submission-lease boundary and is gated to the calling
+ * session's sandbox principal.
  */
 
 import { Hono } from "hono";
@@ -91,6 +96,15 @@ const closeOutFinalizeBodySchema = z.object({
   outcome: z.enum(["done", "retry"]),
 });
 
+const startMarkerBodySchema = z.object({
+  sessionId: z.string().trim().min(1),
+});
+
+const startMarkerReleaseBodySchema = startMarkerBodySchema.extend({
+  /** The `grantId` returned with the start marker's grant. */
+  grantId: z.string().min(1),
+});
+
 interface StaleReviewSessionRow {
   session_id: string;
   created_at: number;
@@ -105,6 +119,14 @@ interface StaleReviewSessionRow {
  */
 function closeOutHolderPrefix(sessionId: string): string {
   return `close-out:${sessionId}:`;
+}
+
+/**
+ * Lease holder ids of start markers of `sessionId` start with this prefix: a
+ * fresh id per grant, never equal to a session id or a close-out holder.
+ */
+function startMarkerHolderPrefix(sessionId: string): string {
+  return `start-marker:${sessionId}:`;
 }
 
 /**
@@ -170,13 +192,27 @@ const REVIEW_FENCE_ORPHAN_GRACE_MS = 10 * 60 * 1000;
 
 /**
  * How long a submission lease is held. Claims are never blocked by a lease —
- * it only serializes the terminal status write: sweeps and the reaper skip a
- * session holding an unexpired lease so a cancel can never race its in-flight
- * GitHub POSTs, and every other agent or close-out waits for release/expiry.
- * Holders release explicitly right after their writes; the TTL only bounds a
- * crashed holder.
+ * it only serializes status writes: sweeps and the reaper skip a session whose
+ * agent holds an unexpired lease so a cancel can never race its in-flight
+ * GitHub POSTs, and every other holder waits for release/expiry. Holders
+ * release explicitly right after their writes; the TTL only bounds a crashed
+ * holder. A start marker holds the lease for START_MARKER_LEASE_MS instead.
  */
 export const REVIEW_SUBMISSION_LEASE_MS = 2 * 60 * 1000;
+
+/**
+ * How long a start marker holds the submission lease. The bot releases it as
+ * soon as GitHub has settled the one "pending" write — landed it, or refused
+ * it with a 4xx — so it runs out only when GitHub has not (a write that timed
+ * out or got a 5xx may still land) or when the release itself is lost. It must
+ * cover that write: the bot starts it at most 5 s (its lease wait) after
+ * asking, and only while a GitHub request timeout (10 s) plus a 5 s margin of
+ * the lease remain, so it needs 5 + 10 + 5 = 20 s. And it stays well inside
+ * the agent's lease retries: a review's agent may reach submission right
+ * behind its start marker, and asks for the lease for 95 s before it gives up
+ * without publishing.
+ */
+const START_MARKER_LEASE_MS = 30 * 1000;
 
 /**
  * Age past which the reaper drops a fence row that owes no close-out: far
@@ -854,6 +890,68 @@ export async function handleFinalizeCloseOut(
 }
 
 /**
+ * Take the PR's submission lease as `holder` for review `sessionId`, for
+ * `leaseMs`: only while that review is its PR's latest generation and its turn
+ * has not been closed out, and no other holder's lease is live (`holder`
+ * re-taking its own lease is an idempotent retry). Returns null once taken;
+ * otherwise the refusal:
+ *
+ * 423 + Retry-After: the review is eligible, but another holder's lease is
+ * live, or the reaper is checking whether it ever received its prompt — wait.
+ * 409: permanent — superseded, swept, or closed out; write nothing.
+ */
+async function acquireLatestReviewLease(
+  db: SqlDatabase,
+  sessionId: string,
+  holder: string,
+  leaseMs: number
+): Promise<Response | null> {
+  const now = Date.now();
+  const result = await db
+    .prepare(
+      `UPDATE github_review_state SET lease_session_id = ?, lease_expires_at = ?
+       WHERE EXISTS (
+         SELECT 1 FROM github_review_sessions grs
+         WHERE grs.session_id = ?
+           AND grs.repo_id = github_review_state.repo_id
+           AND grs.pr_number = github_review_state.pr_number
+           AND grs.generation = github_review_state.latest_generation
+           AND grs.close_out_request IS NULL
+       )
+       AND (lease_session_id IS NULL OR lease_session_id = ? OR lease_expires_at < ?)`
+    )
+    .bind(holder, now + leaseMs, sessionId, holder, now)
+    .run();
+  if ((result.meta?.changes ?? 0) > 0) return null;
+
+  // The lease may be released between the UPDATE and this read; that costs
+  // one spurious 423 and a retry, never a wrong 409. A provisional marker is
+  // also "wait": the reaper withdraws it if this session proves it is live.
+  const eligible = await db
+    .prepare(
+      `SELECT st.lease_expires_at
+       FROM github_review_sessions grs
+       JOIN github_review_state st
+         ON st.repo_id = grs.repo_id AND st.pr_number = grs.pr_number
+       WHERE grs.session_id = ?
+         AND grs.generation = st.latest_generation
+         AND (grs.close_out_request IS NULL OR ${isProvisionalSql("grs.close_out_request")})`
+    )
+    .bind(sessionId)
+    .first<{ lease_expires_at: number | null }>();
+  if (!eligible) return error("Review generation superseded", 409);
+
+  const retryAfterSeconds = Math.max(
+    1,
+    Math.ceil(((eligible.lease_expires_at ?? now) - Date.now()) / 1000)
+  );
+  return new Response(JSON.stringify({ error: "Review submission lease busy" }), {
+    status: 423,
+    headers: { "Content-Type": "application/json", "Retry-After": String(retryAfterSeconds) },
+  });
+}
+
+/**
  * POST /sessions/:id/review-ownership
  * Sandbox-token-authenticated lease acquisition: the review agent calls this
  * immediately before its final GitHub writes. The lease is granted only
@@ -880,51 +978,10 @@ export async function handleReviewOwnership(
     return error("Unauthorized", 401);
   }
 
-  const now = Date.now();
-  const result = await ctx.db
-    .prepare(
-      `UPDATE github_review_state SET lease_session_id = ?, lease_expires_at = ?
-       WHERE EXISTS (
-         SELECT 1 FROM github_review_sessions grs
-         WHERE grs.session_id = ?
-           AND grs.repo_id = github_review_state.repo_id
-           AND grs.pr_number = github_review_state.pr_number
-           AND grs.generation = github_review_state.latest_generation
-           AND grs.close_out_request IS NULL
-       )
-       AND (lease_session_id IS NULL OR lease_session_id = ? OR lease_expires_at < ?)`
-    )
-    .bind(sessionId, now + REVIEW_SUBMISSION_LEASE_MS, sessionId, sessionId, now)
-    .run();
-  if ((result.meta?.changes ?? 0) > 0) {
-    return new Response(null, { status: 204 });
-  }
-
-  // The lease may be released between the UPDATE and this read; that costs
-  // one spurious 423 and a retry, never a wrong 409. A provisional marker is
-  // also "wait": the reaper withdraws it if this session proves it is live.
-  const eligible = await ctx.db
-    .prepare(
-      `SELECT st.lease_expires_at
-       FROM github_review_sessions grs
-       JOIN github_review_state st
-         ON st.repo_id = grs.repo_id AND st.pr_number = grs.pr_number
-       WHERE grs.session_id = ?
-         AND grs.generation = st.latest_generation
-         AND (grs.close_out_request IS NULL OR ${isProvisionalSql("grs.close_out_request")})`
-    )
-    .bind(sessionId)
-    .first<{ lease_expires_at: number | null }>();
-  if (!eligible) return error("Review generation superseded", 409);
-
-  const retryAfterSeconds = Math.max(
-    1,
-    Math.ceil(((eligible.lease_expires_at ?? now) - Date.now()) / 1000)
+  return (
+    (await acquireLatestReviewLease(ctx.db, sessionId, sessionId, REVIEW_SUBMISSION_LEASE_MS)) ??
+    new Response(null, { status: 204 })
   );
-  return new Response(JSON.stringify({ error: "Review submission lease busy" }), {
-    status: 423,
-    headers: { "Content-Type": "application/json", "Retry-After": String(retryAfterSeconds) },
-  });
 }
 
 /**
@@ -953,6 +1010,70 @@ export async function handleReviewLeaseRelease(
     .bind(sessionId)
     .run();
 
+  return new Response(null, { status: 204 });
+}
+
+/**
+ * POST /internal/github-reviews/start-marker
+ * The admitting handler's lease for its review's "pending" start marker. A
+ * close-out of that review that read the head before the start marker landed
+ * would finalize the review's fence and leave "pending" behind for good, so
+ * the start marker is written holding the PR's submission lease, taken on the
+ * agent's terms (acquireLatestReviewLease) as `start-marker:<sessionId>:<nonce>`
+ * for START_MARKER_LEASE_MS and returned as `grantId`.
+ *
+ * 200: granted for `leaseExpiresInMs`; write, then release with `grantId`
+ * once GitHub has settled the write.
+ * 423 + Retry-After: another holder's lease is live — wait.
+ * 409: superseded or closed out — write nothing.
+ */
+export async function handleAcquireStartMarker(
+  request: Request,
+  _env: Env,
+  _params: object,
+  ctx: RequestContext
+): Promise<Response> {
+  const parsed = await parseBody(request, startMarkerBodySchema, "Invalid start-marker body");
+  if (parsed instanceof Response) return parsed;
+  const holder = `${startMarkerHolderPrefix(parsed.sessionId)}${crypto.randomUUID()}`;
+  const refusal = await acquireLatestReviewLease(
+    ctx.db,
+    parsed.sessionId,
+    holder,
+    START_MARKER_LEASE_MS
+  );
+  if (refusal) return refusal;
+  return json({ grantId: holder, leaseExpiresInMs: START_MARKER_LEASE_MS });
+}
+
+/**
+ * POST /internal/github-reviews/start-marker/release
+ * Ends one start marker's grant, named by its `grantId`, once GitHub has
+ * settled its write. Only that exact grant's lease is cleared; anyone else's
+ * is a no-op 204. 400 when `grantId` is not a start marker of `sessionId`.
+ */
+export async function handleReleaseStartMarker(
+  request: Request,
+  _env: Env,
+  _params: object,
+  ctx: RequestContext
+): Promise<Response> {
+  const parsed = await parseBody(
+    request,
+    startMarkerReleaseBodySchema,
+    "Invalid start-marker release body"
+  );
+  if (parsed instanceof Response) return parsed;
+  if (!parsed.grantId.startsWith(startMarkerHolderPrefix(parsed.sessionId))) {
+    return error("Invalid start-marker grant", 400);
+  }
+  await ctx.db
+    .prepare(
+      `UPDATE github_review_state SET lease_session_id = NULL, lease_expires_at = NULL
+       WHERE lease_session_id = ?`
+    )
+    .bind(parsed.grantId)
+    .run();
   return new Response(null, { status: 204 });
 }
 
@@ -1146,6 +1267,18 @@ githubReviewRoutes.post(
   "/internal/github-reviews/sweep",
   admit({ ...GITHUB_SERVICE_ROUTE, authorization: serviceAuthorized("github-bot") }),
   (c) => dispatchSession(c, handleSweepStaleReviews)
+);
+
+githubReviewRoutes.post(
+  "/internal/github-reviews/start-marker",
+  admit({ ...GITHUB_SERVICE_ROUTE, authorization: serviceAuthorized("github-bot") }),
+  (c) => dispatch(c, handleAcquireStartMarker)
+);
+
+githubReviewRoutes.post(
+  "/internal/github-reviews/start-marker/release",
+  admit({ ...GITHUB_SERVICE_ROUTE, authorization: serviceAuthorized("github-bot") }),
+  (c) => dispatch(c, handleReleaseStartMarker)
 );
 
 githubReviewRoutes.post(

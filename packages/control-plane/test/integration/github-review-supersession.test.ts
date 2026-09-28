@@ -13,6 +13,7 @@ import {
   handleReviewLeaseRelease,
   handleReviewOwnership,
   reapSupersededReviewSessions,
+  REVIEW_SUBMISSION_LEASE_MS,
 } from "../../src/routes/github-reviews";
 import type { RequestContext } from "../../src/routes/shared";
 import {
@@ -992,6 +993,147 @@ describe("GitHub review close-out (who writes a review's terminal status)", () =
       expect(botFetch).not.toHaveBeenCalled();
       const state = await realSessions.fetch(sessionId, "/internal/state");
       expect((await state.json<{ status: string }>()).status).not.toBe("archived");
+    });
+  });
+
+  describe("the admitting handler's start marker", () => {
+    interface StartMarkerGrant {
+      grantId: string;
+      leaseExpiresInMs: number;
+    }
+
+    function startMarker(sessionId: string, service: "github-bot" | "slack-bot" = "github-bot") {
+      return serviceFetch("https://test.local/internal/github-reviews/start-marker", {
+        method: "POST",
+        service,
+        body: JSON.stringify({ sessionId }),
+      });
+    }
+
+    function releaseStartMarker(
+      sessionId: string,
+      grantId: string,
+      service: "github-bot" | "slack-bot" = "github-bot"
+    ) {
+      return serviceFetch("https://test.local/internal/github-reviews/start-marker/release", {
+        method: "POST",
+        service,
+        body: JSON.stringify({ sessionId, grantId }),
+      });
+    }
+
+    async function startMarkerGrant(sessionId: string): Promise<StartMarkerGrant> {
+      const granted = await startMarker(sessionId);
+      expect(granted.status).toBe(200);
+      return granted.json<StartMarkerGrant>();
+    }
+
+    const NO_LEASE = { lease_session_id: null, lease_expires_at: null };
+
+    it("holds its review's close-out off until the start marker is released", async () => {
+      // A close-out that read the head before the start marker landed would finalize the fence
+      // and leave that late "pending" with nothing left to replace it.
+      const repoId = 650505;
+      const prNumber = 9;
+      const sessionId = await createLatestReview(repoId, prNumber, "sha-a");
+      const marker = await startMarkerGrant(sessionId);
+      expect(marker).toEqual({
+        grantId: expect.stringMatching(new RegExp(`^start-marker:${sessionId}:`)),
+        leaseExpiresInMs: expect.any(Number),
+      });
+
+      expect((await closeOut(sessionId, REQUEST)).status).toBe(202);
+      expect((await fenceRows(repoId, prNumber)).map((row) => row.session_id)).toEqual([sessionId]);
+
+      expect((await releaseStartMarker(sessionId, marker.grantId)).status).toBe(204);
+      await grantOf(closeOut(sessionId));
+    });
+
+    it("is refused once its review is superseded or closed out", async () => {
+      const superseded = await createLatestReview(651515, 9, "sha-a");
+      // A newer trigger — a push, or an approved PR's stand-down — claims the next generation.
+      await claimGeneration(651515, 9);
+      expect((await startMarker(superseded)).status).toBe(409);
+
+      const closedOut = await createLatestReview(651516, 9, "sha-a");
+      const grant = await grantOf(closeOut(closedOut, REQUEST));
+      expect((await startMarker(closedOut)).status).toBe(409);
+      expect((await finalize(closedOut, grant.grantId, "done")).status).toBe(204);
+      expect((await startMarker(closedOut)).status).toBe(409);
+      expect(await leaseHolder(651516, 9)).toEqual(NO_LEASE);
+    });
+
+    it("waits (423) while another holder's lease is live", async () => {
+      const repoId = 652525;
+      const prNumber = 9;
+      const older = await createLatestReview(repoId, prNumber, "sha-a");
+      expect((await agentAcquire(older)).status).toBe(204);
+      const newer = await createLatestReview(repoId, prNumber, "sha-b");
+
+      const busy = await startMarker(newer);
+      expect(busy.status).toBe(423);
+      expect(Number(busy.headers.get("Retry-After"))).toBeGreaterThan(0);
+
+      expect((await agentRelease(older)).status).toBe(204);
+      await startMarkerGrant(newer);
+    });
+
+    it("lapses inside its own agent's lease retries when its write goes unanswered", async () => {
+      // A start marker whose write GitHub never answered keeps its lease until it expires, and
+      // its review's agent may reach submission right behind it. The agent's submission script
+      // asks for the lease 20 times, 5 s apart (github-bot prompts.ts), then exits without
+      // publishing: its last request comes 95 s after its first.
+      const AGENT_LAST_LEASE_REQUEST_MS = 95_000;
+      const repoId = 655555;
+      const prNumber = 9;
+      const sessionId = await createLatestReview(repoId, prNumber, "sha-a");
+
+      const requestedAt = Date.now();
+      const marker = await startMarkerGrant(sessionId);
+      const markerExpiresAt = (await leaseHolder(repoId, prNumber))!.lease_expires_at!;
+      // The bot times its write by `leaseExpiresInMs`: the grant never promises more than it runs.
+      expect(markerExpiresAt).toBeGreaterThanOrEqual(requestedAt + marker.leaseExpiresInMs);
+      expect(markerExpiresAt - requestedAt).toBeLessThan(AGENT_LAST_LEASE_REQUEST_MS);
+      expect((await agentAcquire(sessionId)).status).toBe(423);
+
+      // Once it lapses, the agent takes the full submission lease.
+      await expireLease(repoId, prNumber);
+      const agentRequestedAt = Date.now();
+      expect((await agentAcquire(sessionId)).status).toBe(204);
+      const agentLease = await leaseHolder(repoId, prNumber);
+      expect(agentLease?.lease_session_id).toBe(sessionId);
+      expect(agentLease?.lease_expires_at).toBeGreaterThanOrEqual(
+        agentRequestedAt + REVIEW_SUBMISSION_LEASE_MS
+      );
+    });
+
+    it("is released only by its own grant", async () => {
+      const repoId = 653535;
+      const prNumber = 9;
+      const sessionId = await createLatestReview(repoId, prNumber, "sha-a");
+      const marker = await startMarkerGrant(sessionId);
+      const markerLease = await leaseHolder(repoId, prNumber);
+
+      expect(
+        (await releaseStartMarker(sessionId, `start-marker:${sessionId}:another-grant`)).status
+      ).toBe(204);
+      expect((await agentRelease(sessionId)).status).toBe(204);
+      expect((await finalize(sessionId, marker.grantId, "retry")).status).toBe(400);
+      expect((await releaseStartMarker(sessionId, sessionId)).status).toBe(400);
+      expect(await leaseHolder(repoId, prNumber)).toEqual(markerLease);
+
+      expect((await releaseStartMarker(sessionId, marker.grantId)).status).toBe(204);
+      expect(await leaseHolder(repoId, prNumber)).toEqual(NO_LEASE);
+    });
+
+    it("refuses callers other than the github-bot service", async () => {
+      const sessionId = await createLatestReview(654545, 9, "sha-a");
+
+      expect((await startMarker(sessionId, "slack-bot")).status).toBe(403);
+      expect(
+        (await releaseStartMarker(sessionId, `start-marker:${sessionId}:grant`, "slack-bot")).status
+      ).toBe(403);
+      expect(await leaseHolder(654545, 9)).toEqual(NO_LEASE);
     });
   });
 
