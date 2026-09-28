@@ -12,13 +12,18 @@ updates:
       prefix: chore
       prefix-development: chore
     groups:
-      # One PR per week for all minor/patch bumps; majors still get their own.
+      # One PR per week for all minor/patch bumps and one for all majors.
       npm-minor-patch:
         patterns:
           - "*"
         update-types:
           - minor
           - patch
+      npm-major:
+        patterns:
+          - "*"
+        update-types:
+          - major
 
   - package-ecosystem: github-actions
     directory: /
@@ -51,6 +56,11 @@ updates:
         update-types:
           - minor
           - patch
+      python-major:
+        patterns:
+          - "*"
+        update-types:
+          - major
 
   # Base images in Dockerfiles.
   - package-ecosystem: docker
