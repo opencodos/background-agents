@@ -12,6 +12,6 @@
   "devDependencies": {
     "@opencomputer/sdk": "^0.9.1",
     "esbuild": "^0.28.1",
-    "typescript": "^5.7.2"
+    "typescript": "^7.0.2"
   }
 }
