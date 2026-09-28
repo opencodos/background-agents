@@ -62,6 +62,10 @@ updates:
       day: monday
     commit-message:
       prefix: chore
+    groups:
+      docker:
+        patterns:
+          - "*"
 
   # Base images in docker-compose*.yml at the repo root.
   - package-ecosystem: docker-compose
@@ -71,6 +75,10 @@ updates:
       day: monday
     commit-message:
       prefix: chore
+    groups:
+      docker-compose:
+        patterns:
+          - "*"
 
   - package-ecosystem: terraform
     directories:
@@ -81,6 +89,10 @@ updates:
       day: monday
     commit-message:
       prefix: chore
+    groups:
+      terraform:
+        patterns:
+          - "*"
     ignore:
       # The cloudflare provider is deliberately held below 5.20.0 (worker
       # observability regression, cloudflare/terraform-provider-cloudflare#7177).
