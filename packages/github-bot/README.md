@@ -182,8 +182,20 @@ All events are processed asynchronously via `executionCtx.waitUntil()`. The webh
 8. Sweep and cancel review sessions for the PR that hold an older generation, naming the repository.
    An older review whose head a push replaced keeps its fence row with a close-out request, so its
    pending status is closed out like any other ending (see [Review Close-Out](#review-close-out)).
-9. Post a pending `open-inspect` status on `pull_request.head.sha`. This is the only status write
-   made without the PR's submission lease.
+9. Post a pending `open-inspect` status on `pull_request.head.sha`, holding the PR's submission
+   lease (`POST /internal/github-reviews/start-marker`). The lease is granted on the agent's terms,
+   only while this review is still the PR's latest and its turn has not been closed out, but for 30
+   seconds instead of the submission lease's 2 minutes: the review's own agent may reach submission
+   right behind it. A `409` (superseded, or already closed out) writes nothing. A `423` (another
+   holder's lease is live) is retried for up to 5 seconds; after that, or when the control plane
+   fails or has not answered within those 5 seconds, the review runs without a start marker. The
+   lease is released once GitHub has settled the write, by landing it or refusing it with a 4xx; a
+   release still unanswered after 2 seconds is given up, leaving the lease to expire. After a 5xx, a
+   transport error or a timeout the write may still land, so the lease is kept until it expires. No
+   close-out of this review then reads the head while its start marker may still land, given that
+   GitHub lands a write within the bot's request timeout or never: the same assumption behind a
+   close-out never starting its write with less than a request timeout plus 5 seconds of its lease
+   left.
 10. Send the code review prompt. Its submission step is one shell script that first takes the PR's
     submission lease from the control plane: a 423 (another holder's lease is live) is retried for
     up to 100 seconds, and a 409 (superseded, or the turn was already closed out) exits without
@@ -217,7 +229,8 @@ App as the reviewer, so the button names it rather than the webhook App; both lo
 2. Post an eyes reaction on the PR.
 3. Run the same freshness check, generation claim, fenced session creation (with conditional claim
    release on failure), and stale-review sweep as the auto-review path.
-4. Post a pending `open-inspect` status on `pull_request.head.sha`.
+4. Post the pending `open-inspect` status on `pull_request.head.sha` under the lease, as step 9
+   above.
 5. Send the code review prompt, which posts the successful status after the review.
 
 In both review flows, a review that ends without replacing its pending status is closed out by the
@@ -238,7 +251,8 @@ bot (see [Review Close-Out](#review-close-out)).
 Every terminal `open-inspect` status is written by the holder of its PR's submission lease: the
 review's agent (its `success`, or the stale-PR `error`), or a close-out holding the lease as
 `close-out:<sessionId>:<nonce>` — a fresh id per grant. A close-out replaces only a status that is
-still `pending`.
+still `pending`. The handler's `pending` start marker holds the same lease while it is written, as
+`start-marker:<sessionId>:<nonce>`.
 
 A review prompt carries a `github` callback context naming the PR and the head SHA its pending
 status sits on. When the session's turn ends — published, timed out as stuck, cancelled, or lost its

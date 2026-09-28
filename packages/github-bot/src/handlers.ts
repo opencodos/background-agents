@@ -35,8 +35,13 @@ import { containsBotMention, stripBotMention } from "./github-mention";
 import { closeOutReviewStatus } from "./review-close-out";
 import {
   claimReviewGeneration,
+  leaseWriteDeadline,
   releaseReviewGeneration,
+  releaseStartMarkerLease,
+  requestStartMarkerLease,
   sweepStaleReviews,
+  type StartMarkerGrant,
+  type StartMarkerLeaseResult,
 } from "./review-supersession";
 
 export type HandlerResult =
@@ -196,16 +201,101 @@ interface ReviewStatusTarget {
 }
 
 /**
- * Mark a just-admitted review as in progress. The one commit-status write made without the PR's
- * submission lease: it is the start marker for the generation this handler has just admitted.
+ * How long a start marker may take to get the PR's submission lease before its review starts
+ * without one: long enough to wait out another holder's live lease, since holders release right
+ * after their own writes. A request the control plane has not answered by then is abandoned, so a
+ * stalled control plane holds the prompt back no longer than a busy lease does.
+ */
+export const START_MARKER_LEASE_WAIT_MS = 5_000;
+
+/** Pause between start-marker lease requests while another holder's lease is live. */
+const START_MARKER_LEASE_RETRY_MS = 1_000;
+
+/**
+ * The PR's submission lease for a review's start marker, or null when the marker must not or
+ * cannot be written now. Another holder's live lease is waited out for a few seconds: holders
+ * release right after their own writes.
+ */
+async function acquireStartMarkerLease(
+  env: Env,
+  log: Logger,
+  traceId: string,
+  sessionId: string,
+  meta: Record<string, unknown>
+): Promise<StartMarkerGrant | null> {
+  const giveUpAt = Date.now() + START_MARKER_LEASE_WAIT_MS;
+  // On setTimeout rather than AbortSignal.timeout, so it runs on the same clock as the retries.
+  const deadline = new AbortController();
+  const timer = setTimeout(
+    () => deadline.abort(new DOMException("Start-marker lease wait ran out", "TimeoutError")),
+    START_MARKER_LEASE_WAIT_MS
+  );
+  try {
+    for (;;) {
+      let result: StartMarkerLeaseResult;
+      try {
+        result = await requestStartMarkerLease(env, traceId, sessionId, deadline.signal);
+      } catch (error) {
+        log.warn("review_status.lease_request_failed", {
+          ...meta,
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+        return null;
+      }
+      switch (result.outcome) {
+        case "granted":
+          return result.grant;
+        case "superseded":
+          log.info("review_status.superseded", meta);
+          return null;
+        case "request_failed":
+          log.warn("review_status.lease_request_failed", { ...meta, status: result.status });
+          return null;
+        case "busy":
+          if (Date.now() + START_MARKER_LEASE_RETRY_MS > giveUpAt) {
+            log.warn("review_status.lease_busy", meta);
+            return null;
+          }
+          await new Promise((resolve) => setTimeout(resolve, START_MARKER_LEASE_RETRY_MS));
+      }
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Mark a just-admitted review as in progress. The start marker is written like every other status
+ * on a review's head: holding the PR's submission lease, which is granted only while this review
+ * is still its PR's latest and its turn has not been closed out. So a review superseded or closed
+ * out before it gets here writes none. And none lands after its review's close-out has read the
+ * head — that close-out would finalize the review's fence and leave "pending" behind for good —
+ * given that GitHub lands a write within the request timeout or never: the assumption
+ * leaseWriteDeadline, a close-out's write deadline too, rests on.
+ *
+ * Best-effort, as the start marker always was: when the lease cannot be had, the review runs
+ * without one, and its verdict or close-out still writes the terminal status.
  */
 async function postPendingReviewStatus(
+  env: Env,
   log: Logger,
+  traceId: string,
+  sessionId: string,
   token: string,
   target: ReviewStatusTarget,
   userAgent: string,
   meta: Record<string, unknown>
 ): Promise<void> {
+  const statusMeta = { ...meta, head_sha: target.headSha, state: "pending" };
+  const grant = await acquireStartMarkerLease(env, log, traceId, sessionId, statusMeta);
+  if (!grant) return;
+  // Like a close-out's write, never started so late that it could land after the lease expires.
+  if (Date.now() > leaseWriteDeadline(grant)) {
+    log.warn("review_status.lease_budget_exhausted", statusMeta);
+    await releaseStartMarkerLease(env, log, traceId, sessionId, grant.grantId);
+    return;
+  }
+
   const result = await postCommitStatus(
     token,
     target.owner,
@@ -218,7 +308,14 @@ async function postPendingReviewStatus(
     },
     userAgent
   );
-  const statusMeta = { ...meta, head_sha: target.headSha, state: "pending" };
+  // Released once GitHub has settled the write: landed it, or refused it with a 4xx. After a 5xx,
+  // a transport error or a timeout the write may still land, so the lease is left to expire: a
+  // close-out then reads the head only once the write has landed or never will.
+  const settled =
+    result.ok || (result.status !== undefined && result.status >= 400 && result.status < 500);
+  if (settled) {
+    await releaseStartMarkerLease(env, log, traceId, sessionId, grant.grantId);
+  }
   if (result.ok) {
     log.debug("review_status.posted", statusMeta);
     return;
@@ -299,10 +396,12 @@ async function sendReviewPrompt(
  *    already terminal, so its close-out writes nothing.
  *
  * Residual race: a writer that already held the lease when the claim landed — an agent
- * mid-submission, or a granted close-out that has read "pending" — can land its write after the
- * skip, because GitHub statuses have no compare-and-swap. The head then shows that review's own
- * verdict, or its close-out's error, instead of the skip. Only a same-head review can do this, and
- * only within one lease TTL of the claim.
+ * mid-submission, a granted close-out that has read "pending", or a review's start marker — can
+ * land its write after the skip, because GitHub statuses have no compare-and-swap. The head then
+ * shows that review's own verdict, or its close-out's error, instead of the skip; a start marker's
+ * "pending" is replaced by the close-out this sweep records, which is granted only once the start
+ * marker's lease is released or has expired. Only a same-head review can do this, and only within
+ * one lease TTL of the claim.
  */
 async function standDownApprovedReview(
   env: Env,
@@ -597,7 +696,16 @@ export async function handleReviewRequested(
       });
 
       const statusTarget = { owner, repo: repoName, prNumber: pr.number, headSha: pr.head.sha };
-      await postPendingReviewStatus(log, ghToken, statusTarget, userAgent, meta);
+      await postPendingReviewStatus(
+        env,
+        log,
+        traceId,
+        sessionId,
+        ghToken,
+        statusTarget,
+        userAgent,
+        meta
+      );
       log.info("session.created", { ...meta, session_id: sessionId, action: "review" });
 
       const reviewIdentity = resolveReviewIdentity(env);
@@ -815,7 +923,16 @@ export async function handlePullRequestReviewTrigger(
       });
 
       const statusTarget = { owner, repo: repoName, prNumber: pr.number, headSha: pr.head.sha };
-      await postPendingReviewStatus(log, ghToken, statusTarget, userAgent, meta);
+      await postPendingReviewStatus(
+        env,
+        log,
+        traceId,
+        sessionId,
+        ghToken,
+        statusTarget,
+        userAgent,
+        meta
+      );
       log.info("session.created", { ...meta, session_id: sessionId, action: "auto_review" });
 
       const reviewIdentity = resolveReviewIdentity(env);

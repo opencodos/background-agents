@@ -5,6 +5,7 @@
  */
 
 import { z } from "zod";
+import { GITHUB_API_REQUEST_TIMEOUT_MS } from "./github-auth";
 import { signedControlPlaneFetch } from "./internal-auth";
 import type { Env } from "./types";
 import type { Logger } from "./logger";
@@ -23,6 +24,59 @@ const sweepStaleReviewsResponseSchema = z.object({
   deferredSessionIds: z.array(z.string()),
   failedSessionIds: z.array(z.string()),
 });
+
+const startMarkerGrantResponseSchema = z.object({
+  /** Names this grant's lease: release acts only while this grant still holds it. */
+  grantId: z.string().min(1),
+  leaseExpiresInMs: z.number(),
+});
+
+/**
+ * Slack kept between a leased status write and the lease's expiry: a write is started only while
+ * at least one full request timeout plus this margin of the lease remains.
+ */
+const LEASE_WRITE_MARGIN_MS = 5_000;
+
+/**
+ * How long a start marker's lease release may take. The review's prompt waits for it, and a
+ * release that never arrives costs only the start marker's short lease, which then expires.
+ */
+export const START_MARKER_RELEASE_TIMEOUT_MS = 2_000;
+
+/** A grant of the PR's submission lease, as the control plane returned it. */
+export interface ReviewLeaseGrant {
+  leaseExpiresInMs: number;
+  /** When the grant was requested: the lease's expiry is measured from here, conservatively. */
+  requestedAt: number;
+}
+
+/**
+ * The last moment a status write may start under `grant` and still land before it expires, given
+ * that GitHub lands a write within the request timeout or never. The timeout bounds only how long
+ * this client waits, not GitHub's side, so the deadline rests on that assumption.
+ */
+export function leaseWriteDeadline(grant: ReviewLeaseGrant): number {
+  return (
+    grant.requestedAt +
+    grant.leaseExpiresInMs -
+    GITHUB_API_REQUEST_TIMEOUT_MS -
+    LEASE_WRITE_MARGIN_MS
+  );
+}
+
+/** The right to write one review's "pending" start marker, held as the PR's submission lease. */
+export interface StartMarkerGrant extends ReviewLeaseGrant {
+  grantId: string;
+}
+
+export type StartMarkerLeaseResult =
+  | { outcome: "granted"; grant: StartMarkerGrant }
+  /** Another holder's lease is live: the review is still eligible and may ask again. */
+  | { outcome: "busy" }
+  /** The review was superseded or closed out: its start marker must not be written. */
+  | { outcome: "superseded" }
+  /** The control plane answered with neither a grant nor a refusal. */
+  | { outcome: "request_failed"; status: number };
 
 /**
  * Atomically bump (or create) the review generation counter for a PR and
@@ -163,5 +217,77 @@ export async function sweepStaleReviews(
       ...meta,
       error: error instanceof Error ? error : new Error(String(error)),
     });
+  }
+}
+
+/**
+ * Ask the control plane for the PR's submission lease to write this review's "pending" start
+ * marker. Transport failures throw, as does `signal` ending the request.
+ */
+export async function requestStartMarkerLease(
+  env: Env,
+  traceId: string,
+  sessionId: string,
+  signal: AbortSignal
+): Promise<StartMarkerLeaseResult> {
+  const requestedAt = Date.now();
+  const response = await signedControlPlaneFetch(
+    env,
+    {
+      method: "POST",
+      url: "https://internal/internal/github-reviews/start-marker",
+      body: JSON.stringify({ sessionId }),
+      traceId,
+    },
+    { signal }
+  );
+  if (response.status === 423) return { outcome: "busy" };
+  if (response.status === 409) return { outcome: "superseded" };
+  if (response.status !== 200) return { outcome: "request_failed", status: response.status };
+  const parsed = startMarkerGrantResponseSchema.safeParse(await response.json());
+  if (!parsed.success) return { outcome: "request_failed", status: response.status };
+  return { outcome: "granted", grant: { ...parsed.data, requestedAt } };
+}
+
+/**
+ * Release a start marker's lease once GitHub has settled its write. Best-effort: a lease left
+ * behind expires on its own, so this never throws, and gives up after
+ * START_MARKER_RELEASE_TIMEOUT_MS.
+ */
+export async function releaseStartMarkerLease(
+  env: Env,
+  log: Logger,
+  traceId: string,
+  sessionId: string,
+  grantId: string
+): Promise<void> {
+  const meta = { trace_id: traceId, session_id: sessionId };
+  // On setTimeout rather than AbortSignal.timeout, like the lease wait before it.
+  const timeout = new AbortController();
+  const timer = setTimeout(
+    () => timeout.abort(new DOMException("Start-marker lease release timed out", "TimeoutError")),
+    START_MARKER_RELEASE_TIMEOUT_MS
+  );
+  try {
+    const response = await signedControlPlaneFetch(
+      env,
+      {
+        method: "POST",
+        url: "https://internal/internal/github-reviews/start-marker/release",
+        body: JSON.stringify({ sessionId, grantId }),
+        traceId,
+      },
+      { signal: timeout.signal }
+    );
+    if (!response.ok) {
+      log.warn("review_status.lease_release_failed", { ...meta, status: response.status });
+    }
+  } catch (error) {
+    log.warn("review_status.lease_release_failed", {
+      ...meta,
+      error: error instanceof Error ? error : new Error(String(error)),
+    });
+  } finally {
+    clearTimeout(timer);
   }
 }

@@ -76,6 +76,8 @@ function createMockLogger(): Logger {
 
 const CLOSE_OUT_URL = "https://internal/internal/github-reviews/close-out";
 const FINALIZE_URL = "https://internal/internal/github-reviews/close-out/finalize";
+const START_MARKER_URL = "https://internal/internal/github-reviews/start-marker";
+const START_MARKER_RELEASE_URL = "https://internal/internal/github-reviews/start-marker/release";
 
 /** JSON bodies of every control-plane call to `url`, in call order. */
 function controlPlaneBodies(cpFetch: Mock, url: string): unknown[] {
@@ -102,6 +104,13 @@ function defaultReviewSupersessionResponse(url: string): Response | null {
       { status: 200 }
     );
   }
+  if (url === START_MARKER_URL) {
+    return Response.json({
+      grantId: "start-marker:session-123:grant-1",
+      leaseExpiresInMs: 30_000,
+    });
+  }
+  if (url === START_MARKER_RELEASE_URL) return new Response(null, { status: 204 });
   if (url === CLOSE_OUT_URL) {
     return Response.json({
       outcome: "granted",
@@ -330,8 +339,6 @@ describe("handlePullRequestReviewTrigger", () => {
     );
 
     const cpFetch = getControlPlaneFetch(env);
-    expect(cpFetch).toHaveBeenCalledTimes(5);
-
     const sessionBody = sessionCreateBody(cpFetch);
     expect(sessionBody.repoOwner).toBe("acme");
     expect(sessionBody.repoName).toBe("widgets");
@@ -1335,7 +1342,6 @@ describe("handleReviewRequested", () => {
     );
 
     const cpFetch = getControlPlaneFetch(env);
-    expect(cpFetch).toHaveBeenCalledTimes(5);
 
     // Verify session creation
     const sessionBody = sessionCreateBody(cpFetch);
@@ -1835,10 +1841,10 @@ describe("error handling", () => {
     const log = createMockLogger();
     vi.mocked(postReaction).mockResolvedValue(false);
 
-    await handleReviewRequested(env, log, reviewRequestedPayload, "trace-reaction");
+    const result = await handleReviewRequested(env, log, reviewRequestedPayload, "trace-reaction");
 
     // Session should still be created despite reaction failure
-    expect(getControlPlaneFetch(env)).toHaveBeenCalledTimes(5);
+    expect(result).toMatchObject({ outcome: "processed", session_id: "session-123" });
     expect(log.warn).toHaveBeenCalledWith("acknowledgment.failed", expect.any(Object));
   });
 });
@@ -1907,11 +1913,10 @@ describe("integration config", () => {
     const env = createMockEnv();
     const log = createMockLogger();
 
-    await handleReviewRequested(env, log, reviewRequestedPayload, "trace-null");
+    const result = await handleReviewRequested(env, log, reviewRequestedPayload, "trace-null");
 
     // Should proceed normally — null means all repos allowed
-    const cpFetch = getControlPlaneFetch(env);
-    expect(cpFetch).toHaveBeenCalledTimes(5);
+    expect(result).toMatchObject({ outcome: "processed", session_id: "session-123" });
   });
 
   it("rejects sender not in allowedTriggerUsers (handleIssueComment)", async () => {
