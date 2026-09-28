@@ -92,7 +92,7 @@ jobs:
     needs: [check-secrets]
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v4
@@ -131,7 +131,7 @@ jobs:
 
       - name: Post Validation Results
         if: always() && github.event_name == 'pull_request'
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const hasSecrets = '${{ needs.check-secrets.outputs.has-secrets }}' === 'true';
@@ -175,10 +175,10 @@ jobs:
     if: github.event_name == 'pull_request' && needs.check-secrets.outputs.has-secrets == 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: "npm"
@@ -325,7 +325,7 @@ jobs:
           TF_VAR_e2b_template_memory_mb: "${{ vars.E2B_TEMPLATE_MEMORY_MB || secrets.E2B_TEMPLATE_MEMORY_MB || '4096' }}"
 
       - name: Post Plan Results
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const planOutcome = '${{ steps.plan.outcome }}';
@@ -369,10 +369,10 @@ jobs:
     environment: production
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: "npm"
@@ -389,7 +389,7 @@ jobs:
           npm run build -w @open-inspect/linear-bot
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@v8.2.0
+        uses: astral-sh/setup-uv@v7
 
       - name: Install Modal and Python dependencies
         run: uv sync --frozen
