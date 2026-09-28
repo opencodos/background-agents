@@ -24,6 +24,13 @@ updates:
           - "*"
         update-types:
           - major
+    ignore:
+      # better-auth 1.7 changes the socialProviders types and breaks the sign-in
+      # integration tests. Ignore only 1.7 and above, so 1.6.x patches still
+      # arrive. Drop this entry once the 1.7 migration lands.
+      - dependency-name: better-auth
+        versions:
+          - ">= 1.7.0"
 
   - package-ecosystem: github-actions
     directory: /
@@ -37,12 +44,13 @@ updates:
         patterns:
           - "*"
 
-  # Python — every packages/* dir with a pyproject.toml + uv.lock, plus the
-  # pinned agent tool lock under sandbox-images.
+  # Python — every packages/* dir with a pyproject.toml + uv.lock. The
+  # sandbox-images/locks/python-tools project is left out: `sandbox:images lock`
+  # generates it from the image tool manifest, so edits to it fail the
+  # freshness check.
   - package-ecosystem: uv
     directories:
       - /packages/*
-      - /packages/sandbox-images/locks/python-tools
     schedule:
       interval: weekly
       day: monday
