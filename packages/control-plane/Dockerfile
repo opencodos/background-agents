@@ -24,7 +24,7 @@ COPY packages/sandbox-runtime/src/sandbox_runtime/*.json packages/sandbox-runtim
 RUN npm run build -w @open-inspect/shared \
     && npm run build:node -w @open-inspect/control-plane
 
-FROM litestream/litestream:0.3.13 AS litestream
+FROM litestream/litestream:0.5.17 AS litestream
 
 # Debian's trust store, built here so the runtime image gets the bundle without
 # the toolchain that generates it: ca-certificates pulls in openssl and libssl3,
