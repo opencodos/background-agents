@@ -31,6 +31,14 @@ updates:
       - dependency-name: better-auth
         versions:
           - ">= 1.7.0"
+      # eslint 10 is outside eslint-plugin-react's peer range, so npm install
+      # fails with ERESOLVE. Drop these entries once the plugin supports 10.
+      - dependency-name: eslint
+        versions:
+          - ">= 10.0.0"
+      - dependency-name: "@eslint/js"
+        versions:
+          - ">= 10.0.0"
 
   - package-ecosystem: github-actions
     directory: /
@@ -45,12 +53,15 @@ updates:
           - "*"
 
   # Python — every packages/* dir with a pyproject.toml + uv.lock. The
-  # sandbox-images/locks/python-tools project is left out: `sandbox:images lock`
-  # generates it from the image tool manifest, so edits to it fail the
-  # freshness check.
+  # sandbox-images/locks tree is left out: `sandbox:images lock` generates it
+  # from the image tool manifest and the runtime uv.lock, so edits to it fail
+  # the freshness check. The dependabot-image-locks workflow regenerates it on
+  # each Dependabot PR instead.
   - package-ecosystem: uv
     directories:
       - /packages/*
+    exclude-paths:
+      - "packages/sandbox-images/locks/**"
     schedule:
       interval: weekly
       day: monday
