@@ -135,9 +135,7 @@ export interface ReconcileOrphanOperationInput {
  * than losing a resource nothing else records.
  */
 export type ReconcileOrphanOperationOutcome =
-  | { type: "absent" }
-  | { type: "deleted" }
-  | { type: "pending" };
+  { type: "absent" } | { type: "deleted" } | { type: "pending" };
 
 /** Input for finding a build source whose create response was never seen. */
 export interface RecoverUnboundSourceInput {

@@ -16,9 +16,8 @@ function harness(overrides: { sandboxSocket?: WebSocket | null; sendResult?: boo
         fn(clientB);
       }
     ),
-    getSandboxCommandTarget: vi.fn(
-      (): SandboxCommandTarget =>
-        sandbox ? { kind: "dispatch", socket: sandbox } : { kind: "unavailable" }
+    getSandboxCommandTarget: vi.fn((): SandboxCommandTarget =>
+      sandbox ? { kind: "dispatch", socket: sandbox } : { kind: "unavailable" }
     ),
     send: vi.fn(() => overrides.sendResult ?? true),
   };
