@@ -104,7 +104,7 @@ services:
     restart: unless-stopped
 
   litestream:
-    image: litestream/litestream:0.3.13
+    image: litestream/litestream:0.5.17
     # The app's user, so the shadow WAL it writes beside the database is
     # owned like the database.
     user: "1000:1000"

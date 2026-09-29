@@ -56,7 +56,7 @@ Prerequisites: Docker with Compose v2, a GitHub App and OAuth app as in
    ```
 
    The response reports the migrations applied, the resident sessions, and the state of the cron
-   loop and alarm clock. Litestream logs `snapshot written` once the first snapshot is in the
+   loop and alarm clock. Litestream logs `snapshot complete` once the first snapshot is in the
    `backups` bucket. Any S3 client pointed at http://127.0.0.1:9000 with the root credentials lists
    both buckets.
 
@@ -140,7 +140,7 @@ docker compose rm -sf app litestream
 docker volume rm "$(basename "$PWD")_control-plane-data"
 docker compose up -d --wait
 docker compose logs app | grep litestream.restore
-docker compose logs litestream | grep "snapshot written"
+docker compose logs litestream | grep "snapshot complete"
 ```
 
 ## Recovering from an unclean stop
