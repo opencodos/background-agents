@@ -181,8 +181,11 @@ done
 echo "  ok  the cron loop ticked"
 
 log "replication"
-"${COMPOSE[@]}" logs --no-color litestream | grep -q "snapshot written" ||
-  fail "Litestream never wrote a snapshot of the global store"
+REPLICATION_DEADLINE=$((SECONDS + 60))
+until "${COMPOSE[@]}" logs --no-color litestream | grep -q "snapshot complete"; do
+  [ "$SECONDS" -lt "$REPLICATION_DEADLINE" ] || fail "Litestream never wrote a snapshot of the global store"
+  sleep 2
+done
 echo "  ok  Litestream replicated the global store"
 
 log "clean shutdown"
