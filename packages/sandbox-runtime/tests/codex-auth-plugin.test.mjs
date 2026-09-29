@@ -1050,6 +1050,7 @@ async function withCatalog(models, run) {
 
 test("preserves a source Request while proxying Codex authentication", async () => {
   let upstreamRequest;
+  let upstreamInit;
   globalThis.fetch = async (input, init) => {
     const request = input instanceof Request ? input : new Request(input, init);
     if (request.url.startsWith("https://control.test/")) {
@@ -1060,6 +1061,7 @@ test("preserves a source Request while proxying Codex authentication", async () 
       });
     }
     upstreamRequest = request;
+    upstreamInit = init;
     return new Response(null, { status: 200 });
   };
   const loaded = await loadProxy("preserve-request");
@@ -1078,6 +1080,7 @@ test("preserves a source Request while proxying Codex authentication", async () 
   assert.equal(upstreamRequest.headers.get("chatgpt-account-id"), "account-1");
   assert.equal(upstreamRequest.headers.get("x-request-header"), "preserved");
   assert.equal(await upstreamRequest.text(), "request-body");
+  assert.equal(upstreamInit.timeout, false);
 });
 
 test("preserves API-key requests if OpenAI authentication switches away from OAuth", async () => {
