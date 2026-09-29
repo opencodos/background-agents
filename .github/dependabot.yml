@@ -56,6 +56,12 @@ updates:
       - dependency-name: "@types/node"
         versions:
           - ">= 25.0.0"
+      # eslint-plugin-react-hooks 7 turns on the React Compiler rules, which fail
+      # packages/web lint with 89 errors (setState in effects, refs read during
+      # render). Drop this entry once COD-2264 fixes them.
+      - dependency-name: eslint-plugin-react-hooks
+        versions:
+          - ">= 7.0.0"
 
   - package-ecosystem: github-actions
     directory: /
