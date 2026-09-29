@@ -6,6 +6,7 @@ import {
   Panel,
   Separator as PanelResizeHandle,
   type Layout,
+  type LayoutChangedMeta,
 } from "react-resizable-panels";
 
 interface SessionDesktopLayoutProps {
@@ -13,7 +14,7 @@ interface SessionDesktopLayoutProps {
   sidebar: ReactNode;
   changes: ReactNode | null;
   defaultLayout?: Layout;
-  onLayoutChanged?: (layout: Layout) => void;
+  onLayoutChanged?: (layout: Layout, meta: LayoutChangedMeta) => void;
 }
 
 export const SESSION_CHANGES_LAYOUT_ID = "session-changes-layout-v2";
