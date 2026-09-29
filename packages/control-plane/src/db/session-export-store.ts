@@ -99,8 +99,7 @@ export type ExportSelection =
 export type ListSessionsForExportOptions = ExportFilters & ExportSelection;
 
 type ExportPage<Cursor> = { sessions: SessionExportRow[] } & (
-  | { hasMore: false; nextCursor: null }
-  | { hasMore: true; nextCursor: Cursor }
+  { hasMore: false; nextCursor: null } | { hasMore: true; nextCursor: Cursor }
 );
 
 type SessionsPage = { scope: "sessions" } & ExportPage<SessionExportCursor>;

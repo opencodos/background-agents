@@ -81,11 +81,9 @@ function createProcessor(
 
   const wsManager = {
     getSandboxSocket: vi.fn(() => null as WebSocket | null),
-    getSandboxCommandTarget: vi.fn(
-      (): SandboxCommandTarget => ({
-        kind: "unavailable",
-      })
-    ),
+    getSandboxCommandTarget: vi.fn((): SandboxCommandTarget => ({
+      kind: "unavailable",
+    })),
     send: vi.fn(() => true),
   };
 

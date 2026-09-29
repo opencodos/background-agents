@@ -1764,12 +1764,10 @@ describe("SandboxLifecycleManager", () => {
         snapshot_runtime_version: COMPATIBLE_RUNTIME_VERSION,
       });
       const provider = createMockProvider({
-        restoreFromSnapshot: vi.fn(
-          async (): Promise<RestoreResult> => ({
-            success: false,
-            error: "Snapshot not found",
-          })
-        ),
+        restoreFromSnapshot: vi.fn(async (): Promise<RestoreResult> => ({
+          success: false,
+          error: "Snapshot not found",
+        })),
       });
       const mockStorage = createMockStorage(createMockSession(), sandbox);
       const manager = new SandboxLifecycleManager(
@@ -2433,12 +2431,10 @@ describe("SandboxLifecycleManager", () => {
       const broadcaster = createMockBroadcaster();
       const wsManager = createMockWebSocketManager(false);
       const provider = createMockProvider({
-        restoreFromSnapshot: vi.fn(
-          async (): Promise<RestoreResult> => ({
-            success: false,
-            error: "Snapshot not found",
-          })
-        ),
+        restoreFromSnapshot: vi.fn(async (): Promise<RestoreResult> => ({
+          success: false,
+          error: "Snapshot not found",
+        })),
       });
 
       const manager = new SandboxLifecycleManager(

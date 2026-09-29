@@ -60,8 +60,7 @@ export interface SessionConnectionAuthenticatorDeps {
 }
 
 type AuthorizationResolution =
-  | { kind: "valid"; authorization: EffectiveAuthorization }
-  | { kind: "rejected" | "unavailable" };
+  { kind: "valid"; authorization: EffectiveAuthorization } | { kind: "rejected" | "unavailable" };
 
 export type ClientCommandAuthorization = "allowed" | "denied" | "unavailable";
 

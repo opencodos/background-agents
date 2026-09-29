@@ -81,12 +81,10 @@ export const sessionLaunchPlanSchema = z.object({
 export type SessionLaunchPlan = z.infer<typeof sessionLaunchPlanSchema>;
 
 export type ParseInlinePromptFlagsResult =
-  | { ok: true; text: string; options: InlinePromptOptions }
-  | { ok: false; error: string };
+  { ok: true; text: string; options: InlinePromptOptions } | { ok: false; error: string };
 
 export type ResolveInlinePromptOptionsResult =
-  | { ok: true; turnPlan: ResolvedTurnPlan }
-  | { ok: false; error: string };
+  { ok: true; turnPlan: ResolvedTurnPlan } | { ok: false; error: string };
 
 const FLAG_NAMES = ["model", "reasoning"] as const;
 type FlagName = (typeof FLAG_NAMES)[number];
