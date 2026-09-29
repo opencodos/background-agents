@@ -80,6 +80,14 @@ updates:
           - "*"
         update-types:
           - major
+    ignore:
+      # modal 1.6 removes Function.get_raw_f and Function.get_build_def, which the
+      # modal-infra tests use to introspect functions (deprecated in 1.5). Ignore
+      # only 1.6 and above so 1.5.x patches still arrive. Drop this entry once the
+      # tests stop using those two methods.
+      - dependency-name: modal
+        versions:
+          - ">= 1.6.0"
 
   # Base images in Dockerfiles.
   - package-ecosystem: docker
