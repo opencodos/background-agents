@@ -39,6 +39,23 @@ updates:
       - dependency-name: "@eslint/js"
         versions:
           - ">= 10.0.0"
+      # TypeScript 7 (the native rewrite) is outside typescript-eslint's peer
+      # range (<6.1.0), so npm ci fails with ERESOLVE and no CI job runs. Drop
+      # this entry once typescript-eslint supports it.
+      - dependency-name: typescript
+        versions:
+          - ">= 6.1.0"
+      # packages/web is on Tailwind 3 and moving to 4 is a config migration
+      # (CSS-first config replaces tailwind.config.ts). packages/docs is already
+      # on 4, so hold only major jumps and keep its 4.x updates flowing. Drop
+      # this entry once packages/web has migrated.
+      - dependency-name: tailwindcss
+        update-types:
+          - version-update:semver-major
+      # Types track the Node runtime (.nvmrc is 24). Raise together with .nvmrc.
+      - dependency-name: "@types/node"
+        versions:
+          - ">= 25.0.0"
 
   - package-ecosystem: github-actions
     directory: /
