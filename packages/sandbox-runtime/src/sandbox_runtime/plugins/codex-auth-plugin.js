@@ -626,6 +626,8 @@ export const CodexAuthProxy = async (input) => {
               const { accessToken, accountId } = await ensureAccessToken(getAuth, setAuth);
               proxied.headers.set("authorization", `Bearer ${accessToken}`);
               if (accountId) proxied.headers.set("ChatGPT-Account-Id", accountId);
+              // No generation stream here, so OpenCode's stream timeout does not
+              // bound it: Bun's fetch timeout stays in force.
               return fetch(proxied);
             }
 
@@ -640,7 +642,9 @@ export const CodexAuthProxy = async (input) => {
             const overrides = Object.fromEntries(
               Object.entries(restInit).filter(([, value]) => value !== undefined)
             );
-            const baseInit = { ...inherited, ...overrides, method, body, signal };
+            // Let OpenCode's stream timeout handle stalls instead of Bun's fetch idle
+            // timer, on the subscription and the fallback path alike.
+            const baseInit = { ...inherited, ...overrides, method, body, signal, timeout: false };
 
             // opencode signs the request with a placeholder API key; this proxy
             // supplies the real credential instead.

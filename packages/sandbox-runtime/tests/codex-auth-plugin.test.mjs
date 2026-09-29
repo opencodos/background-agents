@@ -856,6 +856,7 @@ test("dispatches a non-generation Request without reshaping it", async () => {
   assert.equal(call.request.headers.get("authorization"), "Bearer cp-access");
   const sent = new Uint8Array(await call.request.arrayBuffer());
   assert.deepEqual([...sent], [...body], "the body bytes are untouched");
+  assert.equal(call.init.timeout, undefined, "Bun's fetch timeout stays in force");
 });
 
 test("cancels a stalled streaming body when the caller aborts", async () => {
@@ -1050,6 +1051,7 @@ async function withCatalog(models, run) {
 
 test("preserves a source Request while proxying Codex authentication", async () => {
   let upstreamRequest;
+  let upstreamInit;
   globalThis.fetch = async (input, init) => {
     const request = input instanceof Request ? input : new Request(input, init);
     if (request.url.startsWith("https://control.test/")) {
@@ -1060,6 +1062,7 @@ test("preserves a source Request while proxying Codex authentication", async () 
       });
     }
     upstreamRequest = request;
+    upstreamInit = init;
     return new Response(null, { status: 200 });
   };
   const loaded = await loadProxy("preserve-request");
@@ -1078,6 +1081,7 @@ test("preserves a source Request while proxying Codex authentication", async () 
   assert.equal(upstreamRequest.headers.get("chatgpt-account-id"), "account-1");
   assert.equal(upstreamRequest.headers.get("x-request-header"), "preserved");
   assert.equal(await upstreamRequest.text(), "request-body");
+  assert.equal(upstreamInit.timeout, false);
 });
 
 test("preserves API-key requests if OpenAI authentication switches away from OAuth", async () => {
