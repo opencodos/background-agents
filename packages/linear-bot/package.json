@@ -13,7 +13,7 @@
     "lint:fix": "eslint src/ --fix"
   },
   "dependencies": {
-    "@cloudflare/workers-types": "^5.20260926.1",
+    "@cloudflare/workers-types": "^5.20260927.1",
     "@open-inspect/shared": "file:../shared",
     "hono": "^4.13.9",
     "zod": "^4.6.5"
