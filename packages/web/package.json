@@ -39,7 +39,7 @@
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "react-markdown": "^10.1.0",
-    "react-resizable-panels": "^4.13.3",
+    "react-resizable-panels": "^4.14.1",
     "recharts": "^3.10.1",
     "rehype-highlight": "^7.0.2",
     "rehype-sanitize": "^6.0.0",
