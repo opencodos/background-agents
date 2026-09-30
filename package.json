@@ -56,6 +56,9 @@
   "overrides": {
     "minimatch": "^10.2.5",
     "undici": "^7.29.1",
+    "jsdom": {
+      "undici": "^8.10.2"
+    },
     "sharp": "^0.35.4",
     "lodash-es": "^4.18.0"
   },
