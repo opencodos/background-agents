@@ -346,8 +346,8 @@ describe("personal access tokens", () => {
       capabilities: { canManageMembers: true },
     });
     expect((await read(`/teams/${mine.id}/members`)).status).toBe(200);
-    // A team the owner cannot see stays hidden from the token as well.
-    expect((await read(`/teams/${open.id}`)).status).toBe(404);
+    // The team directory is readable without membership; the token reads it as its owner does.
+    expect((await read(`/teams/${open.id}`)).status).toBe(200);
 
     // Membership changes stay human-only, even where the owner may make them.
     expect((await read(`/teams/${open.id}/join`, "POST")).status).toBe(403);
