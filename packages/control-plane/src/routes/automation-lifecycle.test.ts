@@ -234,7 +234,7 @@ describe("automation lifecycle routes", () => {
       });
 
       expect(res.status).toBe(201);
-      expect(mockSchedulerTrigger).toHaveBeenCalledWith("auto-1", "user-1", undefined);
+      expect(mockSchedulerTrigger).toHaveBeenCalledWith("auto-1", "user-1", null);
     });
 
     it("triggers for an access token through the real credential resolver", async () => {
@@ -255,7 +255,7 @@ describe("automation lifecycle routes", () => {
       });
 
       expect(res.status).toBe(201);
-      expect(mockSchedulerTrigger).toHaveBeenCalledWith("auto-1", "user-1", undefined);
+      expect(mockSchedulerTrigger).toHaveBeenCalledWith("auto-1", "user-1", null);
     });
 
     it("refuses an access token an automation it does not own", async () => {

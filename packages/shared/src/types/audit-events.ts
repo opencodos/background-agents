@@ -72,6 +72,11 @@ export const AUTHORIZATION_DECISION_ACTIONS = {
 /** Actions written by the operation owner alongside the change; their result is the domain outcome. */
 export const AUDIT_OPERATION_ACTIONS = [
   "session.private_break_glass",
+  "session.visibility_changed",
+  "session.moved",
+  "session.collaborator_added",
+  "session.collaborator_removed",
+  "session.created_private",
   "workspace.member_role_updated",
   "workspace.member_status_updated",
   "workspace.default_role_assigned",
@@ -85,6 +90,8 @@ export const AUDIT_OPERATION_ACTIONS = [
   "team.member_role_changed",
   "team.member_removed",
   "team.member_joined",
+  "team.secret_set",
+  "team.secret_deleted",
 ] as const;
 
 export const AUTHORIZATION_DECISION_METADATA_SCHEMA = "authorization_decision.v1";

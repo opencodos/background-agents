@@ -6,7 +6,7 @@ import {
   type TeamMembership,
   type TeamRole,
 } from "@open-inspect/shared/types/teams";
-import type { SqlDatabase } from "./sql-database";
+import type { SqlDatabase, SqlStatement } from "./sql-database";
 
 export class LastLeadError extends Error {
   constructor() {
@@ -99,10 +99,10 @@ export class TeamMembershipStore {
     );
   }
 
-  async listMembersWithUsers(teamId: string) {
+  async listMembersWithUsers(teamId: string, { includeEmail }: { includeEmail: boolean }) {
     const rows = await this.db
       .prepare(
-        `SELECT m.*, u.display_name, u.email, u.avatar_url
+        `SELECT m.*, u.display_name, ${includeEmail ? "u.email" : "NULL AS email"}, u.avatar_url
       FROM team_memberships m JOIN users u ON u.id = m.user_id
       WHERE m.team_id = ? ORDER BY m.created_at, m.user_id`
       )
@@ -138,16 +138,19 @@ export class TeamMembershipStore {
   }
 
   async addIfJoinable(teamId: string, userId: string): Promise<boolean> {
-    const result = await this.db
+    const result = await this.bindAddIfJoinable(teamId, userId).run();
+    return result.meta.changes > 0;
+  }
+
+  private bindAddIfJoinable(teamId: string, userId: string): SqlStatement {
+    return this.db
       .prepare(
         `INSERT INTO team_memberships (team_id, user_id, role, source, created_at)
          SELECT id, ?, 'member', 'manual', ? FROM teams
          WHERE id = ? AND join_policy = 'open' AND archived_at IS NULL
          ON CONFLICT DO NOTHING`
       )
-      .bind(userId, Date.now(), teamId)
-      .run();
-    return result.meta.changes > 0;
+      .bind(userId, Date.now(), teamId);
   }
 
   async setRole(teamId: string, userId: string, role: TeamRole): Promise<void> {
