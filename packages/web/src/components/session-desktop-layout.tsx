@@ -2,12 +2,10 @@
 
 import type { ReactNode } from "react";
 
-
 interface SessionDesktopLayoutProps {
   workspace: ReactNode;
   sidebar: ReactNode;
   changes: ReactNode | null;
-
 }
 
 /**

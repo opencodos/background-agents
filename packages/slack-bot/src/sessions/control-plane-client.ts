@@ -25,7 +25,8 @@ interface CreateSessionOptions {
 }
 
 export type SendPromptResult =
-  { ok: true; data: SendPromptResponse } | { ok: false; reason: "stale" | "transient" };
+  | { ok: true; data: SendPromptResponse }
+  | { ok: false; reason: "stale" | "transient" };
 
 export async function createSession(
   env: ControlPlaneEnv,

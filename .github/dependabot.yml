@@ -68,6 +68,11 @@ updates:
       - dependency-name: vitest
         versions:
           - ">= 5.0.0"
+      # Prettier tracks the version locked upstream (ColeMurray/background-agents),
+      # not the latest. A newer formatter rewrites upstream-owned files, which then
+      # conflict on every sync, and fails format:check on files a sync brings in
+      # unchanged. Bump it only when upstream's lockfile does.
+      - dependency-name: prettier
 
   - package-ecosystem: github-actions
     directory: /
