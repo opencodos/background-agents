@@ -230,6 +230,9 @@ exports[`route admission matrix > admits the workspace owner through every brows
   "GET /access-tokens owner=200",
   "POST /access-tokens owner=400",
   "DELETE /access-tokens/:id owner=404",
+  "GET /teams/:id/secrets owner=200",
+  "PUT /teams/:id/secrets owner=400",
+  "DELETE /teams/:id/secrets/:key owner=404",
 ]
 `;
 
@@ -435,6 +438,9 @@ exports[`route admission matrix > rejects every credentialed route anonymously b
   "GET /access-tokens anonymous=401",
   "POST /access-tokens anonymous=401",
   "DELETE /access-tokens/:id anonymous=401",
+  "GET /teams/:id/secrets anonymous=401",
+  "PUT /teams/:id/secrets anonymous=401",
+  "DELETE /teams/:id/secrets/:key anonymous=401",
   "POST /webhooks/sentry/:id anonymous=404",
   "POST /webhooks/automation/:id anonymous=415",
   "POST /internal/github-event anonymous=401",
