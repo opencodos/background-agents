@@ -5,11 +5,11 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import { ModalSandboxProvider } from "./modal-provider";
+import { ModalSandboxProvider, modalVmAllocationDetail } from "./modal-provider";
 import { formatPendingVmReference } from "./pending-vm-reference";
 import { PENDING_VM_REFERENCE_MATERIALIZE_BOUND_MS } from "../lifecycle/decisions";
 import { PrebuiltImageUnavailableError, SandboxProviderError } from "../provider";
-import { ModalApiError } from "../client";
+import { ModalApiError, ModalVmStartupError } from "../client";
 import { RequestDeadlineError } from "../request-deadline";
 import type {
   ModalClient,
@@ -84,15 +84,41 @@ const testConfig = {
 // ==================== Tests ====================
 
 describe("ModalSandboxProvider", () => {
+  it.each(["not_visible", "other_generation", "unknown"] as const)(
+    "decodes raw and wrapped VM outcome %s without changing its classification",
+    (detail) => {
+      for (const error of [
+        new ModalApiError("arbitrary message", 409, detail),
+        new ModalVmStartupError(detail, new Error("arbitrary message")),
+      ]) {
+        expect(modalVmAllocationDetail(error)).toBe(detail);
+        expect(
+          modalVmAllocationDetail(new SandboxProviderError("wrapped", "transient", error))
+        ).toBe(detail);
+      }
+      expect(modalVmAllocationDetail(new TypeError("not_visible"))).toBeUndefined();
+    }
+  );
+
+  it("standard Modal hooks do not enable VM allocation recovery", () => {
+    const provider = new ModalSandboxProvider(createMockModalClient(), "modal");
+    expect(provider.pendingSandboxAllocation(testConfig)).toBeUndefined();
+    expect(provider.isUnknownStartupError(new ModalApiError("unavailable", 503))).toBe(false);
+    expect(
+      provider.isUnknownStartupError(new ModalVmStartupError("unknown", new Error("lost response")))
+    ).toBe(false);
+  });
+
   it.each([
-    [409, "race_pending", true],
-    [409, "other_generation", false],
-    [409, "window_closed", false],
-    [502, undefined, true],
-    [500, undefined, true],
+    [409, "race_pending", true, "transient"],
+    [409, "other_generation", false, "permanent"],
+    [409, "window_closed", false, "transient"],
+    [502, undefined, true, "transient"],
+    [500, undefined, true, "transient"],
+    [501, "docker_not_available", false, "permanent"],
   ] as const)(
     "classifies VM launch HTTP %s / %s without matching messages",
-    async (status, detail, unknown) => {
+    async (status, detail, unknown, errorType) => {
       const error = new ModalApiError("arbitrary message", status, detail);
       const provider = new ModalSandboxProvider(
         createMockModalClient({
@@ -111,9 +137,7 @@ describe("ModalSandboxProvider", () => {
       expect(caught).toBeInstanceOf(SandboxProviderError);
       expect((caught as SandboxProviderError).cause).toBe(error);
       expect(provider.isUnknownStartupError(caught)).toBe(unknown);
-      expect((caught as SandboxProviderError).errorType).toBe(
-        detail === "other_generation" ? "permanent" : "transient"
-      );
+      expect((caught as SandboxProviderError).errorType).toBe(errorType);
     }
   );
 

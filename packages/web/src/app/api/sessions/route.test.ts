@@ -1,4 +1,4 @@
-import type { NextRequest } from "next/server";
+import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/server-auth-session", () => ({
@@ -187,6 +187,30 @@ describe("sessions API route (POST)", () => {
     expect(sent.repoName).toBeUndefined();
   });
 
+  it("forwards team and visibility while stripping adjacent client-controlled fields", async () => {
+    vi.mocked(getServerAuthSession).mockResolvedValue({ user: { id: "user-1" } });
+    vi.mocked(controlPlaneUserFetch).mockResolvedValue(
+      Response.json({ error: "Team archived", code: "team_archived" }, { status: 409 })
+    );
+    const response = await POST(
+      new NextRequest("http://localhost/api/sessions", {
+        method: "POST",
+        body: JSON.stringify({
+          teamId: "team-1",
+          visibility: "team",
+          grants: ["repo-1"],
+          ...hostileIdentityFields,
+        }),
+      })
+    );
+    expect(controlPlaneBody()).toEqual({ teamId: "team-1", visibility: "team" });
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "Team archived",
+      code: "team_archived",
+    });
+  });
+
   it("forwards the repositories list for ad-hoc multi-repo launches", async () => {
     vi.mocked(getServerAuthSession).mockResolvedValue({
       user: { id: "0123456789abcdef0123456789abcdef" },
@@ -303,6 +327,20 @@ describe("sessions API route (discovery params)", () => {
     );
     expect(response.status).toBe(200);
     expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  it("forwards repeated team filters and owner, visibility, and scope filters", async () => {
+    vi.mocked(controlPlaneUserFetch).mockResolvedValueOnce(
+      Response.json({ sessions: [], hasMore: false })
+    );
+    await GET(
+      request(
+        "/api/sessions?teamIds%5B%5D=team_a&teamIds%5B%5D=team_b&ownerFilter=participating&visibility=team&scope=all&ignored=true"
+      )
+    );
+    expect(controlPlaneUserFetch).toHaveBeenCalledWith(
+      "/sessions?teamIds%5B%5D=team_a&teamIds%5B%5D=team_b&ownerFilter=participating&visibility=team&scope=all"
+    );
   });
 
   it("propagates the control plane's rejection of an oversized search", async () => {

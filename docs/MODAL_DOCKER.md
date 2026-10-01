@@ -106,10 +106,13 @@ Create, restore, and resolve report typed HTTP 409 error `detail` values:
 - `other_generation`: the ownership tags do not match.
 - `window_closed`: create/restore missed the launch deadline with no owned allocation.
 - `race_pending`: create/restore cannot yet see the winner after `AlreadyExistsError`, or resolve
-  found a VM whose enabled tunnel URLs are not all visible yet.
+  found a VM with none of its tunnel URLs readable yet. Like create/restore, resolve returns a
+  partial tunnel map rather than waiting for ports Modal did not publish.
 
-Unexpected provider errors remain 500. The pending-reference stop endpoint retains its separate
-`pending_reference_not_visible` response.
+Create reports HTTP 501 `docker_not_available` before retiring or allocating anything when the
+deployment has no verified Docker image. The control plane fails that launch as permanent instead of
+resolving it. Unexpected provider errors remain 500. The pending-reference stop endpoint retains its
+separate `pending_reference_not_visible` response.
 
 ## Switching backends
 

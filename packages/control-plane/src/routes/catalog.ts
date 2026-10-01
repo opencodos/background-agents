@@ -35,6 +35,8 @@ import { slackNotifyRoutes } from "./slack-notify";
 import { signInProviderRoutes } from "./sign-in-providers";
 import { skillRoutes } from "./skills";
 import { teamRoutes } from "./teams";
+import { teamSecretsRoutes } from "./team-secrets";
+import { teamSettingsRoutes } from "./settings-teams";
 
 /** Registration order is the precedence order: each module is mounted where it appears. */
 export const catalog: readonly RouteModule[] = [
@@ -44,6 +46,7 @@ export const catalog: readonly RouteModule[] = [
   signInProviderRoutes,
 
   teamRoutes,
+  teamSettingsRoutes,
 
   // Session management, then the agent-initiated Slack notification
   sessionRoutes,
@@ -109,6 +112,8 @@ export const catalog: readonly RouteModule[] = [
   // Personal access tokens (human-only credential management; no path
   // overlap with any other module, so registration order is immaterial here)
   accessTokenRoutes,
+  // Team secrets
+  teamSecretsRoutes,
 
   // Webhooks (public routes — auth handled per-route)
   webhookRoutes,

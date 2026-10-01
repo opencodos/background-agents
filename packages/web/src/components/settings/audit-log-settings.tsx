@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AUTHORIZATION_DECISION_ACTIONS,
   interpretAuditEvent,
@@ -13,6 +13,8 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useAuditEvents } from "@/hooks/use-audit-events";
+import { useTeams } from "@/hooks/use-teams";
+import { useCurrentUserAuthorization } from "@/hooks/use-current-user-authorization";
 import { formatHttpStatus } from "@/lib/http-status";
 import { formatRelativeTime } from "@/lib/time";
 
@@ -42,6 +44,11 @@ const UNRECOGNIZED: BadgeTreatment = {
 
 const OPERATION_LABELS: Record<AuditOperationAction, string> = {
   "session.private_break_glass": "Private session break-glass read",
+  "session.visibility_changed": "Session visibility changed",
+  "session.moved": "Session moved",
+  "session.collaborator_added": "Session collaborator added",
+  "session.collaborator_removed": "Session collaborator removed",
+  "session.created_private": "Private session created",
   "workspace.member_role_updated": "Member role updated",
   "workspace.member_status_updated": "Member status updated",
   "workspace.default_role_assigned": "Default role assigned",
@@ -55,6 +62,8 @@ const OPERATION_LABELS: Record<AuditOperationAction, string> = {
   "team.member_role_changed": "Team member role changed",
   "team.member_removed": "Team member removed",
   "team.member_joined": "Team member joined",
+  "team.secret_set": "Team secret set",
+  "team.secret_deleted": "Team secret deleted",
 };
 
 const ACTION_LABELS = new Map<string, string>([
@@ -104,7 +113,7 @@ function resourceSummary(event: AuditEvent): string {
     : resource;
 }
 
-function AuditEventCard({ event }: { event: AuditEvent }) {
+export function AuditEventCard({ event }: { event: AuditEvent }) {
   const interpretation = interpretAuditEvent(event);
   const badge = badgeTreatment(interpretation);
   const localTimestamp = new Date(event.occurredAt).toLocaleString();
@@ -182,7 +191,11 @@ function AuditEventCard({ event }: { event: AuditEvent }) {
 
 /** Read-only, cursor-paginated view of durable workspace audit events. */
 export function AuditLogSettings() {
-  const audit = useAuditEvents();
+  const { hasPermission } = useCurrentUserAuthorization();
+  const canReadAudit = hasPermission("workspace.audit.read");
+  const { teams, loading: teamsLoading, error: teamsError } = useTeams(canReadAudit);
+  const [teamId, setTeamId] = useState("");
+  const audit = useAuditEvents({ teamId: teamId || undefined, enabled: canReadAudit });
   const headingRef = useRef<HTMLHeadingElement>(null);
   const focusAfterPaginationRef = useRef(false);
 
@@ -197,6 +210,12 @@ export function AuditLogSettings() {
     focusAfterPaginationRef.current = true;
     navigate();
   };
+
+  if (!canReadAudit) {
+    return (
+      <p className="text-sm text-muted-foreground">You do not have access to the audit log.</p>
+    );
+  }
 
   return (
     <section aria-labelledby="audit-log-heading">
@@ -216,6 +235,31 @@ export function AuditLogSettings() {
         it returned. They do not confirm that the requested change took effect. Applied, No change,
         and Rejected are recorded only by the operation that made or refused the change.
       </p>
+
+      <div className="mb-6 flex flex-wrap items-center gap-3">
+        <label htmlFor="audit-team-filter" className="text-sm font-medium">
+          Team
+        </label>
+        <select
+          id="audit-team-filter"
+          value={teamId}
+          onChange={(event) => setTeamId(event.target.value)}
+          disabled={teamsLoading || !!teamsError}
+          className="min-w-48 max-w-full rounded border border-border bg-background px-2 py-2 text-sm disabled:opacity-50"
+        >
+          <option value="">All teams</option>
+          {teams.map((team) => (
+            <option key={team.id} value={team.id}>
+              {team.name}
+            </option>
+          ))}
+        </select>
+        {teamsError && (
+          <p role="status" className="text-xs text-destructive">
+            Unable to load team filters.
+          </p>
+        )}
+      </div>
 
       {audit.error && audit.events.length > 0 && (
         <div

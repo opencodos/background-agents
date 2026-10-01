@@ -45,8 +45,9 @@ export type RouteAuthorizationRequirement =
       operation: "manage" | "trigger";
       automationIdParam: string;
     }
-  | { kind: "team"; teamIdParam: string; need: keyof TeamCapabilities | "read" }
-  | { kind: "session"; sessionIdParam: string; action: SessionAction };
+  | { kind: "team"; teamIdParam: string; need: keyof TeamCapabilities | "read" | "member" }
+  | { kind: "team"; teamIdParam: string; need: "removeMember"; targetUserIdParam: string }
+  | { kind: "session"; sessionIdParam: string; action: SessionAction; enforceAlways?: boolean };
 
 type BotServiceName = Exclude<ServiceName, "web">;
 const DEFAULT_AUDIT_ALLOWED = false;
@@ -143,6 +144,9 @@ const AUDITED_ALLOWED_PERMISSIONS = new Set<PermissionId>([
 
 function auditsAllowedRequirement(requirement: RouteAuthorizationRequirement): boolean {
   if (requirement.kind === "session") return requirement.action !== "read";
+  if (requirement.kind === "team") {
+    return requirement.need !== "read" && requirement.need !== "member";
+  }
   if (requirement.kind === "permission") {
     return AUDITED_ALLOWED_PERMISSIONS.has(requirement.permission);
   }
@@ -184,38 +188,56 @@ export function requireAutomation(
 }
 
 export function requireTeam(
-  need: keyof TeamCapabilities | "read",
-  teamIdParam = "id"
+  need: keyof TeamCapabilities | "read" | "member",
+  options?: { teamIdParam?: string; auditAllowed?: boolean }
 ): RouteAuthorization {
+  const requirement: RouteAuthorizationRequirement = {
+    kind: "team",
+    teamIdParam: options?.teamIdParam ?? "id",
+    need,
+  };
   return {
     kind: "active-user",
-    allOf: [{ kind: "team", teamIdParam, need }],
+    allOf: [requirement],
     service: { kind: "deny" },
-    auditAllowed: true,
+    auditAllowed: options?.auditAllowed ?? auditsAllowedRequirement(requirement),
   };
 }
 
 export function sessionRequirement(
   action: SessionAction,
   sessionIdParam = "id"
-): RouteAuthorizationRequirement {
+): Extract<RouteAuthorizationRequirement, { kind: "session" }> {
   return { kind: "session", sessionIdParam, action };
 }
 
 export function requireSession(
   action: SessionAction,
-  options?: { sessionIdParam?: string; actorlessGrants?: readonly ActorlessServiceGrant[] }
-): RouteAuthorization {
+  options?: {
+    sessionIdParam?: string;
+    actorlessGrants?: readonly ActorlessServiceGrant[];
+    enforceAlways?: boolean;
+  }
+): Extract<RouteAuthorization, { kind: "active-user" }> {
   return {
     kind: "active-user",
-    allOf: [sessionRequirement(action, options?.sessionIdParam)],
-    service: { kind: "actor", actorlessGrants: options?.actorlessGrants },
+    allOf: [
+      {
+        ...sessionRequirement(action, options?.sessionIdParam),
+        enforceAlways: options?.enforceAlways,
+      },
+    ],
+    service: options?.enforceAlways
+      ? { kind: "deny" }
+      : { kind: "actor", actorlessGrants: options?.actorlessGrants },
     auditAllowed: action !== "read",
   };
 }
 
 /** Require an active user to satisfy every supplied authorization requirement. */
-export function requireAll(...allOf: readonly RouteAuthorizationRequirement[]): RouteAuthorization {
+export function requireAll(
+  ...allOf: readonly RouteAuthorizationRequirement[]
+): Extract<RouteAuthorization, { kind: "active-user" }> {
   return {
     kind: "active-user",
     allOf,
