@@ -1,24 +1,35 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createExecutionContext, env } from "cloudflare:test";
 import type { WorkerBindings } from "../../src/cloudflare/platform";
-import { INSTALLATION_TOKEN_CACHE_MAX_AGE_MS } from "../../src/auth/github-app";
+import {
+  getInstallationTokenCacheKey,
+  INSTALLATION_TOKEN_CACHE_MAX_AGE_MS,
+} from "../../src/auth/github-app";
 import { cleanD1Tables } from "./cleanup";
 import { initNamedSession, routeRequest, seedSandboxAuth, serviceFetch } from "./helpers";
 
+/** The reviewed repository: the helper's default session repository. */
+const REVIEWED_REPO_ID = 12345;
+
 /**
- * A token already in the installation-token cache, so the route answers
- * without an installation-token exchange. The integration outbound service
- * throws on any unexpected request, so a route that reached for the wrong
- * App's credential would fail loudly rather than return the wrong token.
+ * A token already in the installation-token cache for one repository, so the route answers
+ * without an installation-token exchange. The integration outbound service throws on any
+ * unexpected request, so a route that reached for the wrong App's credential, or a wider scope,
+ * would fail loudly rather than return the wrong token.
  */
 async function cacheInstallationToken(
   appId: string,
   installationId: string,
-  token: string
+  token: string,
+  repoId = REVIEWED_REPO_ID
 ): Promise<void> {
   const now = Date.now();
+  const key = await getInstallationTokenCacheKey(
+    { appId, installationId, privateKey: "" },
+    { kind: "repositories", repositoryIds: [repoId] }
+  );
   await env.REPOS_CACHE.put(
-    `github:installation-token:v1:${appId}:${installationId}`,
+    key,
     JSON.stringify({
       token,
       expiresAtEpochMs: now + INSTALLATION_TOKEN_CACHE_MAX_AGE_MS,
@@ -50,12 +61,12 @@ function fetchReviewToken(sessionName: string, token: string, bindings: WorkerBi
  * Fork-only (depends on #1370's github_review_sessions): register `sessionId` as a review session,
  * the way a fenced create does, so the broker treats it as one.
  */
-async function registerReviewFence(sessionId: string): Promise<void> {
+async function registerReviewFence(sessionId: string, repoId = REVIEWED_REPO_ID): Promise<void> {
   await env.DB.prepare(
     `INSERT INTO github_review_sessions (repo_id, pr_number, generation, session_id, head_sha, created_at)
-     VALUES (1, 1, 1, ?, 'sha', ?)`
+     VALUES (?, 1, 1, ?, 'sha', ?)`
   )
-    .bind(sessionId, Date.now())
+    .bind(repoId, sessionId, Date.now())
     .run();
 }
 
@@ -67,7 +78,7 @@ describe("reviewer app token broker", () => {
     await cleanD1Tables();
   });
 
-  it("mints the reviewer App's token for a GitHub bot session's own sandbox", async () => {
+  it("mints the reviewer App's token for the reviewed repository alone", async () => {
     const suffix = `${Date.now()}`;
     const sessionName = `review-token-${suffix}`;
     const keyPair = (await crypto.subtle.generateKey(
@@ -90,6 +101,8 @@ describe("reviewer app token broker", () => {
         const claims = JSON.parse(atob(jwt.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
         expect(claims.iss).toBe(`reviewer-${suffix}`);
         expect(init?.method).toBe("POST");
+        // The session also carries a context repository the reviewer App need not cover.
+        expect(JSON.parse(String(init?.body))).toEqual({ repository_ids: [REVIEWED_REPO_ID] });
         return Response.json({
           token: "reviewer-installation-token",
           expires_at: new Date(Date.now() + 3_600_000).toISOString(),
@@ -101,7 +114,13 @@ describe("reviewer app token broker", () => {
     // token: the review POST must be authenticated as the reviewer App.
     await cacheInstallationToken(`main-${suffix}`, `mi-${suffix}`, "main-installation-token");
 
-    const { stub } = await initNamedSession(sessionName, { spawnSource: "github-bot" });
+    const { stub } = await initNamedSession(sessionName, {
+      spawnSource: "github-bot",
+      repositories: [
+        { repoOwner: "acme", repoName: "web-app", repoId: REVIEWED_REPO_ID, baseBranch: "main" },
+        { repoOwner: "acme", repoName: "shared-config", repoId: 67890, baseBranch: "main" },
+      ],
+    });
     await seedSandboxAuth(stub, { authToken: "sandbox-token", sandboxId: "sandbox-1" });
     await registerReviewFence(sessionName);
 
@@ -158,10 +177,12 @@ describe("reviewer app token broker", () => {
 
   it("mints for a review session the GitHub bot created through the session API", async () => {
     const suffix = `created-${Date.now()}`;
+    // The claim below fences repository 1, so that is the scope the broker mints for.
     await cacheInstallationToken(
       `reviewer-${suffix}`,
       `ri-${suffix}`,
-      "reviewer-installation-token"
+      "reviewer-installation-token",
+      1
     );
     const claim = await serviceFetch("https://test.local/internal/github-reviews/claim", {
       service: "github-bot",

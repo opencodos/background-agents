@@ -20,7 +20,7 @@ import { SessionIndexStore } from "../db/session-index";
 import { readCachedInstallationRepositories } from "../repos/cache";
 import { createLogger } from "../logger";
 import { admit, dispatch } from "../routing/admit";
-import { resolveSessionCredentialScope } from "../source-control/session-scope";
+import { resolveRepositoryCredentialScope } from "../source-control/repository-scope";
 import type { ControlPlaneHonoEnv } from "../routing/hono-env";
 import type { Env } from "../types";
 import {
@@ -62,9 +62,9 @@ async function handleReviewerToken(
   // comments and never submit a review there, so only a registered review session (one with a
   // review fence row) gets the reviewer credential. Goes upstream once #1370 and #1862 merge.
   const reviewFence = await ctx.db
-    .prepare("SELECT 1 FROM github_review_sessions WHERE session_id = ? LIMIT 1")
+    .prepare("SELECT repo_id FROM github_review_sessions WHERE session_id = ? LIMIT 1")
     .bind(params.id)
-    .first();
+    .first<{ repo_id: number }>();
   if (!reviewFence) {
     logger.warn("review_token.session_not_eligible", {
       event: "review_token.session_not_eligible",
@@ -78,9 +78,20 @@ async function handleReviewerToken(
   }
 
   try {
-    // Same least privilege as the main App's session credential: only the session's repositories.
-    const scope = await resolveSessionCredentialScope(ctx.db, params.id, () =>
-      readCachedInstallationRepositories(env)
+    // The review POST targets the reviewed repository alone, so the token covers only that one,
+    // still intersected with the session owner team's current grants. Requesting the session's
+    // other repositories would fail wherever the reviewer App is not installed on them.
+    const scope = await resolveRepositoryCredentialScope(
+      ctx.db,
+      [
+        {
+          repoOwner: session.repoOwner ?? "",
+          repoName: session.repoName ?? "",
+          repoId: reviewFence.repo_id,
+        },
+      ],
+      session.ownerTeamId,
+      () => readCachedInstallationRepositories(env)
     );
     const token = await getCachedInstallationToken(
       reviewerAppConfig,

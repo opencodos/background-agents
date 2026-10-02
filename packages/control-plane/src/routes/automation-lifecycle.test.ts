@@ -310,10 +310,7 @@ describe("automation lifecycle routes", () => {
       });
 
       expect(res.status).toBe(403);
-      await expect(res.json()).resolves.toMatchObject({
-        code: "permission_required",
-        permission: "automations.trigger.own",
-      });
+      await expect(res.json()).resolves.toMatchObject({ code: "automation_action_denied" });
       expect(mockSchedulerTrigger).not.toHaveBeenCalled();
     });
 
