@@ -1,3 +1,4 @@
+import { isWorkspaceAdmin } from "../rbac";
 import type { Team, TeamRole } from "./teams";
 
 export interface TeamCapabilities {
@@ -8,6 +9,7 @@ export interface TeamCapabilities {
   canManageRepositories: boolean;
   canManageBindings: boolean;
   canManageAutomations: boolean;
+  canManageEnvironments: boolean;
   canManageSecrets: boolean;
   canArchive: boolean;
 }
@@ -17,8 +19,7 @@ export function resolveTeamAccess(
   team: Team & { leadCount: number }
 ): TeamCapabilities {
   const role = viewer.memberships.get(team.id);
-  const manages =
-    viewer.roleKey === "owner" || viewer.roleKey === "administrator" || role === "lead";
+  const manages = isWorkspaceAdmin(viewer.roleKey) || role === "lead";
   return {
     canJoin: role === undefined && team.joinPolicy === "open" && team.archivedAt === null,
     canLeave: role !== undefined && (role !== "lead" || team.leadCount > 1),
@@ -27,6 +28,7 @@ export function resolveTeamAccess(
     canManageRepositories: manages,
     canManageBindings: manages,
     canManageAutomations: manages,
+    canManageEnvironments: manages,
     canManageSecrets: manages,
     canArchive: manages,
   };

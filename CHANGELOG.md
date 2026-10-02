@@ -15,6 +15,33 @@ remain readable.
 
 ## October 1, 2026
 
+### Changed
+
+GitHub App sandbox credentials now reach only the session's repositories, including workspace-owned
+sessions and members snapshotted from an environment. Team-owned sessions also intersect that set
+with their team's current repository grants; an installation grant does not widen the credential
+beyond the session's members. Sessions with no repositories or no remaining granted repositories
+receive no token. Unresolved repository IDs and scopes exceeding GitHub's repository limit are
+refused rather than falling back to installation-wide access.
+
+This breaks private submodule, repository-backed dependency, and sibling-clone setups unless those
+repositories are included in the session's environment and, for team sessions, granted to its team.
+Repository image builds receive a token for that repository alone; environment builds use only their
+member repositories, intersected with the environment team's grants. Metadata and workspace-catalog
+operations retain installation-wide access. GitLab still uses a deployment-wide PAT and does not
+enforce repository-scoped credentials.
+
+Token cache keys cover the sorted, de-duplicated repository set, the process cache is bounded, and
+overlapping refreshes share one mint per scope. Grant removal changes the next credential scope but
+does not revoke already-issued tokens; sandbox helpers cache them until shortly before expiry.
+
+**Modal snapshot restores use brokered git credentials.** Restored sandboxes now fetch git
+credentials from the control plane like fresh sessions, instead of receiving a token minted by
+Modal. The control plane now sends the VCS host and clone username with every Modal create, restore,
+and image-build request, so Modal no longer reads `SCM_PROVIDER` or needs GitHub App credentials.
+Terraform no longer provisions Modal's `github-app` secret; you can delete the existing secret from
+Modal after upgrading.
+
 ### Added
 
 Team leads and workspace administrators can manage encrypted secrets from a team's Secrets tab.
@@ -27,6 +54,30 @@ trigger failures may leave no rebuild request. Team-owned environment images req
 session ownership. Team-only legacy OAuth refresh tokens do not enable managed authentication; API
 keys remain usable. Team-secret read and decryption errors abort environment builds rather than
 falling back to other secret scopes.
+
+**Team-owned environments.** The environment form offers team ownership, and team pages include an
+Environments tab. Team environments are visible to their members and administrators, and controls
+use server capabilities. Environment names are unique within each team. Sessions, including
+inherited child targets, can use a team environment only when they belong to that team. Environment
+secrets, settings, and image routes also require access to the owning environment. Workspace
+environment management remains permission-based for custom roles, and existing environments retain
+their ownership. The require-team creation setting also applies to new environments. Changing
+environment secrets, settings, or images now also requires `environments.manage`, so custom roles
+holding only `environments.secrets.manage`, `environments.settings.manage`, or
+`environments.images.manage` lose those actions. Actorless bots see only workspace environments,
+both in lists and by ID.
+
+**Team-owned automations.** The automation form offers team ownership, and team pages include an
+Automations tab. Team automations are visible to their members and administrators, and controls use
+server capabilities. Automation leads can manage team work and reassign departed executors; executor
+reassignment verifies the candidate's launch permissions before writing and is audited as
+`automation.executor_changed`. Selected environments must belong to the automation's team.
+Executions require active membership, an unarchived team, and current repository grants, and their
+sessions inherit the team's default visibility. Slack follow-ups use the persisted session's
+collaboration decision, and automation history redacts inaccessible session metadata. Existing
+automations retain their ownership and visibility. The require-team creation setting also applies to
+new automations. These owned-resource checks apply in every session enforcement mode; source-control
+token narrowing remains a separate change.
 
 ### Removed
 
@@ -49,6 +100,22 @@ sandbox until the next prompt input or submission. Scope changes refresh lists w
 terminal access or per-session caches. Visibility changes require a changed selection and confirm
 non-private child-session cascades. Workspace audit readers can filter by teams they do not belong
 to.
+
+### Added
+
+Teams now have a Repositories tab. Members can view grants; team leads and workspace administrators
+can grant all installation repositories or select named repositories, and remove grants. Team-scoped
+repository catalogs and repository-bearing writes check these grants, with explicit missing-grant
+errors and audited grant changes. Workspace-level session catalogs remain installation-wide. Grant
+changes advance the team's grant version but do not yet narrow or revoke sandbox installation
+tokens.
+
+Workspace-level skills, repository secrets, and image builds retain existing permissions on
+repositories granted to no team. Team-owned repositories additionally require membership (lead
+membership for repository secrets), or workspace Owner/Administrator access, in every enforcement
+mode. Manual team-owned environment builds require access to the owning team. Hidden and missing
+team requests now record identical denied authorization decisions without changing their 404
+responses.
 
 ## September 30, 2026
 

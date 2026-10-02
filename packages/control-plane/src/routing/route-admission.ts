@@ -1,10 +1,6 @@
 /** Framework-neutral authentication and authorization for a matched route. */
 
-import {
-  SCOPED_PERMISSION_PAIRS,
-  resolveScopedPermission,
-  type PermissionId,
-} from "@open-inspect/shared/rbac";
+import { isWorkspaceAdmin, type PermissionId } from "@open-inspect/shared/rbac";
 import { authenticate, isAuthError } from "../auth/authenticate";
 import {
   canonicalUserIdOf,
@@ -13,6 +9,10 @@ import {
   type AccessTokenWrites,
   type Principal,
 } from "../auth/principal";
+import {
+  evaluateOwnedResourceAdmission,
+  ownedResourceAdmissionResponse,
+} from "../authorization/owned-resource-admission";
 import type {
   AuthorizationDecisionRequirement,
   RouteAuthorizationDecision,
@@ -21,7 +21,6 @@ import { AuthorizationError, AuthorizationService } from "../authorization/servi
 import { serviceAllowsPermission } from "../authorization/service-permissions";
 import { evaluateSessionAdmission, viewerFromContext } from "../authorization/session-admission";
 import { legacyPermissionForAction } from "../authorization/teams-enforcement";
-import { AutomationStore } from "../db/automation-store";
 import { PersonalAccessTokenStore } from "../db/personal-access-tokens";
 import { TeamStore } from "../db/teams";
 import { TeamMembershipStore } from "../db/team-memberships";
@@ -375,7 +374,11 @@ function enforceStaticServicePermissionCeiling(
         ? requirement.permission
         : requirement.kind === "session"
           ? legacyPermissionForAction(requirement.action)
-          : null;
+          : requirement.kind === "environment"
+            ? (`environments.${requirement.need}` as const)
+            : requirement.kind === "automation" && requirement.operation === "read"
+              ? "automations.read"
+              : null;
     if (permission && !serviceAllowsPermission(principal.service, permission)) {
       return authorizationDenial(
         json({ error: "Forbidden", code: "service_capability_required" }, 403),
@@ -562,57 +565,33 @@ async function enforcePermissionRequirement(
   );
 }
 
-async function enforceAutomationRequirement(
-  requirement: Extract<RouteAuthorizationRequirement, { kind: "automation" }>,
+async function enforceOwnedResourceRequirement(
+  requirement: Extract<RouteAuthorizationRequirement, { kind: "automation" | "environment" }>,
   params: RouteParams,
   ctx: RequestContext,
   evidence: AuthorizationEvidence
 ): Promise<AuthorizationFailure | null> {
-  const principal = ctx.principal;
-  if (!isSelfActingPrincipal(principal)) {
-    // Ownership is defined for a principal that is a canonical user: a browser
-    // user, or an access token, which is its owner. Service policy normally
-    // rejects bots earlier; this keeps a future `requireAll` composition from
-    // skipping the ownership check. Admitting a token here decides only whose
-    // automations it owns — whether it may write to one is the route's own
-    // `accessTokenWrites` declaration, which most automation routes withhold.
-    return authorizationDenial(
-      json({ error: "Forbidden", code: "service_capability_required" }, 403),
-      evidence,
-      requirement,
-      "service_capability_required",
-      "Forbidden"
-    );
-  }
-  const automationId = params[requirement.automationIdParam];
-  if (!automationId) return { response: json({ error: "Invalid automation route" }, 400) };
-
   try {
-    const authorization = ctx.authorization;
-    if (!authorization) throw new Error("Missing request authorization");
-    const store = new AutomationStore(ctx.db);
-    const storedAutomation = await store.getById(automationId);
-    if (!storedAutomation) return { response: error("Automation not found", 404) };
-    const automation = await store.resolveCanonicalOwner(storedAutomation);
-
-    const permissionStem = `automations.${requirement.operation}` as const;
-    const pair = SCOPED_PERMISSION_PAIRS[permissionStem];
-    const isOwner = automation.user_id === principal.userId;
-    const scope = resolveScopedPermission(permissionStem, authorization.permissions);
-    if (!scope || (scope === "own" && !isOwner)) {
+    const result = await evaluateOwnedResourceAdmission(requirement, params, ctx);
+    // Denials keep the loaded environment too, so the audit attributes its owner team.
+    if (result.kind !== "error" && "admission" in result && result.admission) {
+      ctx.environmentAdmission = result.admission;
+    }
+    if (result.kind === "error") {
+      return { response: ownedResourceAdmissionResponse(result) };
+    }
+    if (result.kind === "denied") {
       return authorizationDenial(
-        json({ error: "Forbidden", code: "permission_required", permission: pair.own }, 403),
+        ownedResourceAdmissionResponse(result),
         evidence,
         requirement,
-        "permission_required",
-        "Forbidden",
-        pair.own
+        result.reasonCode,
+        result.reason,
+        result.failedPermission
       );
     }
-
     evidence.requirements.push(requirement);
-    evidence.effectivePermissions.push(pair[scope]);
-    ctx.automationAdmission = { automation };
+    if (result.effectivePermission) evidence.effectivePermissions.push(result.effectivePermission);
     return null;
   } catch {
     return authorizationUnavailable();
@@ -640,14 +619,21 @@ async function enforceTeamRequirement(
   if (!teamId) return { response: json({ error: "Invalid team route" }, 400) };
   try {
     const team = await new TeamStore(ctx.db).getById(teamId);
-    if (!team) return { response: error("Team not found", 404) };
+    if (!team)
+      return authorizationDenial(
+        error("Team not found", 404),
+        evidence,
+        requirement,
+        "team_not_visible",
+        "Team not found"
+      );
     const memberships = new TeamMembershipStore(ctx.db);
     const viewer = viewerFromContext(
       ctx,
       (ctx.sessionMemberships ??= await memberships.listForUser(ctx.principal.userId))
     );
     if (viewer.kind !== "user") throw new Error("Missing team viewer");
-    const isAdmin = viewer.roleKey === "owner" || viewer.roleKey === "administrator";
+    const isAdmin = isWorkspaceAdmin(viewer.roleKey);
     const isMember = isAdmin || viewer.memberships.has(teamId);
     if (
       !isMember &&
@@ -655,7 +641,13 @@ async function enforceTeamRequirement(
         requirement.need === "removeMember" ||
         (requirement.need === "read" && team.archivedAt !== null))
     )
-      return { response: error("Team not found", 404) };
+      return authorizationDenial(
+        error("Team not found", 404),
+        evidence,
+        requirement,
+        "team_not_visible",
+        "Team not found"
+      );
     const access = resolveTeamAccess(
       {
         userId: viewer.userId,
@@ -835,7 +827,8 @@ async function enforceRouteAuthorization(
           failure = await enforcePermissionRequirement(requirement, ctx, evidence);
           break;
         case "automation":
-          failure = await enforceAutomationRequirement(requirement, params, ctx, evidence);
+        case "environment":
+          failure = await enforceOwnedResourceRequirement(requirement, params, ctx, evidence);
           break;
         case "team":
           failure = await enforceTeamRequirement(requirement, params, ctx, evidence);
