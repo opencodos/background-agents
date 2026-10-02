@@ -1,3 +1,4 @@
+import { isWorkspaceAdmin } from "@open-inspect/shared/rbac";
 import { parseBody } from "./body";
 import { Hono } from "hono";
 import { z } from "zod";
@@ -154,10 +155,7 @@ export async function handleListSessions(
         ))
       : new Map()
   );
-  if (
-    scope === "all" &&
-    (viewer.kind !== "user" || !["owner", "administrator"].includes(viewer.roleKey ?? ""))
-  ) {
+  if (scope === "all" && (viewer.kind !== "user" || !isWorkspaceAdmin(viewer.roleKey))) {
     return error("Invalid scope", 403);
   }
   if (ownerFilter && ownerFilter !== "anyone" && viewer.kind !== "user") {
@@ -252,10 +250,7 @@ export async function handleListSessionInbox(
       ctx.principal.userId
     ))
   );
-  if (
-    scope === "all" &&
-    (viewer.kind !== "user" || !["owner", "administrator"].includes(viewer.roleKey ?? ""))
-  ) {
+  if (scope === "all" && (viewer.kind !== "user" || !isWorkspaceAdmin(viewer.roleKey))) {
     return error("Invalid scope", 403);
   }
 

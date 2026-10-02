@@ -104,6 +104,7 @@ export {
   teamMembershipSchema,
 } from "./teams";
 export type { Team, TeamRole, TeamJoinPolicy, SessionVisibility, TeamMembership } from "./teams";
+export { teamIdSchema } from "./team-id";
 
 export {
   SESSION_ACTIONS,
@@ -112,6 +113,7 @@ export {
   checkSessionAccess,
   sessionCapabilities,
   checkAutomationAccess,
+  checkAutomationExecutorReassignment,
   automationCapabilities,
   checkEnvironmentAccess,
   environmentCapabilities,
@@ -302,6 +304,8 @@ export type {
   AutomationRepository,
   AutomationRepositoryInput,
   Automation,
+  AutomationCapabilities,
+  AutomationView,
   AutomationExecutionSummary,
   AutomationListItem,
   CreateAutomationRequest,

@@ -17,8 +17,10 @@ import { resolveAppName } from "@open-inspect/shared/app-name";
 import { Hono } from "hono";
 import { getCachedInstallationToken, getGitHubReviewerAppConfig } from "../auth/github-app";
 import { SessionIndexStore } from "../db/session-index";
+import { readCachedInstallationRepositories } from "../repos/cache";
 import { createLogger } from "../logger";
 import { admit, dispatch } from "../routing/admit";
+import { resolveSessionCredentialScope } from "../source-control/session-scope";
 import type { ControlPlaneHonoEnv } from "../routing/hono-env";
 import type { Env } from "../types";
 import {
@@ -76,10 +78,15 @@ async function handleReviewerToken(
   }
 
   try {
-    const token = await getCachedInstallationToken(reviewerAppConfig, {
-      cacheStore: env.REPOS_CACHE,
-      userAgent: resolveAppName(env),
-    });
+    // Same least privilege as the main App's session credential: only the session's repositories.
+    const scope = await resolveSessionCredentialScope(ctx.db, params.id, () =>
+      readCachedInstallationRepositories(env)
+    );
+    const token = await getCachedInstallationToken(
+      reviewerAppConfig,
+      { cacheStore: env.REPOS_CACHE, userAgent: resolveAppName(env) },
+      { scope }
+    );
     return json({ token });
   } catch (cause) {
     logger.error("review_token.mint_failed", {

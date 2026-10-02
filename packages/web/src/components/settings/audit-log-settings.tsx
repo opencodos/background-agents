@@ -62,8 +62,11 @@ const OPERATION_LABELS: Record<AuditOperationAction, string> = {
   "team.member_role_changed": "Team member role changed",
   "team.member_removed": "Team member removed",
   "team.member_joined": "Team member joined",
+  "team.grant_added": "Team repository grant added",
+  "team.grant_removed": "Team repository grant removed",
   "team.secret_set": "Team secret set",
   "team.secret_deleted": "Team secret deleted",
+  "automation.executor_changed": "Automation executor changed",
 };
 
 const ACTION_LABELS = new Map<string, string>([
