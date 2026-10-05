@@ -224,6 +224,30 @@ export async function postReaction(
   }
 }
 
+export async function postIssueComment(
+  token: string,
+  url: string,
+  body: string,
+  userAgent: string = DEFAULT_APP_NAME
+): Promise<boolean> {
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": userAgent,
+      },
+      body: JSON.stringify({ body }),
+      signal: AbortSignal.timeout(GITHUB_API_REQUEST_TIMEOUT_MS),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function postCommitStatus(
   token: string,
   owner: string,
@@ -274,8 +298,7 @@ export async function postCommitStatus(
 }
 
 export type ReviewStatusStateResult =
-  | { ok: true; state: string | null }
-  | { ok: false; error: string };
+  { ok: true; state: string | null } | { ok: false; error: string };
 
 /**
  * Read the current state of the review's own status context on a commit, or null when the commit
@@ -323,8 +346,7 @@ export async function getReviewStatusState(
 }
 
 export type PullRequestSnapshotResult =
-  | { ok: true; headSha: string; state: string; draft: boolean }
-  | { ok: false; error: string };
+  { ok: true; headSha: string; state: string; draft: boolean } | { ok: false; error: string };
 
 /**
  * Fetch the PR's current head sha, state, and draft flag directly from
@@ -392,8 +414,7 @@ const pullRequestReviewSchema = z.object({
 const pullRequestReviewsResponseSchema = z.array(pullRequestReviewSchema);
 
 export type PullRequestApprovalResult =
-  | { ok: true; approved: boolean }
-  | { ok: false; error: string };
+  { ok: true; approved: boolean } | { ok: false; error: string };
 
 /**
  * Whether the PR currently carries at least one standing approval.

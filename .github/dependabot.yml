@@ -64,8 +64,12 @@ updates:
           - ">= 7.0.0"
       # @cloudflare/vitest-pool-workers (0.22.0, the latest) peers on vitest
       # ^4.1.0 and runs the control-plane integration tests, so vitest 5 cannot
-      # run them. Drop this entry once pool-workers accepts vitest 5.
+      # run them. Drop this entry once pool-workers accepts vitest 5. The
+      # coverage providers peer on the exact vitest version, so hold them too.
       - dependency-name: vitest
+        versions:
+          - ">= 5.0.0"
+      - dependency-name: "@vitest/coverage-*"
         versions:
           - ">= 5.0.0"
       # Prettier tracks the version locked upstream (ColeMurray/background-agents),

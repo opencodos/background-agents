@@ -6,6 +6,7 @@ import { SWRConfig } from "swr";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AutomationListItem, ListAutomationsResponse } from "@open-inspect/shared";
 import { DEFAULT_AUTOMATION_MAX_CONCURRENT_RUNS } from "@open-inspect/shared/types/automations";
+import { SwrFetchError } from "@/lib/swr-fetch-error";
 import { useAutomations } from "./use-automations";
 
 vi.mock("@/lib/auth-session", () => ({
@@ -87,13 +88,11 @@ describe("useAutomations", () => {
   });
 
   it("replaces loaded pages when the search changes", async () => {
-    const fetcher = vi.fn(
-      async (path: string): Promise<ListAutomationsResponse> => ({
-        automations: path.includes("search=Weekly") ? [secondAutomation] : [firstAutomation],
-        hasMore: false,
-        nextCursor: null,
-      })
-    );
+    const fetcher = vi.fn(async (path: string): Promise<ListAutomationsResponse> => ({
+      automations: path.includes("search=Weekly") ? [secondAutomation] : [firstAutomation],
+      hasMore: false,
+      nextCursor: null,
+    }));
     const { result, rerender } = renderHook(({ search }) => useAutomations(search), {
       initialProps: { search: "Daily" },
       wrapper: wrapper(fetcher),
@@ -202,13 +201,11 @@ describe("useAutomations", () => {
   });
 
   it("does not request another page after the final page", async () => {
-    const fetcher = vi.fn(
-      async (): Promise<ListAutomationsResponse> => ({
-        automations: [firstAutomation],
-        hasMore: false,
-        nextCursor: null,
-      })
-    );
+    const fetcher = vi.fn(async (): Promise<ListAutomationsResponse> => ({
+      automations: [firstAutomation],
+      hasMore: false,
+      nextCursor: null,
+    }));
     const { result } = renderHook(() => useAutomations(""), {
       wrapper: wrapper(fetcher),
     });
@@ -237,5 +234,29 @@ describe("useAutomations", () => {
     expect(
       fetcher.mock.calls.filter(([path]) => String(path).includes("cursor=")).map(([path]) => path)
     ).toEqual(["/api/automations?limit=25&cursor=next"]);
+  });
+
+  it.each([
+    [403, []],
+    [404, []],
+    [500, [firstAutomation]],
+  ])("after a %i refetch shows %j for a loaded list", async (status, expected) => {
+    let failure: SwrFetchError | null = null;
+    const fetcher = vi.fn(async (): Promise<ListAutomationsResponse> => {
+      if (failure) throw failure;
+      return { automations: [firstAutomation], hasMore: false, nextCursor: null };
+    });
+    const { result } = renderHook(() => useAutomations("", "team-1"), {
+      wrapper: wrapper(fetcher),
+    });
+    await waitFor(() => expect(result.current.automations).toEqual([firstAutomation]));
+
+    failure = new SwrFetchError(status);
+    await act(async () => {
+      await result.current.mutate();
+    });
+
+    await waitFor(() => expect(result.current.error).toBe(failure));
+    expect(result.current.automations).toEqual(expected);
   });
 });

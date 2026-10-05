@@ -175,9 +175,11 @@ All events are processed asynchronously via `executionCtx.waitUntil()`. The webh
    webhook payload. This runs as the last step before the claim, so the narrowest possible window
    remains in which a push or close can outrank the snapshot.
 6. Claim the next review generation for the PR from the control plane.
-7. Create a session through the control plane, fenced on that generation. A 409 means a newer
-   trigger already won, and the handler skips. Any other failure releases the claim — conditionally,
-   so a newer claim is never disturbed — before rethrowing.
+7. Create a session through the control plane, fenced on that generation. A 409 without a refusal
+   code means a newer trigger already won, and the handler skips. Any other failure releases the
+   claim — conditionally, so a newer claim is never disturbed — and then a team refusal
+   (`not_member`, `target_team_missing_grant`, `team_archived`) is explained in a PR comment and
+   skipped, while anything else is rethrown.
 8. Sweep and cancel review sessions for the PR that hold an older generation, naming the repository.
    An older review whose head a push replaced keeps its fence row with a close-out request, so its
    pending status is closed out like any other ending (see [Review Close-Out](#review-close-out)).
@@ -226,11 +228,14 @@ App as the reviewer, so the button names it rather than the webhook App; both lo
 1. Check `requested_reviewer.login` matches `GITHUB_BOT_USERNAME` or `GITHUB_REVIEWER_USERNAME` —
    return early if not.
 2. Post an eyes reaction on the PR.
-3. Run the same freshness check, generation claim, fenced session creation (with conditional claim
+3. Resolve the owning team through the control plane's GitHub route lookup, as mentions do (the
+   auto-review path stays workspace-owned and skips it). A failed lookup throws so the delivery is
+   retried.
+4. Run the same freshness check, generation claim, fenced session creation (with conditional claim
    release on failure), and stale-review sweep as the auto-review path.
-4. Post the pending `open-inspect` status on `pull_request.head.sha` under the lease, as step 9
+5. Post the pending `open-inspect` status on `pull_request.head.sha` under the lease, as step 9
    above.
-5. Send the code review prompt, which posts the successful status after the review.
+6. Send the code review prompt, which posts the successful status after the review.
 
 In both review flows, a review that ends without replacing its pending status is closed out by the
 bot (see [Review Close-Out](#review-close-out)).

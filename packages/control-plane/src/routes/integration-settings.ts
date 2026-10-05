@@ -5,14 +5,16 @@
 import {
   DEFAULT_MAX_CONCURRENT_CHILD_SESSIONS,
   DEFAULT_MAX_TOTAL_CHILD_SESSIONS,
+  DEFAULT_LINEAR_UNBOUND_CHANNELS,
+  linearBotGlobalSettingsSchema,
   type CodeServerSettings,
   type EnvironmentSettingsIntegrationId,
   type GitHubBotSettings,
   type IntegrationId,
-  type LinearBotSettings,
   type SandboxSettings,
   type VncSettings,
 } from "@open-inspect/shared/types/integrations";
+import { getValidHarnessOrDefault } from "@open-inspect/shared/harnesses";
 import { isValidReasoningEffort } from "@open-inspect/shared/models";
 import {
   IntegrationSettingsStore,
@@ -422,7 +424,7 @@ async function handleGetResolvedConfig(
   }
 
   if (id === "linear") {
-    const linearSettings = settings as LinearBotSettings;
+    const linearSettings = linearBotGlobalSettingsSchema.parse(settings);
     const linearReasoningEffort =
       linearSettings.model &&
       linearSettings.reasoningEffort &&
@@ -434,12 +436,14 @@ async function handleGetResolvedConfig(
       integrationId: id,
       repo,
       config: {
+        harness: getValidHarnessOrDefault(linearSettings.harness),
         model: linearSettings.model ?? null,
         reasoningEffort: linearReasoningEffort,
         allowUserPreferenceOverride: linearSettings.allowUserPreferenceOverride ?? true,
         allowLabelModelOverride: linearSettings.allowLabelModelOverride ?? true,
         emitToolProgressActivities: linearSettings.emitToolProgressActivities ?? true,
         issueSessionInstructions: linearSettings.issueSessionInstructions ?? null,
+        unboundChannels: linearSettings.unboundChannels ?? DEFAULT_LINEAR_UNBOUND_CHANNELS,
         enabledRepos,
       },
     });
@@ -522,7 +526,10 @@ integrationSettingsRoutes.get(
   admit({
     ...GITHUB_USER_OR_SERVICE_ROUTE,
     authorization: requirePermission("integrations.read", {
-      actorlessGrants: [{ service: "slack-bot", pathParams: { id: "slack" } }],
+      actorlessGrants: [
+        { service: "slack-bot", pathParams: { id: "slack" } },
+        { service: "linear-bot", pathParams: { id: "linear" } },
+      ],
     }),
   }),
   (c) => dispatch(c, handleGetIntegrationSettings)

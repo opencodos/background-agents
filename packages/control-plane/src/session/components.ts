@@ -57,6 +57,7 @@ import { UserStore } from "../db/user-store";
 import { IntegrationSettingsStore, resolveSlackSettings } from "../db/integration-settings";
 import { SessionIndexStore } from "../db/session-index";
 import { TeamMembershipStore } from "../db/team-memberships";
+import { TeamChannelBindingStore } from "../db/team-channel-bindings";
 import { SessionCollaboratorStore } from "../db/session-collaborators";
 import { parsePersistedSandboxSettings } from "../sandbox/settings";
 import type { SandboxSettings } from "@open-inspect/shared/types/integrations";
@@ -163,7 +164,10 @@ import { SessionTitleService } from "./title-service";
 import { parseArtifactMetadata } from "./artifact-metadata";
 import { AuthorizationError, AuthorizationService } from "../authorization/service";
 import { parseTeamsEnforcementMode, resolverDecides } from "../authorization/teams-enforcement";
-import { auditSocketPrivateBreakGlass } from "../authorization/session-socket-audit";
+import {
+  auditSocketPrivateBreakGlass,
+  auditSocketShadowDenied,
+} from "../authorization/session-socket-audit";
 import type { TeamRole } from "@open-inspect/shared/types/teams";
 import type { SessionWebSocket } from "../platform-ports";
 
@@ -217,6 +221,7 @@ export interface SessionComponents {
   sandboxEventProcessor: SessionSandboxEventProcessor;
   pushService: SandboxPushService;
   sessionLifecycleHandler: SessionLifecycleHandler;
+  callbackService: CallbackNotificationService;
 }
 
 /**
@@ -327,6 +332,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
   // Shared single instances/closures — every consumer below takes these
   // rather than re-deriving its own copy.
   const sessionIndexStore = new SessionIndexStore(db);
+  const teamChannelBindingStore = new TeamChannelBindingStore(db);
   const resolveCredentialScope = (sessionId: string) =>
     resolveSessionCredentialScope(db, sessionId, () => readCachedInstallationRepositories(env));
   const teamMembershipStore = new TeamMembershipStore(db);
@@ -397,6 +403,10 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
   const callbackService = new CallbackNotificationService({
     repository: sessionCoreRepository,
     messageRepository,
+    slackPostScope: {
+      getSession: (sessionId) => sessionIndexStore.get(sessionId),
+      getChannelBinding: (channelId) => teamChannelBindingStore.get("slack", channelId),
+    },
     env,
     completeAutomationRun: (completion) => scheduler.runComplete(completion),
     log,
@@ -501,6 +511,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     backgroundTasks,
     recordWarning: (message, eventId) =>
       recordSessionWarning(eventRepository, messenger, message, eventId),
+    resumeQueuedWork: () => messageQueue.processMessageQueue(),
   });
   const executionStop: ExecutionStopCoordinator = new ExecutionStopCoordinator(
     log,
@@ -547,7 +558,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     send: (ws, msg) => wsManager.send(ws, msg),
     getSandboxSocket: () => wsManager.getSandboxSocket(),
     isSpawning: () => lifecycleManager.isSpawning(),
-    spawnSandbox: () => lifecycleManager.spawnSandbox(),
+    warmSandbox: () => lifecycleManager.spawnSandbox("warm"),
     log,
   });
 
@@ -900,6 +911,8 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
       }
     },
     auditPrivateBreakGlass: (userId, row) => auditSocketPrivateBreakGlass(db, userId, row),
+    auditShadowDenied: (userId, row, reason, connectionId) =>
+      auditSocketShadowDenied(db, userId, row, reason, connectionId),
     log,
   });
 
@@ -1035,6 +1048,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     sandboxEventProcessor,
     pushService,
     sessionLifecycleHandler,
+    callbackService,
   };
 
   return {
@@ -1061,6 +1075,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
 
 interface LifecycleManagerDeps {
   recordWarning: (message: string, eventId: string) => void;
+  resumeQueuedWork: () => Promise<void>;
   shutdown: SandboxShutdownLifecycle;
   access: SandboxAccess;
   provider: SandboxProvider;
@@ -1161,6 +1176,7 @@ function createLifecycleManager(deps: LifecycleManagerDeps): SandboxLifecycleMan
     mcpServerLookup,
     slackAgentNotifyLookup,
     recordWarning: deps.recordWarning,
+    resumeQueuedWork: deps.resumeQueuedWork,
   };
 
   // The image lookup exists only for providers that support prebuilt images,

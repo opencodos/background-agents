@@ -47,7 +47,8 @@ import {
   postCommitStatus,
   postReaction,
 } from "../src/github-auth";
-import { handlePullRequestReviewTrigger, START_MARKER_LEASE_WAIT_MS } from "../src/handlers";
+import { handlePullRequestReviewTrigger } from "../src/handlers";
+import { START_MARKER_LEASE_WAIT_MS } from "../src/review-start";
 import { completeCloseOut, requestCloseOut } from "../src/review-close-out";
 import { START_MARKER_RELEASE_TIMEOUT_MS } from "../src/review-supersession";
 import { getGitHubConfig } from "../src/utils/integration-config";

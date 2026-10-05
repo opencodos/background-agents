@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_AUTOMATION_MAX_CONCURRENT_RUNS,
   MAX_AUTOMATION_CONCURRENT_RUNS,
+  automationInvocationStatusSchema,
   validateAutomationTargetCounts,
   createAutomationRequestSchema,
   listAutomationsResponseSchema,
@@ -189,6 +190,32 @@ describe("automation concurrency bound", () => {
     expect(create(1.5).success).toBe(false);
     expect(create("3").success).toBe(false);
     expect(updateAutomationRequestSchema.safeParse({ maxConcurrentRuns: 0 }).success).toBe(false);
+  });
+});
+
+describe("automation grant-denial statuses", () => {
+  it("adds unauthorized without changing the existing invocation statuses", () => {
+    expect(automationInvocationStatusSchema.options).toEqual([
+      "starting",
+      "running",
+      "completed",
+      "failed",
+      "partial_failed",
+      "skipped",
+      "unauthorized",
+    ]);
+  });
+
+  it("accepts unauthorized invocation status in recent execution summaries", () => {
+    const recentExecutions = [{ id: "inv-denied", status: "unauthorized", createdAt: 123 }];
+    const response = listAutomationsResponseSchema.parse({
+      automations: [{ ...automation, recentExecutions }],
+      hasMore: false,
+      nextCursor: null,
+    });
+
+    expect(automationInvocationStatusSchema.parse("unauthorized")).toBe("unauthorized");
+    expect(response.automations[0].recentExecutions).toEqual(recentExecutions);
   });
 });
 

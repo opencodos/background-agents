@@ -1,4 +1,5 @@
 import type { HarnessId } from "@open-inspect/shared/harnesses";
+import type { SessionMemorySelection } from "../memory/types";
 import type { Env } from "../types";
 import type { RequestContext } from "../routes/shared";
 import type { SpawnSource } from "@open-inspect/shared/types/sessions";
@@ -14,6 +15,7 @@ import { SessionInternalPaths } from "./contracts";
 import { SessionDraftExpiryClient } from "./abandoned-draft-sweep";
 import { createSessionRuntimeClient } from "./runtime-client";
 import { createLogger } from "../logger";
+import type { Pinned } from "./pinned";
 import type { SessionSkillManifestInput } from "./skill-resolution";
 import type { SessionModelProviderAuthInput } from "../model-provider-accounts/provider-auth-contracts";
 import { DEFAULT_BASE_BRANCH } from "../repos/default-branch";
@@ -97,8 +99,10 @@ export interface SessionInitInput {
   spawnDepth?: number;
   automationId?: string | null;
   automationRunId?: string | null;
-  managedSkillsManifest?: SessionSkillManifestInput;
-  managedSkillsSourceSessionId?: string;
+  /** Memory selection, resolved for a root session or copied from the parent. */
+  memory: Pinned<SessionMemorySelection>;
+  /** Managed skills, resolved for a root session or copied from the parent. */
+  managedSkills: Pinned<SessionSkillManifestInput>;
   /** Complete, immutable provider routing snapshot resolved by the caller. */
   providerAuth: SessionModelProviderAuthInput[];
 
@@ -130,12 +134,6 @@ export async function initializeSession(
 ): Promise<{ sessionId: string; status: string }> {
   if (input.participantCanonicalUserId === undefined) {
     throw new Error("Participant canonical identity must be explicit");
-  }
-  if (
-    (input.managedSkillsManifest === undefined) ===
-    (input.managedSkillsSourceSessionId === undefined)
-  ) {
-    throw new Error("Session must resolve or inherit exactly one managed skills manifest");
   }
   const hasRepoOwner = input.repoOwner !== null;
   const hasRepoName = input.repoName !== null;
@@ -271,8 +269,8 @@ export async function initializeSession(
           : undefined,
       createdAt: now,
       updatedAt: now,
-      skillManifest: input.managedSkillsManifest,
-      skillManifestSourceSessionId: input.managedSkillsSourceSessionId,
+      memory: input.memory,
+      managedSkills: input.managedSkills,
       providerAuth: input.providerAuth,
     });
   } catch (error) {
