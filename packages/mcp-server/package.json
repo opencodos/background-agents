@@ -22,7 +22,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.19.1",
-    "@vitest/coverage-v8": "^5.0.3",
+    "@vitest/coverage-v8": "^4.1.11",
     "esbuild": "^0.28.2",
     "typescript": "^6.0.3",
     "vitest": "^4.1.0"

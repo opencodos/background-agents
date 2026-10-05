@@ -47,6 +47,7 @@ import {
 import { SessionCollaboratorStore } from "../db/session-collaborators";
 import type { TeamsEnforcementMode } from "../authorization/teams-enforcement";
 import type { ListSessionInboxResult } from "../db/session-inbox-store";
+import { recordShadowListDenials } from "../authorization/session-shadow-audit";
 
 const sessionInboxQuerySchema = z.object({
   category: z
@@ -223,6 +224,7 @@ export async function handleListSessions(
   if (viewerUserId) {
     response.headers.set("Cache-Control", "private, no-store");
   }
+  recordShadowListDenials(ctx, viewer, result.sessions, teamsEnforcementMode(ctx, env));
   return response;
 }
 
@@ -285,6 +287,17 @@ export async function handleListSessionInbox(
     };
     const response = json(body);
     response.headers.set("Cache-Control", "private, no-store");
+    for (const page of Object.values(snapshot)) {
+      recordShadowListDenials(
+        ctx,
+        viewer,
+        page.items.flatMap(({ rootSession, descendantSessions }) => [
+          rootSession,
+          ...descendantSessions,
+        ]),
+        mode
+      );
+    }
     return response;
   }
 
@@ -310,6 +323,15 @@ export async function handleListSessionInbox(
     request_id: ctx.request_id,
     trace_id: ctx.trace_id,
   });
+  recordShadowListDenials(
+    ctx,
+    viewer,
+    result.items.flatMap(({ rootSession, descendantSessions }) => [
+      rootSession,
+      ...descendantSessions,
+    ]),
+    mode
+  );
   return response;
 }
 

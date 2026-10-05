@@ -61,6 +61,8 @@ const linearCallbackContextBaseSchema = z.strictObject({
   issueId: nonEmptyStringSchema,
   issueIdentifier: nonEmptyStringSchema,
   issueUrl: nonEmptyStringSchema,
+  /** External Linear team used for scoped reads; absent in persisted legacy contexts. */
+  linearTeamId: nonEmptyStringSchema.optional(),
   /** Settings repository when one can be resolved for this Linear message. */
   repoFullName: nonEmptyStringSchema.optional(),
   model: nonEmptyStringSchema,
@@ -293,6 +295,7 @@ const createSessionRequestBaseSchema = z.object({
   environmentId: z.string().trim().min(1).nullish(),
   /** Managed skills are resolved and pinned when the session is created. */
   skillSelection: sessionSkillSelectionSchema.optional(),
+  includePersonalMemories: z.boolean().optional(),
   /** Explicit account/API-key choices. Omission resolves provider policy. */
   providerSelections: modelProviderSelectionsSchema.optional(),
 });

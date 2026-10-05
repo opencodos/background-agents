@@ -15,6 +15,21 @@ function routeFor(method: string, path: string) {
 }
 
 describe("route policy table", () => {
+  it("declares narrow actorless GitHub routing with a repository permission", () => {
+    expect(routeFor("GET", "/github/route")).toMatchObject({
+      authentication: { kind: "service" },
+      authorization: {
+        kind: "active-user",
+        allOf: [{ kind: "permission", permission: "repositories.read" }],
+        service: { kind: "actor", actorlessGrants: [{ service: "github-bot" }] },
+        auditAllowed: false,
+      },
+      supportedScmProviders: ["github"],
+      cacheControl: "private, no-store",
+    });
+    expect(routeFor("POST", "/github/route")).toBeUndefined();
+  });
+
   it("does not expose a member-facing team activity route", () => {
     expect(routeFor("GET", "/teams/team-1/activity")).toBeUndefined();
     expect(routeFor("GET", "/audit-events")?.authorization).toMatchObject({
@@ -24,11 +39,16 @@ describe("route policy table", () => {
   });
 
   it("publishes the complete canonical route catalog", () => {
-    expect(routes).toHaveLength(220);
+    expect(routes).toHaveLength(245);
 
     const paths = routes.map((route) => route.path);
-    expect(new Set(paths).size).toBe(167);
-    expect(new Set(routes.map((route) => `${route.method}:${route.path}`)).size).toBe(220);
+    expect(new Set(paths).size).toBe(187);
+    expect(new Set(routes.map((route) => `${route.method}:${route.path}`)).size).toBe(245);
+    expect(routeFor("POST", "/sessions/session-1/sandbox-memory/search")).toMatchObject({
+      authentication: { kind: "sandbox" },
+      supportedScmProviders: "all",
+      cacheControl: "private, no-store",
+    });
   });
 
   it("gates run analytics with analytics.read", () => {
@@ -181,9 +201,16 @@ describe("route policy table", () => {
       } else if (authorization.kind === "active-global") {
         expect(["user", "user-or-service"]).toContain(authentication);
       } else {
-        expect(["user", "user-or-service", "user-or-service-with-sandbox-fallback"]).toContain(
-          authentication
-        );
+        expect([
+          "user",
+          "user-or-service",
+          "user-or-service-with-sandbox-fallback",
+          "service",
+        ]).toContain(authentication);
+        if (authentication === "service") {
+          expect(route.path).toBe("/github/route");
+          expect(route.serviceActorClaims).toBeDefined();
+        }
         expect(authorization.allOf.length).toBeGreaterThan(0);
         for (const requirement of authorization.allOf) {
           if (requirement.kind === "automation") {
@@ -230,7 +257,23 @@ describe("route policy table", () => {
     ["GET", "/repos/acme/widgets/metadata", [{ service: "github-bot" }]],
     ["GET", "/environments", [{ service: "slack-bot" }, { service: "linear-bot" }]],
     ["GET", "/environments/env-1", [{ service: "github-bot" }]],
-    ["GET", "/integration-settings/slack", [{ service: "slack-bot", pathParams: { id: "slack" } }]],
+    ["GET", "/github/route", [{ service: "github-bot" }]],
+    [
+      "GET",
+      "/integration-settings/slack",
+      [
+        { service: "slack-bot", pathParams: { id: "slack" } },
+        { service: "linear-bot", pathParams: { id: "linear" } },
+      ],
+    ],
+    [
+      "GET",
+      "/integration-settings/linear",
+      [
+        { service: "slack-bot", pathParams: { id: "slack" } },
+        { service: "linear-bot", pathParams: { id: "linear" } },
+      ],
+    ],
     [
       "GET",
       "/integration-settings/github/resolved/acme/widgets",
@@ -240,7 +283,7 @@ describe("route policy table", () => {
       ],
     ],
     ["GET", "/integration-settings/slack/watched-channels", [{ service: "slack-bot" }]],
-    ["GET", "/model-preferences", [{ service: "slack-bot" }]],
+    ["GET", "/model-preferences", [{ service: "slack-bot" }, { service: "github-bot" }]],
     ["GET", "/automations", [{ service: "slack-bot" }]],
     ["GET", "/automations/auto-1", [{ service: "slack-bot" }]],
     ["GET", "/automations/auto-1/invocations", [{ service: "slack-bot" }]],
@@ -259,12 +302,25 @@ describe("route policy table", () => {
     }
   });
 
+  it.each([
+    ["slack", "slack-bot"],
+    ["linear", "linear-bot"],
+  ] as const)("admits only the %s bot to its channel-binding lookup", (provider, service) => {
+    expect(routeFor("GET", `/channel-bindings/${provider}/C1`)?.authorization).toEqual({
+      kind: "service",
+      services: [service],
+      actor: "optional",
+      auditAllowed: true,
+    });
+  });
+
   it("does not declare actorless grants on other routes", () => {
     const expected = new Set([
       routeFor("GET", "/repos"),
       routeFor("GET", "/repos/acme/widgets/metadata"),
       routeFor("GET", "/environments"),
       routeFor("GET", "/environments/env-1"),
+      routeFor("GET", "/github/route"),
       routeFor("GET", "/integration-settings/slack"),
       routeFor("GET", "/integration-settings/github/resolved/acme/widgets"),
       routeFor("GET", "/integration-settings/slack/watched-channels"),
@@ -318,7 +374,10 @@ describe("route policy table", () => {
     });
     expect(routeFor("GET", "/model-preferences")?.authorization).toMatchObject({
       kind: "active-global",
-      service: { kind: "actor", actorlessGrants: [{ service: "slack-bot" }] },
+      service: {
+        kind: "actor",
+        actorlessGrants: [{ service: "slack-bot" }, { service: "github-bot" }],
+      },
     });
     expect(routeFor("GET", "/sessions")?.authorization).toMatchObject({
       kind: "active-user",
@@ -431,6 +490,7 @@ describe("route policy table", () => {
     ["GET", "/health", "public"],
     ["POST", "/webhooks/sentry/automation-1", "handler-authenticated"],
     ["POST", "/webhooks/automation/automation-1", "handler-authenticated"],
+    ["GET", "/webhooks/automation/automation-1/invocations/invocation-1", "handler-authenticated"],
     ["POST", "/image-builds/build-complete", "handler-authenticated"],
     ["POST", "/image-builds/build-failed", "handler-authenticated"],
     ["GET", "/api/auth/get-session", "web-service"],

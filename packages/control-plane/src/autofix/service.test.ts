@@ -99,15 +99,13 @@ function buildService() {
       repoOwner: "acme",
       repoName: "widgets",
     })),
-    getPullRequestFeedback: vi.fn(
-      async (): Promise<GitHubPullRequestFeedback> => ({
-        kind: "pr_comment",
-        id: "1234",
-        body: "Please handle the null case.",
-        url: "https://github.com/acme/widgets/pull/42#issuecomment-1234",
-        author: { id: "7", login: "alice", type: "User" },
-      })
-    ),
+    getPullRequestFeedback: vi.fn(async (): Promise<GitHubPullRequestFeedback> => ({
+      kind: "pr_comment",
+      id: "1234",
+      body: "Please handle the null case.",
+      url: "https://github.com/acme/widgets/pull/42#issuecomment-1234",
+      author: { id: "7", login: "alice", type: "User" },
+    })),
     hasPullRequestWritePermission: vi.fn(async () => true),
   };
   const sessions = {
@@ -189,6 +187,28 @@ describe("AutofixService", () => {
       2_000
     );
   });
+
+  it.each(["enqueued", "duplicate"] as const)(
+    "records %s session admission as queued",
+    async (kind) => {
+      const h = buildService();
+      h.sessions.fetch.mockResolvedValueOnce(Response.json({ kind, messageId: "message-1" }));
+
+      await expect(h.service.process(PR_COMMENT_ENVELOPE)).resolves.toEqual({
+        kind: "completed",
+        decision: "queued",
+        reason: kind,
+        messageId: "message-1",
+      });
+      expect(h.feedbackStore.markQueued).toHaveBeenCalledWith(
+        "github:pr_comment:1234",
+        "message-1",
+        kind,
+        2_000
+      );
+      expect(h.feedbackStore.markSkipped).not.toHaveBeenCalled();
+    }
+  );
 
   it("recovers an admitted message when the dispatch response is lost", async () => {
     const h = buildService();
@@ -744,6 +764,14 @@ describe("AutofixService", () => {
 
     expect(result).toMatchObject({ decision: "queued", messageId: "message-1" });
     expect(h.sessions.fetch).toHaveBeenCalledOnce();
+    // Reply comments are not valid REST reply targets, so the prompt routes by review thread.
+    const dispatch = h.sessions.fetch.mock.calls[0] as unknown as [string, string, RequestInit];
+    const { prompt } = JSON.parse(dispatch[2].body as string) as { prompt: string };
+    expect(prompt).toContain("#discussion_r9002");
+    expect(prompt).toContain("`reviewThreads`");
+    expect(prompt).toContain("`addPullRequestReviewThreadReply`");
+    expect(prompt).toContain("`resolveReviewThread`");
+    expect(prompt).not.toContain("/replies");
   });
 
   it("does not dispatch an approved Open Inspect App review", async () => {
