@@ -88,9 +88,9 @@ updates:
 
   # Python — every packages/* dir with a pyproject.toml + uv.lock. The
   # sandbox-images/locks tree is left out: `sandbox:images lock` generates it
-  # from the image tool manifest and the runtime uv.lock, so edits to it fail
-  # the freshness check. The dependabot-image-locks workflow regenerates it on
-  # each Dependabot PR instead.
+  # from the image tool manifest, so edits to it fail the freshness check. The
+  # runtime requirements are exported from sandbox-runtime/uv.lock at pack
+  # time, so bumps there need no regeneration.
   - package-ecosystem: uv
     directories:
       - /packages/*
