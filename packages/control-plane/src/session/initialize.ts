@@ -199,7 +199,6 @@ export async function initializeSession(
     throw new Error("Private sessions require a canonical owner");
   }
 
-
   // Step 1: GitHub review-generation fence. Runs before the D1 session row
   // and DO exist at all — a stale generation here means a newer review
   // already claimed this PR, so this create must leave no trace. Run as its

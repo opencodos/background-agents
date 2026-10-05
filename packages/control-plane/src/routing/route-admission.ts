@@ -3,7 +3,6 @@
 import { authenticate, isAuthError } from "../auth/authenticate";
 import {
   canonicalUserIdOf,
-  isSelfActingPrincipal,
   principalMayUseMethod,
   type AccessTokenWrites,
   type Principal,
@@ -609,7 +608,6 @@ async function enforceOwnedResourceRequirement(
     return authorizationUnavailable();
   }
 }
-
 
 async function enforceSessionRequirement(
   requirement: Extract<RouteAuthorizationRequirement, { kind: "session" }>,
