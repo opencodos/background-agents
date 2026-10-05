@@ -155,7 +155,7 @@ describe("GitHubIntegrationSettings", () => {
 
     render(<GitHubIntegrationSettings />);
 
-    const toggle = screen.getByRole("switch", { name: /auto-review new prs/i });
+    const toggle = screen.getByRole("switch", { name: /auto-review pr changes/i });
     const label = toggle.closest("label")!;
     expect(label).toHaveAttribute("for", toggle.id);
     expect(within(label).getByText("Deprecated")).toBeInTheDocument();
