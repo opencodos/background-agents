@@ -888,7 +888,10 @@ describe("access-token write declarations", () => {
         ?.authorization
     ).toMatchObject({
       kind: "active-user",
-      allOf: [{ kind: "permission", permission: "automations.create" }],
+      allOf: [
+        { kind: "permission", permission: "automations.create" },
+        { kind: "permission", permission: "sessions.create" },
+      ],
     });
     expect(
       routes.find((entry) => entry.method === "POST" && entry.path === "/automations/:id/trigger")
