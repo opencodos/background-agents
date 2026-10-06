@@ -61,7 +61,8 @@
       "undici": "^8.10.2"
     },
     "sharp": "^0.35.4",
-    "lodash-es": "^4.18.0"
+    "lodash-es": "^4.18.0",
+    "postcss-selector-parser": "^7.1.6"
   },
   "lint-staged": {
     "*.{ts,tsx}": [
