@@ -1,5 +1,10 @@
 version: 2
 
+# Every entry waits 3 days before proposing a new release, so a hijacked
+# version is likely pulled from the registry before it reaches a grouped bump.
+# Cooldown never delays a security update. Security updates get their own
+# group per ecosystem that has advisories, so one advisory burst lands as one
+# pull request rather than one per package.
 updates:
   # npm — the root manifest covers every packages/* workspace.
   - package-ecosystem: npm
@@ -7,6 +12,8 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 3
     open-pull-requests-limit: 5
     commit-message:
       prefix: chore
@@ -24,6 +31,10 @@ updates:
           - "*"
         update-types:
           - major
+      npm-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
     ignore:
       # better-auth 1.7 changes the socialProviders types and breaks the sign-in
       # integration tests. Ignore only 1.7 and above, so 1.6.x patches still
@@ -83,10 +94,16 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 3
     commit-message:
       prefix: chore
     groups:
       actions:
+        patterns:
+          - "*"
+      actions-security:
+        applies-to: security-updates
         patterns:
           - "*"
 
@@ -103,6 +120,8 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 3
     open-pull-requests-limit: 5
     commit-message:
       prefix: chore
@@ -118,6 +137,10 @@ updates:
           - "*"
         update-types:
           - major
+      python-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
     ignore:
       # modal 1.6 removes Function.get_raw_f and Function.get_build_def, which the
       # modal-infra tests use to introspect functions (deprecated in 1.5). Ignore
@@ -135,6 +158,8 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 3
     commit-message:
       prefix: chore
     groups:
@@ -148,6 +173,8 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 3
     commit-message:
       prefix: chore
     groups:
@@ -162,6 +189,8 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 3
     commit-message:
       prefix: chore
     groups:
