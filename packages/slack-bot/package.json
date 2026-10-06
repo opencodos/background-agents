@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.131.0",
-    "@cloudflare/workers-types": "^5.20260928.1",
+    "@cloudflare/workers-types": "^5.20261003.1",
     "@open-inspect/shared": "file:../shared",
     "hono": "^4.13.12",
     "zod": "^4.6.5"
