@@ -88,6 +88,16 @@ updates:
       # conflict on every sync, and fails format:check on files a sync brings in
       # unchanged. Bump it only when upstream's lockfile does.
       - dependency-name: prettier
+      # fumadocs-core/ui 16.16 change the page data types that fumadocs-mdx
+      # 15.4.6 (the latest) generates against, so the docs typecheck and build
+      # fail. Ignore only 16.16 and above so 16.15.x patches still arrive. Drop
+      # these entries once a fumadocs-mdx release supports 16.16.
+      - dependency-name: fumadocs-core
+        versions:
+          - ">= 16.16.0"
+      - dependency-name: fumadocs-ui
+        versions:
+          - ">= 16.16.0"
 
   - package-ecosystem: github-actions
     directory: /
