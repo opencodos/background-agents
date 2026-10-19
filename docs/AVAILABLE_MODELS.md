@@ -167,3 +167,10 @@ DeepSeek models require `DEEPSEEK_API_KEY` as a global or repository secret.
 | ---------------------------- | ----------------- | ------------ | ----------------- | -------------- |
 | `deepseek/deepseek-v4-flash` | DeepSeek V4 Flash | Fast model   | Not supported     | N/A            |
 | `deepseek/deepseek-v4-pro`   | DeepSeek V4 Pro   | Most capable | Not supported     | N/A            |
+
+## Subagent tiers
+
+OpenCode sessions define a `mid` subagent, so a skill or prompt can send rule-checking work to a
+cheaper model with `subagent_type: "mid"` instead of running it on the session model. It runs on
+`openai/gpt-5.6-terra` in OpenAI sessions and `anthropic/claude-sonnet-5-5` in Anthropic sessions;
+on every other provider it runs on the session model.

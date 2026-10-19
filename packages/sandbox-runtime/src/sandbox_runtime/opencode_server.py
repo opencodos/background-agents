@@ -28,6 +28,8 @@ if TYPE_CHECKING:
 _LOG_FORWARD_STREAM_LIMIT_BYTES = 1024 * 1024
 AGENT_TOOLS_GATED_ON_ENV = {"slack-notify.js": "AGENT_SLACK_NOTIFY_ENABLED"}
 AGENT_TOOLS_REQUIRING_REPOSITORY: set[str] = set()
+# Model behind the `mid` subagent, by provider; a provider with no entry runs it on the session model.
+MID_TIER_MODELS = {"anthropic": "claude-sonnet-5-5", "openai": "gpt-5.6-terra"}
 
 
 def resolve_opencode_global_config_dir() -> Path:
@@ -403,6 +405,13 @@ class OpenCodeServer:
         # Build OpenCode config from session settings
         opencode_config: dict[str, Any] = {
             "model": f"{self.provider}/{self.model}",
+            "agent": {
+                "mid": {
+                    "mode": "subagent",
+                    "model": f"{self.provider}/{MID_TIER_MODELS.get(self.provider, self.model)}",
+                    "description": "Mid-tier model for subagents that check work against stated rules",
+                }
+            },
             "permission": {"*": {"*": "allow"}},
             "provider": {
                 "anthropic": {
