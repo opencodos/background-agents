@@ -2,6 +2,13 @@
 
 New features, integrations, and notable improvements to Open-Inspect — newest first.
 
+## October 19, 2026
+
+**Mid-tier subagent.** OpenCode sessions now define a `mid` subagent that runs on GPT-5.6 Terra in
+OpenAI sessions and Claude Sonnet 5.5 in Anthropic sessions, so skills can fan rule-checking work
+out to a cheaper model. Requires a sandbox image rebuild. See
+[Subagent tiers](docs/AVAILABLE_MODELS.md#subagent-tiers).
+
 ## October 4, 2026
 
 **GitHub model overrides.** Start a GitHub `@mention` with `!model` or `!reasoning`, the same flags
