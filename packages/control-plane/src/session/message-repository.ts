@@ -31,7 +31,7 @@ const messageCompletionStateRowSchema = z.object({
   created_at: z.number(),
   started_at: z.number().nullable(),
 });
-const messageProcessingAuthorRowSchema = messageRowSchema.pick({ author_id: true });
+const messageProcessingAuthorRowSchema = messageRowSchema.pick({ author_id: true, source: true });
 
 export interface RecordedMessageCompletion {
   messageId: string;
@@ -513,9 +513,9 @@ export class MessageRepository {
     return rows[0] ?? null;
   }
 
-  getProcessingMessageAuthor(): { author_id: string } | null {
+  getProcessingMessageAuthor(): { author_id: string; source: MessageSource } | null {
     const result = this.sql.exec(
-      `SELECT author_id FROM messages WHERE status = 'processing' LIMIT 1`
+      `SELECT author_id, source FROM messages WHERE status = 'processing' LIMIT 1`
     );
     const rows = parseStorageRows(result.toArray(), messageProcessingAuthorRowSchema);
     return rows[0] ?? null;
