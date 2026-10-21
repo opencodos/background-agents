@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@opencomputer/sdk": "^2.3.0",
+    "@opencomputer/sdk": "^2.3.1",
     "esbuild": "^0.28.2",
     "typescript": "^6.0.3"
   }
