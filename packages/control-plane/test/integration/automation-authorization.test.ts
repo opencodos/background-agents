@@ -19,6 +19,7 @@ function automation(id: string, userId: string): AutomationRow {
     instructions: "Run tests",
     trigger_type: "schedule",
     schedule_cron: "0 9 * * *",
+    schedule_once_at: null,
     schedule_tz: "UTC",
     harness: "opencode",
     event_type: null,
@@ -226,7 +227,7 @@ describe("automation router authorization", () => {
       code: "target_team_missing_grant",
       repository: "acme/api",
     });
-    expect(await store.getById(row.id)).toEqual(row);
+    expect(await store.getById(row.id)).toEqual({ ...row, max_retries: 0 });
     expect(
       (await store.getEnvironmentsForAutomation(row.id)).map((member) => member.environment_id)
     ).toEqual(["env_original"]);

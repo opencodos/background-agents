@@ -20,20 +20,20 @@
     "test:lint-sql-portability": "node --test scripts/lint-sql-portability.test.mjs",
     "test:d1-migrate": "node --test scripts/d1-migrate.test.mjs",
     "test:deploy-aws": "node --test scripts/deploy-aws.test.mjs",
-    "test:rbac-bootstrap-owner": "node --experimental-transform-types --test scripts/bootstrap-workspace-owner.test.ts",
-    "test:user-merge-cli": "node --experimental-transform-types --test scripts/merge-split-users.test.ts",
+    "test:rbac-bootstrap-owner": "node --test scripts/bootstrap-workspace-owner.test.ts",
+    "test:user-merge-cli": "node --test scripts/merge-split-users.test.ts",
     "test:cf-logs-cli": "node --test scripts/cf-logs.test.ts",
     "test:terraform-workflow-contract": "node --test scripts/terraform-workflow-contract.test.mjs scripts/terraform-plan-comment.test.mjs",
     "test:node-version-workflow-contract": "node --test scripts/node-version-workflow-contract.test.mjs",
     "test:coverage": "npm run test:coverage --workspaces --if-present",
     "test:coverage-gate": "node --test scripts/check-coverage.test.mjs",
     "test:integration": "npm run test:integration --workspaces --if-present",
-    "typecheck": "npm run build -w @open-inspect/shared && npm run typecheck --workspaces --if-present",
+    "typecheck": "npm run build -w @open-inspect/shared && npm run typecheck --workspaces --if-present && tsc -p scripts",
     "knip": "knip",
     "build": "npm run build -w @open-inspect/shared && npm run build --workspaces --if-present",
-    "build:opencomputer-template": "npm run build-template -w @open-inspect/opencomputer-infra --",
-    "rbac:bootstrap-owner": "node --experimental-transform-types scripts/bootstrap-workspace-owner.ts",
-    "prepare": "node -e \"if (process.env.CI) process.exit(0)\" && husky"
+    "rbac:bootstrap-owner": "node scripts/bootstrap-workspace-owner.ts",
+    "prepare": "node -e \"if (process.env.CI) process.exit(0)\" && husky",
+    "test:readme-translations": "node --test scripts/readme-translations.test.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
@@ -44,12 +44,12 @@
     "eslint-plugin-react-hooks": "^6.1.1",
     "globals": "^17.13.0",
     "husky": "^9.1.7",
-    "knip": "^6.39.0",
+    "knip": "^6.41.0",
     "lint-staged": "^17.6.0",
-    "prettier": "^3.9.9",
+    "prettier": "^3.9.10",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.71.0",
-    "wrangler": "^4.147.0"
+    "typescript-eslint": "^8.71.2",
+    "wrangler": "^4.149.0"
   },
   "engines": {
     "node": ">=24.0.0"
@@ -60,11 +60,14 @@
     "jsdom": {
       "undici": "^8.10.2"
     },
-    "sharp": "^0.35.4",
+    "sharp": "^0.35.5",
     "lodash-es": "^4.18.0",
     "postcss-selector-parser": "^7.1.6",
     "mermaid": {
       "katex": "^0.18.2"
+    },
+    "@node-minify/core": {
+      "glob": "^10.5.0"
     }
   },
   "lint-staged": {
@@ -75,7 +78,7 @@
     "*.{js,jsx,json,md,yaml,yml,css}": [
       "prettier --write"
     ],
-    "packages/{daytona-infra,e2b-infra,modal-infra,sandbox-runtime,sandbox-images}/**/*.py": [
+    "packages/{boat-infra,daytona-infra,e2b-infra,modal-infra,sandbox-runtime,sandbox-images}/**/*.py": [
       "ruff check --fix",
       "ruff format"
     ]

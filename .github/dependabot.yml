@@ -73,7 +73,7 @@ updates:
       - dependency-name: eslint-plugin-react-hooks
         versions:
           - ">= 7.0.0"
-      # @cloudflare/vitest-pool-workers (0.22.0, the latest) peers on vitest
+      # @cloudflare/vitest-pool-workers (0.23.0, the latest) peers on vitest
       # ^4.1.0 and runs the control-plane integration tests, so vitest 5 cannot
       # run them. Drop this entry once pool-workers accepts vitest 5. The
       # coverage providers peer on the exact vitest version, so hold them too.
@@ -88,16 +88,6 @@ updates:
       # conflict on every sync, and fails format:check on files a sync brings in
       # unchanged. Bump it only when upstream's lockfile does.
       - dependency-name: prettier
-      # fumadocs-core/ui 16.16 change the page data types that fumadocs-mdx
-      # 15.4.6 (the latest) generates against, so the docs typecheck and build
-      # fail. Ignore only 16.16 and above so 16.15.x patches still arrive. Drop
-      # these entries once a fumadocs-mdx release supports 16.16.
-      - dependency-name: fumadocs-core
-        versions:
-          - ">= 16.16.0"
-      - dependency-name: fumadocs-ui
-        versions:
-          - ">= 16.16.0"
 
   - package-ecosystem: github-actions
     directory: /
