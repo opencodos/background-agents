@@ -56,10 +56,6 @@ function getDeliveryDedupeKey(deliveryId: string): string {
   return `delivery:${deliveryId}`;
 }
 
-function ttlSecondsFromMs(ttlMs: number): number {
-  return Math.ceil(ttlMs / 1_000);
-}
-
 app.get("/health", (c) => c.json({ status: "healthy", service: "open-inspect-github-bot" }));
 
 /**
@@ -199,7 +195,7 @@ app.post("/webhooks/github", async (c) => {
     }
 
     await cacheStore.put(dedupeKey, DELIVERY_STATUS_PROCESSING, {
-      expirationTtl: ttlSecondsFromMs(DELIVERY_PROCESSING_TTL_MS),
+      ttlMs: DELIVERY_PROCESSING_TTL_MS,
     });
   } else {
     log.warn("webhook.delivery_id_missing", { event_type: event });
@@ -248,7 +244,7 @@ app.post("/webhooks/github", async (c) => {
 
         try {
           await cacheStore.put(dedupeKey, DELIVERY_STATUS_PROCESSED, {
-            expirationTtl: ttlSecondsFromMs(DELIVERY_DEDUPE_TTL_MS),
+            ttlMs: DELIVERY_DEDUPE_TTL_MS,
           });
         } catch (err) {
           log.warn("webhook.dedupe_finalize_failed", {
@@ -289,6 +285,7 @@ const COMMENTED_SKIP_REASONS: ReadonlySet<string> = new Set([
   "team_archived",
   "invalid_inline_flags",
   "model_preferences_unavailable",
+  "harness_model_incompatible",
 ]);
 
 async function handleWebhook(
@@ -335,7 +332,7 @@ async function handleWebhook(
       ) {
         // Checkpoint completed external effects; preflight skips must be reevaluated.
         await cacheStore.put(dispatchKey, DELIVERY_STATUS_PROCESSED, {
-          expirationTtl: ttlSecondsFromMs(DELIVERY_DEDUPE_TTL_MS),
+          ttlMs: DELIVERY_DEDUPE_TTL_MS,
         });
       }
     }
@@ -371,7 +368,7 @@ async function handleWebhook(
   let forwardingFailure: { error: unknown } | undefined;
   if (event) {
     const normalizationPayload = actionResult.success ? actionResult.data : {};
-    const normalizedEvent = normalizeGitHubEvent(event, normalizationPayload);
+    const normalizedEvent = normalizeGitHubEvent(event, normalizationPayload, deliveryId);
     if (normalizedEvent !== null) {
       try {
         const url = "https://internal/internal/github-event";

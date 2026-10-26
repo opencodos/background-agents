@@ -3,6 +3,7 @@ import {
   sendPromptResponseSchema,
   type GitHubReviewCallbackContext,
 } from "@open-inspect/shared/types/session-api";
+import type { HarnessId } from "@open-inspect/shared/harnesses";
 import { z } from "zod";
 import { signedControlPlaneFetch } from "./internal-auth";
 import type { Env } from "./types";
@@ -26,6 +27,7 @@ export async function createSession(
     teamId: string | null;
     title: string;
     model: string;
+    harness: HarnessId;
     reasoningEffort?: string | null;
     scmLogin: string;
     scmUserId: string;
@@ -38,6 +40,7 @@ export async function createSession(
     teamId: params.teamId,
     title: params.title,
     model: params.model,
+    harness: params.harness,
     scmLogin: params.scmLogin,
     scmAvatarUrl: params.scmAvatarUrl,
     githubReview: params.githubReview,

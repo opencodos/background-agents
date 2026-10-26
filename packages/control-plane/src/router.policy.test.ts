@@ -39,15 +39,28 @@ describe("route policy table", () => {
   });
 
   it("publishes the complete canonical route catalog", () => {
-    expect(routes).toHaveLength(245);
+    expect(routes).toHaveLength(249);
 
     const paths = routes.map((route) => route.path);
-    expect(new Set(paths).size).toBe(187);
-    expect(new Set(routes.map((route) => `${route.method}:${route.path}`)).size).toBe(245);
+    expect(new Set(paths).size).toBe(191);
+    expect(new Set(routes.map((route) => `${route.method}:${route.path}`)).size).toBe(249);
     expect(routeFor("POST", "/sessions/session-1/sandbox-memory/search")).toMatchObject({
       authentication: { kind: "sandbox" },
       supportedScmProviders: "all",
       cacheControl: "private, no-store",
+    });
+  });
+
+  it("gates member merges on the merge grant, with member reads for previews", () => {
+    expect(routeFor("POST", "/members/merge/preview")?.authorization).toMatchObject({
+      kind: "active-user",
+      allOf: [{ permission: "workspace.members.merge" }, { permission: "workspace.members.read" }],
+      service: { kind: "deny" },
+    });
+    expect(routeFor("POST", "/members/merge")?.authorization).toMatchObject({
+      kind: "active-user",
+      allOf: [{ permission: "workspace.members.merge" }],
+      service: { kind: "deny" },
     });
   });
 
@@ -389,6 +402,11 @@ describe("route policy table", () => {
       allOf: [{ kind: "permission", permission: "sessions.read" }],
       service: { kind: "deny" },
     });
+    expect(routeFor("POST", "/sessions/inbox/read-state")?.authorization).toMatchObject({
+      kind: "active-user",
+      allOf: [{ kind: "permission", permission: "sessions.read" }],
+      service: { kind: "deny" },
+    });
     expect(routeFor("GET", "/audit-events")).toMatchObject({
       authentication: { kind: "user" },
       authorization: {
@@ -563,6 +581,7 @@ describe("route policy table", () => {
   it.each([
     ["GET", "/sessions/session-1"],
     ["GET", "/sessions/inbox"],
+    ["POST", "/sessions/inbox/read-state"],
     ["POST", "/sessions/batch-archive"],
     ["GET", "/sessions/session-1/sandbox-access"],
     ["PATCH", "/sessions/session-1/read-state"],

@@ -73,7 +73,7 @@ function createMockClient(
     startCommand: vi.fn(async () => ({ commandId: "cmd-2", exitCode: null })),
     snapshotSession: vi.fn(async (): Promise<VercelSnapshotResponse> => ({
       snapshot: { id: "snapshot-1", status: "created", createdAt: 456 },
-      session: { ...createSessionResponse().session, status: "stopped" },
+      session: { ...createSessionResponse().session, status: "snapshotting" },
     })),
     listSnapshots: vi.fn(async (): Promise<VercelSnapshotMetadata[]> => [
       {
@@ -413,6 +413,22 @@ describe("VercelSandboxProvider", () => {
     expect(vi.mocked(client.createSandbox).mock.calls[0][0].resources).toEqual({ vcpus: 4 });
   });
 
+  it("ignores caps on create and restore without changing Vercel requests", async () => {
+    const client = createMockClient();
+    const provider = new VercelSandboxProvider(client, providerConfig);
+    const sandboxSettings = {
+      cpuCores: 2,
+      memoryMib: 4096,
+      cpuLimitCores: 16,
+      memoryLimitMib: 32768,
+    };
+    await provider.createSandbox({ ...baseCreateConfig, sandboxSettings });
+    await provider.restoreFromSnapshot({ ...baseRestoreConfig, sandboxSettings });
+    for (const [request] of vi.mocked(client.createSandbox).mock.calls) {
+      expect(request.resources).toEqual({ vcpus: 2 });
+    }
+  });
+
   it("omits Vercel resources when sandbox CPU and memory settings use provider defaults", async () => {
     const client = createMockClient();
     const provider = new VercelSandboxProvider(client, providerConfig);
@@ -696,11 +712,33 @@ describe("VercelSandboxProvider", () => {
       { expirationMs: 60_000 },
       undefined
     );
-    expect(snapshot).toEqual({ success: true, imageId: "snapshot-1", sourceStopped: true });
+    expect(snapshot).toEqual({ success: true, imageId: "snapshot-1", sourceStopped: false });
     expect(vi.mocked(client.deleteSnapshot)).toHaveBeenCalledWith("snapshot-1");
   });
 
-  it("does not claim sourceStopped when the snapshot response is not stopped", async () => {
+  it.each([
+    ["snapshotting", false],
+    ["stopping", false],
+    ["stopped", true],
+  ] as const)("saves a created snapshot whose source is %s", async (status, sourceStopped) => {
+    const client = createMockClient({
+      snapshotSession: vi.fn(async () => ({
+        snapshot: { id: "snapshot-1", status: "created" as const, createdAt: 456 },
+        session: { ...createSessionResponse().session, status },
+      })),
+    });
+    const provider = new VercelSandboxProvider(client, providerConfig);
+
+    await expect(
+      provider.takeSnapshot({
+        providerObjectId: "vercel-session-1",
+        sessionId: "session-123",
+        reason: "inactivity_timeout",
+      })
+    ).resolves.toEqual({ success: true, imageId: "snapshot-1", sourceStopped });
+  });
+
+  it("rejects a snapshot whose source is still running", async () => {
     const client = createMockClient({
       snapshotSession: vi.fn(async () => ({
         snapshot: { id: "snapshot-1", status: "created" as const, createdAt: 456 },

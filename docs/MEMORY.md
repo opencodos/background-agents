@@ -4,6 +4,12 @@ Memory carries useful knowledge between sessions without changing repository fil
 embedding store or semantic search: the agent sees a compact fact catalog, discovers additional
 facts with lexical `memory_search`, and reads relevant bodies with `memory_read`.
 
+Every session receives memory workflow guidance, even with an empty catalog. Before finishing a
+task, agents are prompted to consider saving verified discoveries such as build/test/setup gotchas,
+corrected assumptions, or difficult failure diagnoses, checking for duplicates first. Routine
+progress and guesses should not become memories. A `memory_write` result of `proposed` awaits human
+review in Settings → Memories or Settings → Shared memories; it is not yet active memory.
+
 ## User experience
 
 | Surface                    | Behavior                                                                                                                                                                                  |
@@ -33,6 +39,12 @@ a revision with the editor's identity. Rejected proposals are archived; restorin
 to proposed status. Restoring an approved record returns it to active status. A replacement proposal
 does **not** archive its predecessor until approval. Concurrent edits and decisions reject stale
 revisions with HTTP 409.
+
+The management pages can select records on the current page and approve, reject, archive or restore
+them together. Each selected record is still fenced by the revision shown and authorized against its
+own scope, so a record that changed or that the caller cannot manage fails alone while the rest
+apply. Each request is bounded to stay within D1's per-invocation query limit, so the page sends
+larger selections as sequential requests. Archiving is the bulk equivalent of deleting.
 
 Sandbox tools currently authenticate a session, not an immutable prompt author. For this reason,
 automatic personal facts are disabled permanently once a session is shared or gains a collaborator,
@@ -129,7 +141,8 @@ owner-only, including when the caller is another administrator.
 | `PATCH /memories/:id`                                     | Revise content; `If-Match: <currentRevisionId>` is required (428 when missing, 409 when stale).                                                                                                                                                         |
 | `GET /memories/:id/revisions`                             | Immutable revision history.                                                                                                                                                                                                                             |
 | `POST /memories/:id/{action}`                             | `approve`, `reject`, `archive`, or `restore` with `If-Match`; only `archive` and `reject` accept an optional `archiveNote`. Transitions follow `MEMORY_TRANSITIONS`.                                                                                    |
-| `POST /memories/preview`                                  | Summarize the selection a new session would pin (items, sizes, omissions), without creating it.                                                                                                                                                         |
+| `POST /memories/bulk`                                     | Apply one `action` to up to `MEMORY_BULK_ACTION_MAX_RECORDS` records, each named with the `revisionId` it was reviewed at. Records are authorized and decided independently, in order; the response lists each record's outcome.                        |
+| `POST /memories/preview`                                  | Summarize the selection a new session would pin (items, sizes, omissions), without creating it. Pass `teamId` to preview a team session; the caller must be a member of the active team.                                                                |
 | `GET, PUT /memory-preferences`                            | Read/save the current user's personal inclusion default.                                                                                                                                                                                                |
 | `GET /sessions/:id/memories`                              | The pinned selection summary with per-item drift, readable with the session.                                                                                                                                                                            |
 | `GET /sessions/:id/sandbox-memory`                        | The session's rendered memory (boot context), sandbox-bound.                                                                                                                                                                                            |
@@ -220,10 +233,11 @@ does not remove the search tool, and searching does not alter the session's pinn
 Search sits behind the `FactSearchIndex` port (`memory/fact-search.ts`): the session service builds
 an engine-independent `FactQuery` from authorized partitions and shapes the bounded response, and
 `LexicalFactIndex` answers it with one escaped-`LIKE` statement ranked in SQL by
-`FACT_SEARCH_FIELDS`. A different engine (Postgres full-text search, embeddings) is another adapter;
-no migration or new service is needed today. Body matching still scans text; bounded results do not
-guarantee constant query cost. The opt-in Node SQLite benchmark records query plans and
-rare/broad-query timings at 1,000 and 10,000 facts with representative and maximum-size bodies:
+`FACT_SEARCH_WEIGHTS` over `MEMORY_SEARCH_FIELDS` (`memory/search-fields.ts`). A different engine
+(Postgres full-text search, embeddings) is another adapter; no migration or new service is needed
+today. Body matching still scans text; bounded results do not guarantee constant query cost. The
+opt-in Node SQLite benchmark records query plans and rare/broad-query timings at 1,000 and 10,000
+facts with representative and maximum-size bodies:
 
 ```bash
 MEMORY_SEARCH_BENCHMARK=1 MEMORY_SEARCH_BENCHMARK_OUTPUT=/tmp/memory-search-benchmark.json \

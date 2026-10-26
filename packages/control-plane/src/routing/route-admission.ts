@@ -20,7 +20,8 @@ import { legacyPermissionForAction } from "../authorization/teams-enforcement";
 import { PersonalAccessTokenStore } from "../db/personal-access-tokens";
 import { TeamChannelBindingStore } from "../db/team-channel-bindings";
 import { SessionIndexStore } from "../db/session-index";
-import { UserStore } from "../db/user-store";
+import { IdentityClaimStore } from "../db/identity-claim-store";
+import { isEmailAttestingProvider, UserStore } from "../db/user-store";
 import type { RequestContext } from "../http/request-context";
 import { error, json } from "../http/responses";
 import { createLogger } from "../logger";
@@ -35,6 +36,7 @@ import { SessionInternalPaths } from "../session/contracts";
 import { createSessionRuntimeClient } from "../session/runtime-client";
 import { resolveScmProviderFromEnv, SourceControlProviderError } from "../source-control";
 import type { Env } from "../types";
+import { KnownActorProfileClaim, type KnownActor } from "./known-actor-profile";
 import { logPrincipal } from "./request-lifecycle";
 import { enforceTeamRequirement } from "./team-admission";
 import {
@@ -407,6 +409,8 @@ async function enforceSlackWriteScope(
 /**
  * Resolve the verified service actor to its canonical user exactly once,
  * before any RBAC lookup, so the subject authorized is the subject attributed.
+ * An actor already known still has its route's profile claims applied, since
+ * the request that enrolled it may have carried none.
  */
 async function finalizeServiceActor(
   policy: RouteAdmissionPolicy,
@@ -417,7 +421,12 @@ async function finalizeServiceActor(
 ): Promise<AuthorizationFailure | null> {
   if (!loadsCanonicalSubject(policy)) return null;
   const principal = ctx.principal;
-  if (principal?.kind !== "service" || !principal.actor || principal.actor.canonicalUserId) {
+  if (principal?.kind !== "service" || !principal.actor) return null;
+  if (principal.actor.canonicalUserId) {
+    await completeKnownActorProfile(policy, request, ctx, {
+      ...principal.actor,
+      canonicalUserId: principal.actor.canonicalUserId,
+    });
     return null;
   }
 
@@ -438,8 +447,7 @@ async function finalizeServiceActor(
       provider: actor.provider,
       providerUserId: actor.providerUserId,
       displayName: claims?.displayName,
-      providerEmail:
-        actor.provider === "slack" || actor.provider === "linear" ? claims?.email : undefined,
+      providerEmail: isEmailAttestingProvider(actor.provider) ? claims?.email : undefined,
       avatarUrl: claims?.avatarUrl,
     });
     ctx.principal = {
@@ -455,6 +463,36 @@ async function finalizeServiceActor(
       trace_id: ctx.trace_id,
     });
     return authorizationUnavailable();
+  }
+}
+
+/**
+ * A known actor's identity is final, so its route's claims can only complete
+ * the profile. Best effort and never a denial: the handler still answers for
+ * the body, so a body the route would refuse just writes nothing.
+ */
+async function completeKnownActorProfile(
+  policy: RouteAdmissionPolicy,
+  request: Request,
+  ctx: RequestContext,
+  actor: KnownActor
+): Promise<void> {
+  if (!policy.serviceActorClaims) return;
+  try {
+    const prepared = await policy.serviceActorClaims(request.clone(), ctx);
+    if (prepared.kind === "rejected") return;
+    const profileClaim = new KnownActorProfileClaim(
+      new UserStore(ctx.db),
+      new IdentityClaimStore(ctx.db)
+    );
+    await profileClaim.claim(actor, prepared.claims);
+  } catch (cause) {
+    logger.warn("Failed to complete known service actor profile", {
+      event: "auth.service_actor_profile_failed",
+      error: cause instanceof Error ? cause : String(cause),
+      request_id: ctx.request_id,
+      trace_id: ctx.trace_id,
+    });
   }
 }
 
