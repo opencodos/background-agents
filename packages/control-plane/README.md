@@ -63,6 +63,25 @@ not pass through Hono.
 | --------- | ------ | ------------ |
 | `/health` | GET    | Health check |
 
+### Actors
+
+| Endpoint     | Method | Description                                                       |
+| ------------ | ------ | ----------------------------------------------------------------- |
+| `/actors/me` | POST   | Enroll the signed bot actor with its attested name, email, avatar |
+
+A new bot actor links to an existing user only by the email it presents when it is enrolled, and a
+known actor is never relinked. A bot sends `POST /actors/me` before any other request that carries
+the actor, so the first request that enrolls the actor includes its email.
+
+A new Slack actor is enrolled only with an attested email: any request that would enroll one without
+it, including a claim-less read, is refused with 403 `actor_email_required` and writes nothing. A
+known actor is admitted with or without one. This keeps an email-less enrollment from giving someone
+a second account with the default role and none of their existing account's restrictions. Known
+limitation: new Slack users whose profile email the bot cannot read, typically external Slack
+Connect users, cannot start using the bot; Slack users it already knows keep working. Linear actors
+are not yet covered, because the Linear bot still sends claim-less requests before its first
+claim-bearing one.
+
 ### Sessions
 
 | Endpoint                        | Method    | Description                          |

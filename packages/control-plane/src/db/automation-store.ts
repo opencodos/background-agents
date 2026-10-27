@@ -1784,6 +1784,48 @@ export class AutomationStore {
     return row?.id ?? null;
   }
 
+  /**
+   * Count an automation's unskipped event firings created at or after `since`
+   * whose trigger metadata matches the `metadataLike` pattern, stopping at
+   * `limit`: callers only need to know whether a threshold is reached.
+   */
+  async countEventFiringsSince(
+    automationId: string,
+    since: number,
+    metadataLike: string,
+    limit: number
+  ): Promise<number> {
+    const row = await this.db
+      .prepare(
+        `SELECT COUNT(*) AS count FROM (
+           SELECT 1 FROM automation_invocations
+           WHERE automation_id = ? AND source = 'event' AND skip_reason IS NULL
+             AND created_at >= ? AND trigger_metadata LIKE ?
+           LIMIT ?
+         ) AS matching_firings`
+      )
+      .bind(automationId, since, metadataLike, limit)
+      .first<{ count: number }>();
+    return row?.count ?? 0;
+  }
+
+  /** Whether the automation recorded a firing skipped for `skipReason` at or after `since`. */
+  async hasSkippedInvocationSince(
+    automationId: string,
+    skipReason: string,
+    since: number
+  ): Promise<boolean> {
+    const row = await this.db
+      .prepare(
+        `SELECT 1 AS found FROM automation_invocations
+         WHERE automation_id = ? AND skip_reason = ? AND created_at >= ?
+         LIMIT 1`
+      )
+      .bind(automationId, skipReason, since)
+      .first<{ found: number }>();
+    return row !== null;
+  }
+
   /** Claim an explicit webhook key before either continuation or invocation work is admitted. */
   async claimFollowUpReceipt(params: {
     automationId: string;
