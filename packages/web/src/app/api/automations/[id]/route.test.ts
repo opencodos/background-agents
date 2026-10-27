@@ -1,17 +1,14 @@
 import type { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@/lib/server-auth-session", () => ({ getServerAuthSession: vi.fn() }));
 vi.mock("@/lib/control-plane", () => ({ controlPlaneUserFetch: vi.fn() }));
 
-import { getServerAuthSession } from "@/lib/server-auth-session";
 import { controlPlaneUserFetch } from "@/lib/control-plane";
 import { PATCH, PUT } from "./route";
 
 describe("automation update BFF", () => {
   beforeEach(() => {
     vi.resetAllMocks();
-    vi.mocked(getServerAuthSession).mockResolvedValue({ user: { id: "user-1" } } as never);
     vi.mocked(controlPlaneUserFetch).mockResolvedValue(Response.json({ automation: {} }));
   });
 
@@ -19,6 +16,7 @@ describe("automation update BFF", () => {
     const providerSelections = { xai: { mode: "api_key" } };
     await PUT(
       {
+        cookies: { getAll: () => [{ name: "openinspect.session_token", value: "test-session" }] },
         json: async () => ({
           name: "Updated",
           harness: "claude",
@@ -39,6 +37,7 @@ describe("automation update BFF", () => {
     const scheduleOnceAt = Date.now() + 60_000;
     await PUT(
       {
+        cookies: { getAll: () => [{ name: "openinspect.session_token", value: "test-session" }] },
         json: async () => ({ scheduleOnceAt, createdBy: "attacker", enabled: true }),
       } as unknown as NextRequest,
       { params: Promise.resolve({ id: "auto-1" }) }
@@ -49,9 +48,15 @@ describe("automation update BFF", () => {
   });
 
   it("forwards the launch retry limit", async () => {
-    await PUT({ json: async () => ({ maxRetries: 2 }) } as unknown as NextRequest, {
-      params: Promise.resolve({ id: "auto-1" }),
-    });
+    await PUT(
+      {
+        cookies: { getAll: () => [{ name: "openinspect.session_token", value: "test-session" }] },
+        json: async () => ({ maxRetries: 2 }),
+      } as unknown as NextRequest,
+      {
+        params: Promise.resolve({ id: "auto-1" }),
+      }
+    );
 
     const body = JSON.parse(String(vi.mocked(controlPlaneUserFetch).mock.calls[0][1]?.body));
     expect(body).toEqual({ maxRetries: 2 });
@@ -60,6 +65,7 @@ describe("automation update BFF", () => {
   it("forwards executor changes separately from configuration", async () => {
     await PATCH(
       {
+        cookies: { getAll: () => [{ name: "openinspect.session_token", value: "test-session" }] },
         json: async () => ({ userId: "user-2", teamId: "team-1", name: "Injected" }),
       } as unknown as NextRequest,
       { params: Promise.resolve({ id: "auto-1" }) }
