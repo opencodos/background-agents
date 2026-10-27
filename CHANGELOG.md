@@ -11,6 +11,7 @@ review checks whether each earlier blocking finding is fixed or answered, review
 changed since its last review, and blocks on anything else only for a security, data-isolation or
 data-loss defect it missed before. A first review is asked to report every blocking finding in one
 pass.
+
 **GitHub sign-in diagnostics.** Failed sign-ins, including provider and admission checks and a
 cancelled consent screen, return to the login page with an error and a retry option. If the GitHub
 App lacks **Email addresses: Read-only**, the page names the permission to check and the control
