@@ -15,6 +15,53 @@ import {
 const REVIEW_LEASE_ATTEMPTS = 20;
 const REVIEW_LEASE_RETRY_SECONDS = 5;
 
+/**
+ * Every push starts a fresh session that sees only the full diff, so without this section a
+ * re-review re-reads unchanged code from scratch and raises new blocking findings it could have
+ * raised the first time — and a PR never converges. The section hands the session its own earlier
+ * reviews and narrows a follow-up review to them plus the code changed since the last one.
+ */
+function buildEarlierReviewsSection(params: {
+  repositoryPath: string;
+  number: number;
+  headSha: string;
+  reviewerLogin: string;
+}): string {
+  const { repositoryPath, number, headSha, reviewerLogin } = params;
+  return `
+## Earlier Reviews
+Before reviewing, find your own earlier reviews of this PR — those submitted by \`${reviewerLogin}\`:
+
+\`\`\`
+gh api --paginate "repos/${repositoryPath}/pulls/${number}/reviews" --jq '.[] | select(.user.login == "${reviewerLogin}") | {id, state, commit_id, submitted_at, body}'
+gh api --paginate "repos/${repositoryPath}/pulls/${number}/comments" --jq '.[] | select(.user.login == "${reviewerLogin}" or .in_reply_to_id) | {id, in_reply_to_id, user: .user.login, path, line, body}'
+\`\`\`
+
+If there are none, this is a first review: review the whole diff, and report every blocking finding
+you can find in this one pass — the author fixes them all in one push, so a finding held back now
+costs a whole extra round later.
+
+Otherwise this is a **follow-up review**. Let LAST be the \`commit_id\` of your most recent review.
+Its scope is exactly two things:
+
+1. **Your earlier blocking findings.** For each one, decide whether the current head fixes it, or the
+   author answered it — a reply in its thread, or an entry under \`## Review dispositions\` in the PR
+   description — with a reason you cannot concretely refute. Either way it is resolved. Repeat only
+   the ones still open, and do not re-post an inline comment that is already on the PR.
+2. **The code changed since LAST.** Get it with
+   \`git fetch --quiet origin ${headSha} LAST && git diff LAST ${headSha}\`, and ignore any hunk
+   in a file \`gh pr diff ${number}\` does not touch (that is the base branch moving under a rebase).
+   If LAST can no longer be fetched, compare the current diff with the code your earlier comments
+   quote, and treat only what differs as changed.
+
+A **new** blocking finding is allowed only on code changed since LAST, or when it is a security,
+data-isolation or data-loss defect you missed before — say which of the two applies. Anything else
+you notice in code you already reviewed is non-blocking, however it reads; do not hold the PR for it.
+When every earlier blocking finding is resolved and no new blocking finding qualifies, the review
+approves (subject to the event guidance below).
+`;
+}
+
 function buildCustomInstructionsSection(instructions: string | null | undefined): string {
   if (!instructions?.trim()) return "";
   return `\n## Custom Instructions\n${instructions}`;
@@ -156,6 +203,8 @@ export function buildCodeReviewPrompt(params: {
   isSelfReview?: boolean;
   /** A separate reviewer App submits the review, so its token must be fetched. */
   hasReviewerApp?: boolean;
+  /** The login the review is submitted as: earlier reviews by it are this review's history. */
+  reviewerLogin: string;
 }): string {
   const {
     owner,
@@ -172,6 +221,7 @@ export function buildCodeReviewPrompt(params: {
     codeReviewInstructions,
     isSelfReview = false,
     hasReviewerApp = false,
+    reviewerLogin,
   } = params;
   const reviewEvent = isSelfReview ? "COMMENT" : "<APPROVE, REQUEST_CHANGES, or COMMENT>";
   const reviewEventGuidance = isSelfReview
@@ -215,10 +265,10 @@ ${prAuthorBlock}
 ${prBranchesBlock}
 - **Description**:
 ${prDescriptionBlock}
-
+${buildEarlierReviewsSection({ repositoryPath, number, headSha, reviewerLogin })}
 ## Instructions
 1. Run \`gh pr diff ${number}\` to see the full diff
-2. Review the changes thoroughly, focusing on:
+2. Review the changes within the scope ## Earlier Reviews sets, focusing on:
    - Correctness and potential bugs
    - Security concerns
    - Performance implications
