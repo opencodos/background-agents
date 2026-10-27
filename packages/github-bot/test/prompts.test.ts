@@ -111,7 +111,10 @@ describe("buildCodeReviewPrompt", () => {
 
   it("narrows a follow-up review to its earlier findings and the code changed since", () => {
     const section = buildCodeReviewPrompt(baseParams).split("## Earlier Reviews")[1];
-    expect(section).toContain("git diff LAST abc123");
+    expect(section).toContain(
+      'LAST=<that commit_id>; git fetch --quiet origin "$LAST" abc123 && git diff "$LAST" abc123'
+    );
+    expect(section).toContain("not added or removed by the PR came from the base branch");
     expect(section).toContain("## Review dispositions");
     expect(section).toContain(
       "A **new** blocking finding is allowed only on code changed since LAST"

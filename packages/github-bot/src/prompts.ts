@@ -48,11 +48,13 @@ Its scope is exactly two things:
    author answered it — a reply in its thread, or an entry under \`## Review dispositions\` in the PR
    description — with a reason you cannot concretely refute. Either way it is resolved. Repeat only
    the ones still open, and do not re-post an inline comment that is already on the PR.
-2. **The code changed since LAST.** Get it with
-   \`git fetch --quiet origin ${headSha} LAST && git diff LAST ${headSha}\`, and ignore any hunk
-   in a file \`gh pr diff ${number}\` does not touch (that is the base branch moving under a rebase).
-   If LAST can no longer be fetched, compare the current diff with the code your earlier comments
-   quote, and treat only what differs as changed.
+2. **The code changed since LAST.** Set LAST to that review's actual commit SHA, then get it with
+   \`LAST=<that commit_id>; git fetch --quiet origin "$LAST" ${headSha} && git diff "$LAST" ${headSha}\`.
+   A rebase also brings in base-branch changes, sometimes to the same files, so keep only the changed
+   lines that are themselves part of the PR's own diff (\`gh pr diff ${number}\`); a line that
+   changed since LAST but is not added or removed by the PR came from the base branch and is out of
+   scope. If LAST can no longer be fetched, compare the current diff with the code your earlier
+   comments quote, and treat only what differs as changed.
 
 A **new** blocking finding is allowed only on code changed since LAST, or when it is a security,
 data-isolation or data-loss defect you missed before — say which of the two applies. Anything else
