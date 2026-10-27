@@ -225,6 +225,7 @@ export function reviewPromptFields(env: Env, author: string, review: AdmittedRev
     isDraft: review.draft,
     isSelfReview: author.toLowerCase() === submittingLogin.toLowerCase(),
     hasReviewerApp: Boolean(reviewerLogin),
+    reviewerLogin: submittingLogin,
   };
 }
 

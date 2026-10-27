@@ -2,6 +2,16 @@
 
 New features, integrations, and notable improvements to Open-Inspect — newest first.
 
+## October 27, 2026
+
+**Follow-up reviews build on the earlier ones.** Every push used to start a review that read the
+whole diff from scratch and could block on code it had already passed, so PRs took many rounds to
+converge. The review prompt now has the session read its own earlier reviews first. A follow-up
+review checks whether each earlier blocking finding is fixed or answered, reviews only the code
+changed since its last review, and blocks on anything else only for a security, data-isolation or
+data-loss defect it missed before. A first review is asked to report every blocking finding in one
+pass.
+
 ## October 25, 2026
 
 **Boat saved snapshot API.** Base builds, prebuilt image builds, and image cleanup now use Boat's
