@@ -13,7 +13,7 @@ terraform {
     }
     vercel = {
       source  = "vercel/vercel"
-      version = "~> 5.17"
+      version = "~> 2.0"
     }
     null = {
       source  = "hashicorp/null"

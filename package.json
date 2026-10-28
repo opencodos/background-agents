@@ -25,6 +25,7 @@
     "test:cf-logs-cli": "node --test scripts/cf-logs.test.ts",
     "test:terraform-workflow-contract": "node --test scripts/terraform-workflow-contract.test.mjs scripts/terraform-plan-comment.test.mjs",
     "test:node-version-workflow-contract": "node --test scripts/node-version-workflow-contract.test.mjs",
+    "test:readme-translations": "node --test scripts/readme-translations.test.mjs",
     "test:coverage": "npm run test:coverage --workspaces --if-present",
     "test:coverage-gate": "node --test scripts/check-coverage.test.mjs",
     "test:integration": "npm run test:integration --workspaces --if-present",
@@ -32,22 +33,21 @@
     "knip": "knip",
     "build": "npm run build -w @open-inspect/shared && npm run build --workspaces --if-present",
     "rbac:bootstrap-owner": "node scripts/bootstrap-workspace-owner.ts",
-    "prepare": "node -e \"if (process.env.CI) process.exit(0)\" && husky",
-    "test:readme-translations": "node --test scripts/readme-translations.test.mjs"
+    "prepare": "node -e \"if (process.env.CI) process.exit(0)\" && husky"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.5",
-    "@types/node": "^24.19.1",
+    "@eslint/js": "^9.18.0",
+    "@types/node": "^24.0.0",
     "eslint": "^9.18.0",
     "eslint-config-prettier": "^10.0.1",
     "eslint-plugin-react": "^7.37.4",
-    "eslint-plugin-react-hooks": "^6.1.1",
-    "globals": "^17.13.0",
+    "eslint-plugin-react-hooks": "^5.1.0",
+    "globals": "^15.14.0",
     "husky": "^9.1.7",
     "knip": "^6.41.0",
     "lint-staged": "^17.6.0",
     "prettier": "^3.9.10",
-    "typescript": "^6.0.3",
+    "typescript": "^5.8.0",
     "typescript-eslint": "^8.71.2",
     "wrangler": "^4.149.0"
   },
@@ -57,15 +57,8 @@
   "overrides": {
     "minimatch": "^10.2.5",
     "undici": "^7.29.1",
-    "jsdom": {
-      "undici": "^8.10.2"
-    },
     "sharp": "^0.35.5",
-    "lodash-es": "^4.18.0",
     "postcss-selector-parser": "^7.1.6",
-    "mermaid": {
-      "katex": "^0.18.2"
-    },
     "@node-minify/core": {
       "glob": "^10.5.0"
     }

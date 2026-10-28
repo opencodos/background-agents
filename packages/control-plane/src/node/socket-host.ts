@@ -22,7 +22,6 @@
  * sockets is never retired underneath them. There is no re-binding.
  */
 
-import { TextDecoder } from "node:util";
 import { WebSocket as NodeWebSocket, type RawData } from "ws";
 import { WS_CLOSE_TRY_AGAIN_LATER } from "@open-inspect/shared/types/websocket";
 import type { Logger } from "../logger";
@@ -206,10 +205,8 @@ function toBuffer(data: RawData): Buffer {
   return data;
 }
 
-const UTF8_DECODER = new TextDecoder("utf-8", { ignoreBOM: true });
-
 function toText(data: RawData): string {
-  return UTF8_DECODER.decode(toBuffer(data));
+  return toBuffer(data).toString("utf8");
 }
 
 /** The frame's bytes as a standalone ArrayBuffer, the shape the Workers runtime delivers. */

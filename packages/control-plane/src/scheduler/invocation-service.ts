@@ -10,6 +10,7 @@ import {
   type AutomationRow,
   type AutomationRunRow,
   type AutomationInvocationRow,
+  type InvocationActorKind,
   type InvocationOverlapScope,
   type ScheduleAdvance,
   type AutomationRepositoryInsert,
@@ -54,6 +55,11 @@ function automationConcurrencyLimit(automation: AutomationRow): number {
 export interface StartInvocationParams {
   automation: AutomationRow;
   source: AutomationInvocationSource;
+  /**
+   * Who authored the triggering action. Required, so a new firing path has to
+   * decide: limits on bot-started runs count only `bot`.
+   */
+  actorKind: InvocationActorKind;
   invocationId?: string;
   /** Human authority used for a manual firing; unattended sources use the automation owner. */
   executionPrincipal?: ExecutionPrincipal;
@@ -290,6 +296,7 @@ export class AutomationInvocationService {
       id: invocationId,
       automation_id: automation.id,
       source,
+      actor_kind: params.actorKind,
       scheduled_at: params.scheduledAt ?? null,
       trigger_key: triggerKey,
       concurrency_key: concurrencyKey,
@@ -442,7 +449,7 @@ export class AutomationInvocationService {
   async skipEvent(
     params: Pick<
       StartInvocationParams,
-      "automation" | "triggerKey" | "concurrencyKey" | "triggerMetadata"
+      "automation" | "actorKind" | "triggerKey" | "concurrencyKey" | "triggerMetadata"
     >,
     skipReason: string
   ): Promise<StartInvocationResult> {
@@ -502,6 +509,7 @@ export class AutomationInvocationService {
         id: invocationId,
         automation_id: params.automation.id,
         source: params.source,
+        actor_kind: params.actorKind,
         scheduled_at: params.scheduledAt ?? null,
         trigger_key: null,
         concurrency_key: params.concurrencyKey ?? null,

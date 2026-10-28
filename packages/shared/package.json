@@ -18,6 +18,14 @@
       "import": "./dist/service-auth.js",
       "types": "./dist/service-auth.d.ts"
     },
+    "./actor-enrollment": {
+      "import": "./dist/actor-enrollment.js",
+      "types": "./dist/actor-enrollment.d.ts"
+    },
+    "./abortable": {
+      "import": "./dist/abortable.js",
+      "types": "./dist/abortable.d.ts"
+    },
     "./models": {
       "import": "./dist/models.js",
       "types": "./dist/models.d.ts"
@@ -263,7 +271,7 @@
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^4.1.12",
-    "typescript": "^6.0.3",
+    "typescript": "^5.7.2",
     "vitest": "^4.1.12"
   },
   "dependencies": {

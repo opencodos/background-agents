@@ -30,29 +30,15 @@ export function previewMarkdownDocument(patch: string): MarkdownPreviewDocument 
 
   const [hunk, ...otherHunks] = file.hunks;
   if (!hunk) return { status: file.type === "new" ? "empty" : "unavailable" };
-  const declared = declaredHunkCounts(hunk.hunkSpecs);
   if (
     otherHunks.length > 0 ||
-    !declared ||
     hunk.additionStart > 1 ||
-    file.additionLines.length !== declared.additions ||
-    file.deletionLines.length !== declared.deletions
+    file.additionLines.length !== hunk.additionCount ||
+    file.deletionLines.length !== hunk.deletionCount
   ) {
     return { status: "unavailable" };
   }
 
   const content = file.additionLines.join("");
   return content ? { status: "document", content } : { status: "empty" };
-}
-
-/**
- * Line counts the hunk header declares. The parser reports the counts it actually parsed, so
- * only the header reveals a hunk the capture cut short.
- */
-function declaredHunkCounts(
-  hunkSpecs: string | undefined
-): { additions: number; deletions: number } | null {
-  const match = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(hunkSpecs ?? "");
-  if (!match) return null;
-  return { deletions: Number(match[1] ?? 1), additions: Number(match[2] ?? 1) };
 }

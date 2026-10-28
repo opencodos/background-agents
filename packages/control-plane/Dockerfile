@@ -8,7 +8,7 @@
 # are in the context:
 #   docker build -f packages/control-plane/Dockerfile -t open-inspect-control-plane .
 
-FROM node:26-slim AS build
+FROM node:24-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY packages/shared/package.json packages/shared/
@@ -24,17 +24,17 @@ COPY packages/sandbox-runtime/src/sandbox_runtime/*.json packages/sandbox-runtim
 RUN npm run build -w @open-inspect/shared \
     && npm run build:node -w @open-inspect/control-plane
 
-FROM litestream/litestream:0.5.17 AS litestream
+FROM litestream/litestream:0.3.13 AS litestream
 
 # Debian's trust store, built here so the runtime image gets the bundle without
 # the toolchain that generates it: ca-certificates pulls in openssl and libssl3,
 # which nothing at runtime uses.
-FROM node:26-slim AS certs
+FROM node:24-slim AS certs
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-FROM node:26-slim
+FROM node:24-slim
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=8787 \
