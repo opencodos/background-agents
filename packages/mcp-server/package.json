@@ -16,15 +16,15 @@
     "lint:fix": "eslint src/ --fix"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.32.0",
+    "@modelcontextprotocol/sdk": "^1.22.0",
     "@open-inspect/shared": "file:../shared",
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@types/node": "^24.19.1",
-    "@vitest/coverage-v8": "^4.1.11",
-    "esbuild": "^0.28.2",
-    "typescript": "^6.0.3",
+    "@types/node": "^24.0.0",
+    "@vitest/coverage-v8": "^4.1.0",
+    "esbuild": "^0.28.1",
+    "typescript": "^5.7.2",
     "vitest": "^4.1.0"
   }
 }

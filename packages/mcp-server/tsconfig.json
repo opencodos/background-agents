@@ -12,7 +12,6 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
-    "rootDir": "src",
     "outDir": "dist"
   },
   "include": ["src/**/*.ts"],
