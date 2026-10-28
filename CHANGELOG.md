@@ -4,14 +4,6 @@ New features, integrations, and notable improvements to Open-Inspect — newest 
 
 ## October 27, 2026
 
-**Follow-up reviews build on the earlier ones.** Every push used to start a review that read the
-whole diff from scratch and could block on code it had already passed, so PRs took many rounds to
-converge. The review prompt now has the session read its own earlier reviews first. A follow-up
-review checks whether each earlier blocking finding is fixed or answered, reviews only the code
-changed since its last review, and blocks on anything else only for a security, data-isolation or
-data-loss defect it missed before. A first review is asked to report every blocking finding in one
-pass.
-
 **GitHub sign-in diagnostics.** Failed sign-ins, including provider and admission checks and a
 cancelled consent screen, return to the login page with an error and a retry option. If the GitHub
 App lacks **Email addresses: Read-only**, the page names the permission to check and the control
@@ -167,11 +159,6 @@ control plane's `ANTHROPIC_API_KEY` binding are gone; `anthropic_api_key` still 
 the classifier bots. D1 migration 0089 deletes OpenComputer image build records.
 
 ## October 19, 2026
-
-**Mid-tier subagent.** OpenCode sessions now define a `mid` subagent that runs on GPT-5.6 Terra in
-OpenAI sessions and Claude Sonnet 5.5 in Anthropic sessions, so skills can fan rule-checking work
-out to a cheaper model. Requires a sandbox image rebuild. See
-[Subagent tiers](docs/AVAILABLE_MODELS.md#subagent-tiers).
 
 **Autofix acts on approvals with inline comments.** An approved pull request review that starts at
 least one inline comment thread now resumes the PR's owning session, so suggestions attached to an

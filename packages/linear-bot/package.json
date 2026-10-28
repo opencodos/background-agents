@@ -13,7 +13,7 @@
     "lint:fix": "eslint src/ --fix"
   },
   "dependencies": {
-    "@cloudflare/workers-types": "^5.20261003.1",
+    "@cloudflare/workers-types": "^4.20241230.0",
     "@open-inspect/shared": "file:../shared",
     "hono": "^4.13.13",
     "zod": "^4.6.7"
@@ -21,7 +21,7 @@
   "devDependencies": {
     "@vitest/coverage-v8": "^4.1.12",
     "esbuild": "^0.28.2",
-    "typescript": "^6.0.3",
+    "typescript": "^5.7.2",
     "vitest": "^4.1.12",
     "wrangler": "^4.149.0"
   }

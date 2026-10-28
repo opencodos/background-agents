@@ -1,130 +1,80 @@
 version: 2
 
-# Every entry waits 3 days before proposing a new release, so a hijacked
-# version is likely pulled from the registry before it reaches a grouped bump.
-# Cooldown never delays a security update. Security updates get their own
-# group per ecosystem that has advisories, so one advisory burst lands as one
-# pull request rather than one per package.
+# Scheduled version updates. Security updates are enabled separately in the
+# repository settings and still cover every ecosystem, including the ones
+# excluded here.
+#
+# Terraform providers and Docker base images are intentionally not scheduled:
+# Dependabot PRs cannot run `terraform plan` (no production secrets) and merges
+# to main auto-apply. Bump them manually from a regular branch.
+
 updates:
-  # npm — the root manifest covers every packages/* workspace.
+  # npm — the root lockfile covers every packages/* workspace. The
+  # sandbox-images/locks/* npm closures are pinned via toolchain.json and
+  # intentionally excluded.
   - package-ecosystem: npm
     directory: /
     schedule:
-      interval: weekly
-      day: monday
+      # Roughly every two weeks; Dependabot has no biweekly interval.
+      interval: cron
+      cronjob: "0 9 1,15 * *"
     cooldown:
-      default-days: 3
+      default-days: 7
     open-pull-requests-limit: 5
-    commit-message:
-      prefix: chore
-      prefix-development: chore
     groups:
-      # One PR per week for all minor/patch bumps and one for all majors.
+      # One PR for all minor/patch bumps; majors still get their own.
       npm-minor-patch:
         patterns:
           - "*"
         update-types:
           - minor
           - patch
-      npm-major:
-        patterns:
-          - "*"
-        update-types:
-          - major
-      npm-security:
-        applies-to: security-updates
-        patterns:
-          - "*"
-    ignore:
-      # better-auth 1.7 changes the socialProviders types and breaks the sign-in
-      # integration tests. Ignore only 1.7 and above, so 1.6.x patches still
-      # arrive. Drop this entry once the 1.7 migration lands.
-      - dependency-name: better-auth
-        versions:
-          - ">= 1.7.0"
-      # eslint 10 is outside eslint-plugin-react's peer range, so npm install
-      # fails with ERESOLVE. Drop these entries once the plugin supports 10.
-      - dependency-name: eslint
-        versions:
-          - ">= 10.0.0"
-      - dependency-name: "@eslint/js"
-        versions:
-          - ">= 10.0.0"
-      # TypeScript 7 (the native rewrite) is outside typescript-eslint's peer
-      # range (<6.1.0), so npm ci fails with ERESOLVE and no CI job runs. Drop
-      # this entry once typescript-eslint supports it.
-      - dependency-name: typescript
-        versions:
-          - ">= 6.1.0"
-      # packages/web is on Tailwind 3 and moving to 4 is a config migration
-      # (CSS-first config replaces tailwind.config.ts). packages/docs is already
-      # on 4, so hold only major jumps and keep its 4.x updates flowing. Drop
-      # this entry once packages/web has migrated.
-      - dependency-name: tailwindcss
-        update-types:
-          - version-update:semver-major
-      # Types track the Node runtime (.nvmrc is 24). Raise together with .nvmrc.
-      - dependency-name: "@types/node"
-        versions:
-          - ">= 25.0.0"
-      # eslint-plugin-react-hooks 7 turns on the React Compiler rules, which fail
-      # packages/web lint with 89 errors (setState in effects, refs read during
-      # render). Drop this entry once COD-2264 fixes them.
-      - dependency-name: eslint-plugin-react-hooks
-        versions:
-          - ">= 7.0.0"
-      # @cloudflare/vitest-pool-workers (0.23.0, the latest) peers on vitest
-      # ^4.1.0 and runs the control-plane integration tests, so vitest 5 cannot
-      # run them. Drop this entry once pool-workers accepts vitest 5. The
-      # coverage providers peer on the exact vitest version, so hold them too.
-      - dependency-name: vitest
-        versions:
-          - ">= 5.0.0"
-      - dependency-name: "@vitest/coverage-*"
-        versions:
-          - ">= 5.0.0"
-      # Prettier tracks the version locked upstream (ColeMurray/background-agents),
-      # not the latest. A newer formatter rewrites upstream-owned files, which then
-      # conflict on every sync, and fails format:check on files a sync brings in
-      # unchanged. Bump it only when upstream's lockfile does.
-      - dependency-name: prettier
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
-      day: monday
+      interval: cron
+      cronjob: "0 9 1,15 * *"
     cooldown:
-      default-days: 3
-    commit-message:
-      prefix: chore
+      default-days: 7
     groups:
       actions:
         patterns:
           - "*"
-      actions-security:
-        applies-to: security-updates
-        patterns:
-          - "*"
 
-  # Python — every packages/* dir with a pyproject.toml + uv.lock. The
-  # sandbox-images/locks tree is left out: `sandbox:images lock` generates it
-  # from the image tool manifest, so edits to it fail the freshness check. The
-  # runtime requirements are exported from sandbox-runtime/uv.lock at pack
-  # time, so bumps there need no regeneration.
+  # Python. sandbox-runtime and sandbox-images/locks/python-tools are excluded:
+  # their uv.lock feeds hash-checked exports (locks/runtime.txt,
+  # locks/python-tools.txt) that `sandbox:images lock` must regenerate, and
+  # python-tools' pyproject.toml is generated from toolchain.json. e2b-infra and
+  # daytona-infra are excluded until PR CI installs and tests their locked SDKs;
+  # Terraform consumes those lockfiles during apply.
   - package-ecosystem: uv
     directories:
-      - /packages/*
+      - /packages/modal-infra
+      - /packages/sandbox-images
+    # Scanning /packages/sandbox-images also finds locks/*.txt, and Dependabot
+    # edits those exports as plain requirements files without their uv.lock.
+    # exclude-paths covers version updates only: a security update can still
+    # edit them, which `sandbox:images lock --check` fails in CI. Fix such PRs
+    # by upgrading the source uv.lock and running `sandbox:images lock`.
     exclude-paths:
-      - "packages/sandbox-images/locks/**"
+      - "locks/**"
+    ignore:
+      # Newer Modal releases remove the endpoint introspection modal-infra
+      # tests use (Function.get_raw_f, .spec, .get_build_def). Bump it manually.
+      # update-types applies to version updates only, so Modal security
+      # updates still open PRs.
+      - dependency-name: modal
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+          - version-update:semver-patch
     schedule:
-      interval: weekly
-      day: monday
+      interval: cron
+      cronjob: "0 9 1,15 * *"
     cooldown:
-      default-days: 3
+      default-days: 7
     open-pull-requests-limit: 5
-    commit-message:
-      prefix: chore
     groups:
       python-minor-patch:
         patterns:
@@ -132,76 +82,3 @@ updates:
         update-types:
           - minor
           - patch
-      python-major:
-        patterns:
-          - "*"
-        update-types:
-          - major
-      python-security:
-        applies-to: security-updates
-        patterns:
-          - "*"
-    ignore:
-      # modal 1.6 removes Function.get_raw_f and Function.get_build_def, which the
-      # modal-infra tests use to introspect functions (deprecated in 1.5). Ignore
-      # only 1.6 and above so 1.5.x patches still arrive. Drop this entry once the
-      # tests stop using those two methods.
-      - dependency-name: modal
-        versions:
-          - ">= 1.6.0"
-
-  # Base images in Dockerfiles.
-  - package-ecosystem: docker
-    directories:
-      - /packages/control-plane
-      - /packages/sandbox-images
-    schedule:
-      interval: weekly
-      day: monday
-    cooldown:
-      default-days: 3
-    commit-message:
-      prefix: chore
-    groups:
-      docker:
-        patterns:
-          - "*"
-
-  # Base images in docker-compose*.yml at the repo root.
-  - package-ecosystem: docker-compose
-    directory: /
-    schedule:
-      interval: weekly
-      day: monday
-    cooldown:
-      default-days: 3
-    commit-message:
-      prefix: chore
-    groups:
-      docker-compose:
-        patterns:
-          - "*"
-
-  - package-ecosystem: terraform
-    directories:
-      - /terraform/environments/*
-      - /terraform/modules/*
-    schedule:
-      interval: weekly
-      day: monday
-    cooldown:
-      default-days: 3
-    commit-message:
-      prefix: chore
-    groups:
-      terraform:
-        patterns:
-          - "*"
-    ignore:
-      # The cloudflare provider is deliberately held below 5.20.0 (worker
-      # observability regression, cloudflare/terraform-provider-cloudflare#7177).
-      # Ignore only the versions at or above that bound, so updates inside the
-      # allowed range still arrive. Drop this entry once that is fixed upstream.
-      - dependency-name: cloudflare/cloudflare
-        versions:
-          - ">= 5.20.0"
