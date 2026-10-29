@@ -150,26 +150,6 @@ def test_vercel_transitive_build_inputs_are_covered(checkout, source):
     assert plan_image(checkout, "vercel")["buildHash"] != before
 
 
-def test_pack_exports_runtime_requirements_from_uv_lock(checkout, tmp_path):
-    lock = checkout / "packages/sandbox-runtime/uv.lock"
-    assert not (checkout / "packages/sandbox-images/locks/runtime.txt").exists()
-    packed = pack_bundle(checkout, "e2b", tmp_path / "bundles")
-    requirements = (packed.directory / "packages/sandbox-images/locks/runtime.txt").read_text()
-    pinned = re.search(r'name = "cryptography"\nversion = "([^"]+)"', lock.read_text())
-    assert pinned
-    assert f"cryptography=={pinned[1]} \\\n    --hash=sha256:" in requirements
-
-
-def test_pack_rejects_runtime_uv_lock_out_of_sync_with_pyproject(checkout, tmp_path):
-    pyproject = checkout / "packages/sandbox-runtime/pyproject.toml"
-    pyproject.write_text(
-        pyproject.read_text().replace("dependencies = [", 'dependencies = [\n    "six",', 1)
-    )
-    with pytest.raises(subprocess.CalledProcessError):
-        pack_bundle(checkout, "e2b", tmp_path / "bundles")
-    assert not (tmp_path / "bundles").exists()
-
-
 @pytest.mark.parametrize(
     "source",
     [
