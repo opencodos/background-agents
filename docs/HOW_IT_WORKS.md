@@ -606,6 +606,12 @@ the App's, not the owner's.
 
 This maintains proper code review workflows—you can't approve your own PRs.
 
+A PR opened while processing an automation run's own prompt (scheduled, webhook-triggered, or
+manually triggered with **Run now**) is created with the GitHub App, even though the prompt carries
+the owner's or requester's identity for commit attribution: unattended work is the App's, so that
+person can review and approve it. PRs opened from child sessions the run's agent spawns still use
+the prompting identity's OAuth.
+
 ---
 
 ## Real-time Events
