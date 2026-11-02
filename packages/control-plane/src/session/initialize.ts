@@ -255,6 +255,9 @@ export async function initializeSession(
       spawnDepth: input.spawnDepth,
       automationId: input.automationId,
       automationRunId: input.automationRunId,
+      // A fenced review session is the GitHub bot's review session (sessions.github_review);
+      // see `SessionIndexStore.isGitHubReview`.
+      githubReview: input.spawnSource === "github-bot" && input.githubReview !== undefined,
       scmLogin: input.scmLogin || null,
       userId: input.platformUserId,
       ownerTeamId: input.ownerTeamId,

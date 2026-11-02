@@ -951,6 +951,40 @@ async function acquireLatestReviewLease(
   });
 }
 
+/** The review fence of a session that holds its PR's submission lease right now. */
+export interface HeldReviewFence {
+  repoId: number;
+  repoOwner: string | null;
+  repoName: string | null;
+}
+
+/**
+ * The fence row of review `sessionId` when that review may submit right now: it is its PR's
+ * latest generation, its turn has not been closed out, and the session itself holds the PR's
+ * unexpired submission lease, as acquireLatestReviewLease grants it. Null otherwise: superseded,
+ * swept, closed out, or not the lease holder.
+ */
+export async function readHeldReviewFence(
+  db: SqlDatabase,
+  sessionId: string
+): Promise<HeldReviewFence | null> {
+  return db
+    .prepare(
+      `SELECT grs.repo_id AS repoId, grs.repo_owner AS repoOwner, grs.repo_name AS repoName
+       FROM github_review_sessions grs
+       JOIN github_review_state st
+         ON st.repo_id = grs.repo_id AND st.pr_number = grs.pr_number
+       WHERE grs.session_id = ?
+         AND grs.generation = st.latest_generation
+         AND grs.close_out_request IS NULL
+         AND st.lease_session_id = ?
+         AND st.lease_expires_at >= ?
+       LIMIT 1`
+    )
+    .bind(sessionId, sessionId, Date.now())
+    .first<HeldReviewFence>();
+}
+
 /**
  * POST /sessions/:id/review-ownership
  * Sandbox-token-authenticated lease acquisition: the review agent calls this

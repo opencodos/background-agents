@@ -350,6 +350,9 @@ export const createSessionInputSchema = createSessionRequestBaseSchema
     actorDisplayName: z.string().optional(),
     actorEmail: z.string().optional(),
     actorAvatarUrl: z.string().optional(),
+    // Set by the GitHub bot when the session exists to submit a pull request review (a review
+    // request or auto-review): the review's generation fence. Only such sessions may mint the
+    // reviewer App's token; the control plane rejects it from other callers.
     githubReview: createSessionGithubReviewSchema.optional(),
     // Set by the Slack bot for a one-to-one conversation with the actor. Integration-started
     // sessions use the owner's personal memory only then; the control plane ignores it from

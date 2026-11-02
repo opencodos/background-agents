@@ -280,6 +280,8 @@ export async function startSession(
         scmLogin: sender.login,
         scmUserId: String(sender.id),
         scmAvatarUrl: sender.avatar_url,
+        // Comment and review-thread sessions answer a mention; only an admitted review (a review
+        // request or auto-review) is fenced, submits a review, and may mint the reviewer token.
         githubReview: admitted?.githubReview,
       }).catch(async (error: unknown) => {
         if (admitted) await abandonReview(admitted);

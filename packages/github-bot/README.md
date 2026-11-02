@@ -121,13 +121,22 @@ exact bot login, such as `my-reviewer[bot]`. See the
 
 The control plane holds the reviewer's App credentials and brokers its installation token through
 the sandbox-authenticated `GET /sessions/:id/review-token` route. The bot receives only
-`GITHUB_REVIEWER_USERNAME`; the review's submission script fetches the token while it holds the PR's
-submission lease, just before the review POST, and sets `GH_TOKEN` for that command alone. Status
-writes and the lease keep their existing credential. No reviewer App means no token fetch and a
-self-authored PR still gets `COMMENT`. The same self-review check applies to the reviewer App if it
-authored the PR. With a reviewer login set, any token-fetch failure (including the route's 404 when
-the control plane lacks some reviewer credential, or an empty token) releases the lease and writes
-nothing; the review's close-out then terminalizes its pending status.
+`GITHUB_REVIEWER_USERNAME`. Only the sessions it creates for a review request or auto-review — the
+fenced ones, whose `githubReview` fence marks them as review sessions — may fetch the token, never a
+PR-comment or review-thread session, and only while the session is processing the bot's own review
+prompt, so a collaborator's follow-up prompt in the same session cannot mint it. The review's
+submission script fetches the token for the PR's repository (`?repository=<owner>/<name>`, which the
+control plane checks against the repository the review is fenced to; a request without it, from a
+script that predates the parameter, gets the fenced repository's token) while it holds the PR's
+submission lease, which the control plane also requires (checking it again after minting, so a lease
+lost during the token exchange returns no token), just before the review POST, and sets `GH_TOKEN`
+for that command alone. Status writes and the lease keep their existing credential. No reviewer App
+means no token fetch and a self-authored PR still gets `COMMENT`. The same self-review check applies
+to the reviewer App if it authored the PR. With a reviewer login set, any token-fetch failure
+(including the route's 404 when the control plane lacks some reviewer credential, or an empty token)
+releases the lease and writes nothing; the review's close-out then terminalizes its pending status,
+and the prompt forbids resubmitting under any other credential and has the agent report the failure
+instead. The control plane mints the token with only the `pull_requests: write` permission.
 
 ### Sandbox Prerequisites
 

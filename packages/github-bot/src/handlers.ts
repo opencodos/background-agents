@@ -32,14 +32,20 @@ export function reviewRequestLogins(
   return reviewerLogin ? [env.GITHUB_BOT_USERNAME, reviewerLogin] : [env.GITHUB_BOT_USERNAME];
 }
 
+function isReviewRequestLogin(
+  login: string | undefined,
+  acceptedLogins: readonly string[]
+): boolean {
+  return acceptedLogins.some((accepted) => isBotLogin(login, accepted));
+}
+
 export function isReviewRequestedForBot(
   payload: unknown,
   acceptedLogins: readonly string[]
 ): boolean {
   const parsed = requestedReviewerPayloadSchema.safeParse(payload);
   if (!parsed.success) return false;
-  const login = parsed.data.requested_reviewer?.login;
-  return acceptedLogins.some((accepted) => isBotLogin(login, accepted));
+  return isReviewRequestLogin(parsed.data.requested_reviewer?.login, acceptedLogins);
 }
 
 export async function handleReviewRequested(
@@ -50,7 +56,7 @@ export async function handleReviewRequested(
 ): Promise<HandlerResult> {
   const { pull_request: pr, repository: repo, requested_reviewer, sender } = payload;
 
-  if (!reviewRequestLogins(env).some((login) => isBotLogin(requested_reviewer?.login, login))) {
+  if (!isReviewRequestLogin(requested_reviewer?.login, reviewRequestLogins(env))) {
     log.debug("handler.review_not_for_bot", {
       trace_id: traceId,
       requested_reviewer: requested_reviewer?.login,

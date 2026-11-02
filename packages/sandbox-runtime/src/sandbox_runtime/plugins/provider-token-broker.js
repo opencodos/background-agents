@@ -1,4 +1,7 @@
-export class ProviderTokenBrokerError extends Error {
+// Not exported: OpenCode installs this file beside the auth plugins and calls
+// every export of a plugin file as a plugin, and a class cannot be called
+// without `new`. Callers recognize the error by its name instead.
+class ProviderTokenBrokerError extends Error {
   constructor(message, { kind, status = null, providerCode = null }) {
     super(message);
     this.name = "ProviderTokenBrokerError";

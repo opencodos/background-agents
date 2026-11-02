@@ -81,9 +81,9 @@ If the resolved secrets contain no legacy xAI refresh token, sandbox preparation
 The sandbox never receives the refresh token. Broker responses use `Cache-Control: no-store`, and
 the endpoint rejects user and service credentials in favor of the matching session's sandbox token.
 
-A session that can see an `XAI_API_KEY` secret skips this path entirely: no marker, no sentinel, no
-plugin. Grok calls then go straight to xAI's metered API with that key. Delete the secret to return
-to the SuperGrok subscription.
+A session whose xAI authentication resolves to API-key mode skips this path entirely: no marker, no
+sentinel, no plugin. Grok calls then go straight to xAI's metered API with `XAI_API_KEY`. A brokered
+session never sees that key, because the control plane strips it.
 
 ---
 

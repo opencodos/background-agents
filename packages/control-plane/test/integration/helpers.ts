@@ -372,6 +372,7 @@ export async function initNamedSession(
     parentSessionId?: string;
     spawnSource?: SpawnSource;
     spawnDepth?: number;
+    githubReview?: boolean;
     sandboxSettings?: Record<string, unknown>;
     providerAuth?: SessionModelProviderAuthInput[];
   },
@@ -382,7 +383,11 @@ export async function initNamedSession(
     ...TEST_NAMED_SESSION_DEFAULTS,
     ...overrides,
   };
-  const { providerAuth = TEST_SESSION_PROVIDER_AUTH, ...doDefaults } = defaults;
+  const {
+    providerAuth = TEST_SESSION_PROVIDER_AUTH,
+    githubReview = false,
+    ...doDefaults
+  } = defaults;
   const now = Date.now();
   await new SessionIndexStore(env.DB).create({
     id: sessionName,
@@ -411,6 +416,7 @@ export async function initNamedSession(
     parentSessionId: defaults.parentSessionId ?? null,
     spawnSource: defaults.spawnSource ?? "user",
     spawnDepth: defaults.spawnDepth ?? 0,
+    githubReview,
     userId: defaults.canonicalUserId ?? defaults.userId,
     providerAuth,
     createdAt: now,
