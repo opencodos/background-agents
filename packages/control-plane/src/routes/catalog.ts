@@ -1,3 +1,5 @@
+import { mcpConnectionRoutes } from "./mcp-connections";
+import { mcpProxyRoutes } from "./mcp-proxy";
 /**
  * Canonical control-plane HTTP route catalog.
  *
@@ -7,7 +9,6 @@
 
 import type { RouteModule } from "../routing/hono-env";
 import { webhookRoutes } from "../webhooks";
-import { accessTokenRoutes } from "./access-tokens";
 import { actorRoutes } from "./actors";
 import { analyticsRoutes } from "./analytics";
 import { auditEventRoutes } from "./audit-events";
@@ -26,6 +27,8 @@ import { imageBuildRoutes } from "./image-builds";
 import { integrationSettingsRoutes } from "./integration-settings";
 import { keyboardShortcutRoutes } from "./keyboard-shortcuts";
 import { mcpServerRoutes } from "./mcp-servers";
+import { personalAccessTokenAdminRoutes } from "./personal-access-token-admin";
+import { personalAccessTokenRoutes } from "./personal-access-tokens";
 import { memoryRoutes } from "./memories";
 import { modelPreferencesRoutes } from "./model-preferences";
 import { modelProviderAccountRoutes } from "./model-provider-accounts";
@@ -98,6 +101,8 @@ export const catalog: readonly RouteModule[] = [
 
   // MCP servers
   mcpServerRoutes,
+  mcpConnectionRoutes,
+  mcpProxyRoutes,
 
   // Analytics
   analyticsRoutes,
@@ -120,9 +125,6 @@ export const catalog: readonly RouteModule[] = [
   // Workspace roles, members, and current-user authorization
   rbacRoutes,
 
-  // Personal access tokens (human-only credential management; no path
-  // overlap with any other module, so registration order is immaterial here)
-  accessTokenRoutes,
   // Team secrets
   teamSecretsRoutes,
 
@@ -139,4 +141,10 @@ export const catalog: readonly RouteModule[] = [
 
   // Deployment-additive browser sign-in rules
   admissionPolicyRoutes,
+
+  // Personal access tokens: human-only issuance, listing, and revocation
+  personalAccessTokenRoutes,
+
+  // Workspace governance of personal access tokens: policy, every member's tokens, revocation
+  personalAccessTokenAdminRoutes,
 ];

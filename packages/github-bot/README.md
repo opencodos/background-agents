@@ -19,6 +19,11 @@ with a successful status linked to that review.
 Webhook deliveries are deduplicated with Cloudflare KV using `X-GitHub-Delivery`, so GitHub retries
 and manual redeliveries do not create duplicate sessions.
 
+If the Autofix queue handoff fails, the bot still runs the rest of the delivery, responds `503`, and
+clears the delivery marker once that work settles, so the delivery can be redelivered from GitHub. A
+redelivery that arrives while the same delivery is still processing also gets `503`. The
+per-delivery dispatch checkpoint keeps the redelivery from starting a second session.
+
 Because Cloudflare KV is eventually consistent, this is a best-effort dedupe guard rather than a
 strict cross-region lock.
 
@@ -147,8 +152,10 @@ access model and can authenticate auxiliary private repos on the configured SCM 
 | `issue_comment`               | `created`                                               | @mention in a PR comment      | `handleIssueComment`             |
 | `pull_request_review_comment` | `created`                                               | @mention in a review thread   | `handleReviewComment`            |
 
-All events are processed asynchronously via `executionCtx.waitUntil()`. The webhook endpoint returns
-200 immediately after signature verification and delivery dedupe.
+All events are processed asynchronously via `executionCtx.waitUntil()`. The webhook endpoint
+responds after signature verification, delivery dedupe, and the Autofix queue handoff for eligible
+feedback: `200` on success, or `503` when that handoff fails or the same delivery is still
+processing.
 
 ### Handler Flows
 
@@ -225,8 +232,8 @@ This is how a person asks for a fresh review without pushing: GitHub's re-reques
 bot reviewed. When a second App submits the reviews (`GITHUB_REVIEWER_USERNAME`), GitHub lists that
 App as the reviewer, so the button names it rather than the webhook App; both logins are accepted.
 
-1. Check `requested_reviewer.login` matches `GITHUB_BOT_USERNAME` or `GITHUB_REVIEWER_USERNAME` —
-   return early if not.
+1. Check `requested_reviewer.login` matches `GITHUB_BOT_USERNAME` or `GITHUB_REVIEWER_USERNAME`
+   (case-insensitive) — return early if not.
 2. Post an eyes reaction on the PR.
 3. Resolve the owning team through the control plane's GitHub route lookup, as mentions do (the
    auto-review path stays workspace-owned and skips it). A failed lookup throws so the delivery is
@@ -235,7 +242,8 @@ App as the reviewer, so the button names it rather than the webhook App; both lo
    release on failure), and stale-review sweep as the auto-review path.
 5. Post the pending `open-inspect` status on `pull_request.head.sha` under the lease, as step 9
    above.
-6. Send the code review prompt, which posts the successful status after the review.
+6. Send the code review prompt, which posts the successful status after the review. As with
+   auto-review, reviews of the submitting App's own PRs use `COMMENT`.
 
 In both review flows, a review that ends without replacing its pending status is closed out by the
 bot (see [Review Close-Out](#review-close-out)).
@@ -244,7 +252,7 @@ bot (see [Review Close-Out](#review-close-out)).
 
 1. Check `issue.pull_request` exists — ignore non-PR comments
 2. Check comment body contains `@{GITHUB_BOT_USERNAME}` — ignore if no mention
-3. Check `sender.login !== GITHUB_BOT_USERNAME` — prevent loops
+3. Check `sender.login` is not `GITHUB_BOT_USERNAME` (case-insensitive) — prevent loops
 4. Strip @mention, post eyes reaction, create session, send comment action prompt
 
 **Review Comment:** Same as issue comment, but the prompt additionally includes `filePath`,

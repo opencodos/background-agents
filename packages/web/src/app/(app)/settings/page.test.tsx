@@ -76,6 +76,12 @@ vi.mock("@/components/settings/memories-settings", async () => {
 vi.mock("@/components/settings/keyboard-shortcuts-settings", () => ({
   KeyboardShortcutsSettings: () => <div>Keyboard panel</div>,
 }));
+vi.mock("@/components/settings/personal-access-tokens-settings", () => ({
+  PersonalAccessTokensSettings: () => <div>Access tokens panel</div>,
+}));
+vi.mock("@/components/settings/personal-access-token-admin-settings", () => ({
+  PersonalAccessTokenAdminSettings: () => <div>Access token policy panel</div>,
+}));
 vi.mock("@/components/settings/data-controls-settings", () => ({
   DataControlsSettings: () => <div>Data controls panel</div>,
 }));

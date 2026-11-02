@@ -83,6 +83,19 @@ export const SETTINGS_GROUPS = [
         ),
       },
       {
+        id: "access-tokens",
+        label: "Access tokens",
+        description: "Tokens for tools that call the API as you",
+        keywords: "personal access token api mcp pat credentials",
+        icon: KeyIcon,
+        visibility: publicSettings,
+        panel: lazyPanel(() =>
+          import("./personal-access-tokens-settings").then(
+            ({ PersonalAccessTokensSettings }) => PersonalAccessTokensSettings
+          )
+        ),
+      },
+      {
         id: "keyboard-shortcuts",
         label: "Keyboard",
         description: "Customize keyboard shortcuts",
@@ -96,15 +109,15 @@ export const SETTINGS_GROUPS = [
         ),
       },
       {
-        id: "access-tokens",
-        label: "Access Tokens",
-        description: "Create and revoke personal API credentials",
-        keywords: "personal api token mcp authentication",
-        icon: KeyIcon,
+        id: "mcp-connections",
+        label: "Connections",
+        description: "Connect your personal MCP accounts",
+        keywords: "mcp oauth personal integrations",
+        icon: IntegrationsIcon,
         visibility: publicSettings,
         panel: lazyPanel(() =>
-          import("./access-tokens-settings").then(
-            ({ AccessTokensSettings }) => AccessTokensSettings
+          import("./mcp-connections-settings").then(
+            ({ McpConnectionsSettings }) => McpConnectionsSettings
           )
         ),
       },
@@ -184,6 +197,19 @@ export const SETTINGS_GROUPS = [
         visibility: anyOf("workspace.members.manage", { teamCapability: "canEditMetadata" }),
         panel: lazyPanel(() =>
           import("./teams-settings").then(({ TeamsSettings }) => TeamsSettings)
+        ),
+      },
+      {
+        id: "workspace-access-tokens",
+        label: "Access token policy",
+        description: "Govern members' personal access tokens",
+        keywords: "personal access token api mcp pat revoke kill switch lifetime",
+        icon: KeyIcon,
+        visibility: anyOf("workspace.personal_access_tokens.manage"),
+        panel: lazyPanel(() =>
+          import("./personal-access-token-admin-settings").then(
+            ({ PersonalAccessTokenAdminSettings }) => PersonalAccessTokenAdminSettings
+          )
         ),
       },
       {

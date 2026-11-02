@@ -44,6 +44,9 @@ yarn-debug.log*
 yarn-error.log*
 
 # Test
+.preview/
+playwright-report/
+test-results/
 coverage/
 .vitest-reports/
 .coverage
@@ -109,3 +112,6 @@ terraform/environments/aws-staging/plan.out
 terraform/environments/aws-production/plan.out
 
 # Stable local advisory-lock inode for sandbox release selection writers.
+
+# Loopback-only managed MCP canary bundle.
+scripts/managed-mcp/.example-server.mjs

@@ -1,182 +1,188 @@
 # @open-inspect/mcp-server
 
-MCP server over the Open-Inspect control plane. Runs locally over stdio so an MCP client — Claude
-Code, an IDE — can inspect sessions, create and run automations, and manage skills, without the web
-UI.
+MCP server over the Open-Inspect control plane. It runs locally over stdio, so an MCP client such as
+Claude Code or an IDE can inspect sessions, read automation runs, create and run automations, and
+manage skills without the web UI.
 
 ## Security model
 
-Requests authenticate with a **personal access token** you issue to yourself in the web UI. Three
-properties make this safe to keep on a laptop:
+Requests authenticate with a **personal access token** you issue to yourself in the web UI
+(**Settings › Access tokens**). The control plane decides what each request may do. This server only
+presents tools:
 
-- **It is yours, and it says so.** The control plane resolves the token to your canonical user id,
-  so every request it makes is attributable to a person rather than to an anonymous service. Routes
-  that scope their answers to a viewer scope them to you, and the token carries exactly your role's
-  permissions — no more, and no less than your browser session would.
-- **It reads anywhere your role allows, and writes only where a route invites it.** An access-token
-  principal is refused every method but `GET`/`HEAD` unless the route declares `accessTokenWrites`
-  in its own policy, whatever else that route allows (`principalMayUseMethod` in control-plane
-  `auth/principal.ts`). Six routes declare it — skill import and re-import plus their previews,
-  automation create, and manual automation trigger — so the tools below can create and update
-  skills, and create and run automations. Every one of the six is additive: it adds a skill
-  revision, an automation, or a run. A leaked token still cannot issue a `DELETE /sessions/:id`, a
-  `PUT /secrets`, a `DELETE /skills/:id`, or a `DELETE /automations/:id`, and cannot rewrite, pause,
-  or resume an automation that already exists.
+- **The token acts as you, within its grant.** Every request is attributed to you, and to the token
+  that made it. The token's permissions are the overlap of the permissions you granted it and your
+  role's permissions now, so it never exceeds either. If your role loses a permission, or your
+  account is suspended, the token loses it too.
+- **It reaches only routes that accept tokens.** Each route the tools call declares that it accepts
+  personal access tokens. Every other route refuses one, whatever it was granted. A token cannot
+  create, list, or revoke tokens, so a leaked one cannot issue itself a successor.
+- **You can revoke it immediately** under Settings › Access tokens. No deploy is involved.
+- **Your workspace's token policy also applies.** An administrator can turn tokens off, cap their
+  lifetime, limit the permissions they may hold, or revoke any member's token, and each change
+  applies to existing tokens at once.
 
-  Safe methods are the default rather than a route allowlist because every mutating route is already
-  a non-GET, while an allowlist would fail open for each read route added later. The exceptions are
-  declared one route at a time and enumerated by a test in `router.policy.test.ts`, so adding a
-  seventh is a visible change rather than a quiet one.
+The control plane stores only a SHA-256 hash of the token. The token itself sits in plaintext in
+your MCP client's configuration, like any local API key, so grant it only what you will use, and
+give it the shortest lifetime that works.
 
-- **You can revoke it yourself, immediately.** Settings → Access Tokens → Revoke. No deploy, no
-  Terraform apply. A token also cannot mint another token: `/access-tokens` is a human-only route,
-  so a leaked credential cannot issue itself a successor to survive its own revocation.
+### Choose the grant for what you want the assistant to do
 
-Importing a skill needs `skills.manage`, which is an administrator or owner grant. A token whose
-owner holds a lesser role reads fine and is refused the import with `permission_required`. Creating
-an automation needs `automations.create`, and triggering one `automations.trigger` — scoped, so a
-token reaches the automations its owner may run and no others. An automation targeting repositories
-or environments faces the same `repositories.use` and `environments.use` checks its owner would.
+| You want the assistant to…               | Grant                                                                                         |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------- |
+| Investigate sessions and automation runs | `sessions.read`, `automations.read`, `skills.read`                                            |
+| Also run existing automations            | add `automations.trigger.own` (or `.any`), `sessions.create`, and the targets' use permission |
+| Also create automations                  | add `automations.create`, `sessions.create`, and `repositories.use` and/or `environments.use` |
+| Also import and update skills            | add `skills.manage` (the picker adds `skills.read` with it)                                   |
 
-The control plane stores only a SHA-256 hash of the token, so a database read cannot recover a
-working credential.
+The **Read-only** button in the token picker selects the first row and every other read permission
+your role has and your workspace allows.
 
-Two limits worth knowing. Human-only routes — `GET /sessions/:id` and `sandbox-access`, the latter
-of which mints credentials — are deliberately out of reach; a token that could reach them would be a
-larger credential than the one it replaces. And the token sits in plaintext in your MCP client
-config, like any local API key. That is the reason its writes are confined to six declared routes,
-its reads and writes alike are bounded by your role, and it is revocable in one click.
+### Prompt injection
 
-One consequence worth weighing before you issue a token to a machine you do not control: an
-automation is instructions that run later, in a sandbox, as you. A token that can create and trigger
-one can therefore schedule work in your name — bounded by your role and your targets, visible in the
-dashboard, and stoppable by deleting the automation, which the token itself cannot do.
+The read tools return content that the agent, tools, and repositories in a session produced, and
+that content goes straight into your assistant's context. Treat it as untrusted. Text in a session
+transcript or diff can ask the assistant to call a write tool. A write tool used that way acts with
+your authority:
+
+- An automation runs its instructions later, in a sandbox, as you. It has your repository and
+  environment access, and the secrets those sessions receive.
+- A skill with a `global` assignment loads into every later session in the workspace, not just
+  yours.
+
+Three things limit this:
+
+- A token without write permissions cannot be talked into writing. The control plane refuses the
+  call whatever the assistant sends. This is the only one of the three that is enforced.
+- Every write tool is annotated `readOnlyHint: false`. That is a hint, not an enforced prompt:
+  whether your client asks before running the tool depends on its settings, and a client set to
+  approve tools automatically will not ask. Check yours before you grant write permissions, and read
+  what a write is about to create before you approve it.
+- Automations and skills created this way are visible in the dashboard and audit log, and you can
+  delete them there.
+
+For investigation, a read-only token is the right default.
 
 ## Setup
 
-Issue a token in the web UI: **Settings → Access Tokens → New Token**. Name it after the machine it
-will live on, pick an expiry, and copy the value — it is shown once and never again.
+1. Issue a token in the web UI under **Settings › Access tokens › New token**. Name it after the
+   machine it lives on, choose its permissions and lifetime, and copy the value. It is shown once.
+2. Build the server:
 
-Build the server:
+   ```bash
+   npm run build -w @open-inspect/shared
+   npm run build -w @open-inspect/mcp-server
+   ```
 
-```bash
-npm run build -w @open-inspect/shared
-npm run build -w @open-inspect/mcp-server
-```
+3. Register it with your MCP client, from the repository root:
 
-Register it with your MCP client, from the repository root:
-
-```bash
-claude mcp add open-inspect \
-  --env OPEN_INSPECT_CONTROL_PLANE_URL=https://<your-control-plane> \
-  --env OPEN_INSPECT_TOKEN=oi_pat_... \
-  -- node /absolute/path/to/packages/mcp-server/dist/index.js
-```
+   ```bash
+   claude mcp add open-inspect \
+     --env OPEN_INSPECT_CONTROL_PLANE_URL=https://<your-control-plane> \
+     --env OPEN_INSPECT_TOKEN=oi_pat_... \
+     -- node /absolute/path/to/packages/mcp-server/dist/index.js
+   ```
 
 | Variable                         | Purpose                               |
 | -------------------------------- | ------------------------------------- |
 | `OPEN_INSPECT_CONTROL_PLANE_URL` | Control plane worker URL (`https://`) |
 | `OPEN_INSPECT_TOKEN`             | Personal access token (`oi_pat_…`)    |
 
-Both are required; the process exits with a message on stderr if either is missing. The URL must be
-`https://`, because the token travels in an `Authorization` header on every request; plain `http://`
-is accepted only for a loopback host (`localhost`, `127.0.0.1`, `[::1]`), where the request never
-leaves the machine. Anything else is refused at startup rather than on the first call. A `401` from
-any tool means the token was rejected — mistyped, revoked, or expired. Issue a new one and update
-the client config.
+Both are required. The process exits with a message on stderr if either is missing, or if the token
+is not shaped like a personal access token. The URL must be `https://`, because the token travels in
+an `Authorization` header on every request. Plain `http://` is accepted only for a loopback host
+(`localhost`, `127.0.0.1`, `[::1]`). Redirects are refused rather than followed, so a redirect
+cannot send the token anywhere else.
 
-Note that `claude mcp add` does not validate that `--env` values are non-empty. If you populate them
-from a command, check that the command actually printed something first.
+When a tool fails, its output says why:
+
+- A `401` means the token was mistyped, revoked, or expired, or that your workspace has turned
+  tokens off or capped their lifetime below the token's age. Issue a new one, if tokens are on, and
+  update the client configuration.
+- A `403` with `permission_required` names the permission the token was not granted, that your role
+  no longer has, or that your workspace's token policy no longer allows.
+
+`claude mcp add` does not check that `--env` values are non-empty. If you fill them from a command,
+check that the command printed something.
 
 ## Tools
 
-| Tool                    | Route                              | Use                                             |
-| ----------------------- | ---------------------------------- | ----------------------------------------------- |
-| `list_sessions`         | `GET /sessions`                    | find a session id                               |
-| `get_session_events`    | `GET /sessions/:id/events`         | what a session did, and where it went wrong     |
-| `get_session_messages`  | `GET /sessions/:id/messages`       | prompts and responses without tool detail       |
-| `get_session_diff`      | `GET /sessions/:id/diff`           | the changes a session produced                  |
-| `list_automations`      | `GET /automations`                 | find an automation id, and what triggers it     |
-| `list_automation_runs`  | `GET /automations/:id/invocations` | did a scheduled automation fire, skip, or fail  |
-| `get_automation_run`    | `GET /automations/:id/runs/:runId` | one run and the sessions it launched            |
-| `create_automation`     | `POST /automations`                | schedule or wire up new recurring work          |
-| `trigger_automation`    | `POST /automations/:id/trigger`    | run one now, outside its schedule               |
-| `list_skills`           | `GET /skills`                      | find a skill id, and where it was imported from |
-| `import_skill_from_git` | `POST /skills/import`              | create a skill from a repository                |
-| `update_skill_from_git` | `POST /skills/:id/reimport`        | re-import a skill from its recorded source      |
+Each tool's description states the grant it needs, so the assistant can tell you what is missing.
 
-`get_session_events`, `get_session_messages`, `list_automations` and `list_skills` are paged — pass
-the cursor from a response back to continue.
+| Tool                          | Route                                              | Grant                                                  |
+| ----------------------------- | -------------------------------------------------- | ------------------------------------------------------ |
+| `list_sessions`               | `GET /sessions`                                    | `sessions.read`                                        |
+| `get_session_events`          | `GET /sessions/:id/events`                         | `sessions.read`                                        |
+| `get_session_messages`        | `GET /sessions/:id/messages`                       | `sessions.read`                                        |
+| `get_session_diff`            | `GET /sessions/:id/diff`                           | `sessions.read`                                        |
+| `get_session_diff_file`       | `GET /sessions/:id/diff/:revisionId/files/:fileId` | `sessions.read`                                        |
+| `list_automations`            | `GET /automations`                                 | `automations.read`                                     |
+| `list_automation_invocations` | `GET /automations/:id/invocations`                 | `automations.read`                                     |
+| `get_automation_run`          | `GET /automations/:id/runs/:runId`                 | `automations.read`                                     |
+| `create_automation`           | `POST /automations`                                | `automations.create`, `sessions.create`                |
+| `trigger_automation`          | `POST /automations/:id/trigger`                    | `automations.trigger.own` or `.any`, `sessions.create` |
+| `list_skills`                 | `GET /skills`                                      | `skills.read`                                          |
+| `import_skill_from_git`       | `POST /skills/import` (+ preview)                  | `skills.read`, `skills.manage`                         |
+| `update_skill_from_git`       | `POST /skills/:id/reimport` (+ …)                  | `skills.read`, `skills.manage`                         |
 
-`list_automations` also narrows by name (`search`) and by target repository (`repo_owner`,
-`repo_name`, either alone), and reports each automation's last few invocations alongside its trigger
-and targets — enough to see whether a schedule is firing without a second call.
+`create_automation` and `trigger_automation` also need `repositories.use` or `environments.use` for
+the automation's targets, the same checks you face in the web UI. A triggered run uses only what the
+token was granted, even where your role allows more.
 
-### The two automation writes
+`get_session_diff` lists a diff's changed files without their patches; `get_session_diff_file` reads
+one file's patch, using the revision and file ids from that list. `list_automation_invocations`
+returns one invocation per firing, each with its child runs (one per target); `get_automation_run`
+reads one child run by its id.
 
-- `create_automation` takes a name, instructions, and a trigger. The default trigger is `schedule`,
-  which wants a `schedule_cron` and the `schedule_tz` it is read in — the timezone defaults to UTC,
-  which is rarely the hour anyone means, so pass your own. Event-driven triggers (`github_event`,
-  `linear_event`, `slack_event`, `sentry`, `webhook`) want an `event_type` and usually a
-  `trigger_config` of conditions; that argument reuses the control plane's own condition schema, so
-  the client shows the real shape. A `sentry` trigger additionally needs `sentry_client_secret` —
-  Sentry's own secret for the webhook it will call — and is refused without one. A `webhook`
-  automation returns the key that calls it, shown this once and never again.
+`get_session_events`, `get_session_messages`, `list_automations`, and `list_skills` are paged. Pass
+the cursor from a response back to continue. `list_automations` also filters by name (`search`) and
+by target repository (`repo_owner`, `repo_name`, either alone).
 
-  The automation is created **enabled**, so a schedule starts firing at the next occurrence of its
-  cron. This credential cannot edit or pause one afterwards, so create it with the schedule it
-  should keep; a mistake is corrected in the web UI, or by creating a replacement.
+### Automation writes
 
-- `trigger_automation` runs one now, outside its schedule, and returns the invocation id and the
-  sessions it launched — follow those with `get_automation_run` or `get_session_events`. It leaves
-  the schedule alone: a manual run is an extra run, not a replacement for the next one. It fails
-  with 409 while a run of that automation is already active, and does not queue behind it.
+- `create_automation` takes a name, instructions, a trigger, and an optional `team_id`, which a
+  workspace that requires a team on creation needs. The default trigger is `schedule`, which needs a
+  `schedule_cron` and the `schedule_tz` it is read in. The timezone defaults to UTC, which is rarely
+  the hour anyone means, so pass your own.
+  - Event-driven triggers (`github_event`, `linear_event`, `slack_event`, `sentry`, `webhook`) need
+    an `event_type` and usually a `trigger_config` of conditions.
+  - A `sentry` trigger also needs `sentry_client_secret`.
+  - A `webhook` automation returns the key that calls it, shown once.
 
-### The two skill writes
+  The automation is created **enabled**, so a schedule starts firing at its next occurrence. No tool
+  edits or pauses an automation, so create it with the schedule it should keep, and fix a mistake in
+  the web UI.
 
-Both run the control plane's preview-then-confirm handshake inside one tool call. The preview
-resolves the ref to a commit and digests what it read; the confirmation sends those digests back,
-and the control plane refuses to store anything that no longer matches.
+- `trigger_automation` runs one now, outside its schedule. It returns the invocation id and its
+  child runs; read one with `get_automation_run`. It fails with `409` while a run of that automation
+  is already active. The invocation records its author as `unknown`, since a token does not
+  establish whether a person or an agent fired it.
 
-**That handshake covers the source moving between the two requests, and nothing else — it is not the
-web UI's preview screen.** Your MCP client asks for approval before the tool runs, so what it shows
-you is the repository and ref being requested, never the content that comes back. Skill content
-already sitting at the ref you approve is stored without anyone having read it, and a managed skill
-is loaded into later sessions. Approve a ref the way you would approve running code from it; where
-you want to read the content first, import it through the web UI instead.
+### Skill writes
+
+Both run the control plane's preview-then-confirm handshake inside one tool call. The confirmation
+sends the preview's digests back, and the control plane refuses to store anything that no longer
+matches.
+
+**That handshake only covers the source moving between the two requests. It is not the web UI's
+preview screen.** Your MCP client shows you the repository and ref being requested, never the
+content that comes back. Approve a ref the way you would approve running code from it. To read the
+content first, import it through the web UI.
 
 - `import_skill_from_git` takes a repository, an optional `ref` and `subdirectory`, and optional
-  `assignments` — omit those and the skill is stored but no session loads it. It refuses a name that
-  already exists rather than writing, and points you at the update tool.
+  `assignments`. Without assignments the skill is stored, but no session loads it. It refuses a name
+  that already exists.
 - `update_skill_from_git` takes a skill id and an optional `ref`. The repository and subdirectory
-  come from the skill's recorded provenance, so only the ref may move. It pins the write to the
-  revision it read with `If-Match`, so a concurrent edit fails the re-import rather than being
-  overwritten, and reports `revisionCreated: false` when the source had not changed. A skill
-  authored in the editor has no recorded source and is refused. Because it reads the skill before
-  writing it, this tool needs `skills.read` as well as `skills.manage` — the built-in administrator
-  and owner roles carry both, but a custom role granting `skills.manage` alone is refused at that
-  read.
-
-Both report the skill's provenance **as stored**, which is not always what was previewed: when a ref
-has advanced but the generated revision bytes are identical, the re-import keeps the revision it had
-along with the commit that revision was recorded at, and reports `revisionCreated: false`.
-
-Neither tool deletes anything: a re-import adds a revision, and the previous content stays in the
-skill's history.
-
-The read routes already carried a policy that accepts this credential. The routes this package's
-writes required a policy change for are the four skill imports (`SKILLS_IMPORT` in control-plane
-`routes/skills.ts`), `POST /automations` in `routes/automation-crud.ts`, and
-`POST /automations/:id/trigger` in `routes/automation-lifecycle.ts`.
+  come from the skill's recorded source. It pins the write to the revision it read (`If-Match`), and
+  reports `revisionCreated: false` when the source had not changed.
 
 ## Development
 
 ```bash
 npm test -w @open-inspect/mcp-server
 npm run typecheck -w @open-inspect/mcp-server
+npm run build -w @open-inspect/mcp-server
 ```
 
-Control-plane coverage for the credential itself lives in
-`packages/control-plane/test/integration/access-tokens.test.ts`, which exercises the real D1 path:
-read-only enforcement, the scoped import exception and the roles that may use it, expiry,
-revocation, and the human-only guard on `/access-tokens`.
+The control plane's tests for these routes cover token admission, grant narrowing, and owner
+attribution: `packages/control-plane/test/integration/personal-access-token-routes.test.ts`.

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { enforceRoutePrincipal, parseVerifiedSandboxId } from "./routing/route-admission";
+import { enforceRoutePrincipal } from "./routing/route-admission";
+import { parseVerifiedSandboxId } from "./routing/sandbox-authentication";
 import {
   fakeSessionRuntimeDispatch,
   handleRequest,
@@ -39,13 +40,27 @@ describe("route policy table", () => {
   });
 
   it("publishes the complete canonical route catalog", () => {
-    expect(routes).toHaveLength(252);
+    expect(routes).toHaveLength(269);
 
     const paths = routes.map((route) => route.path);
-    expect(new Set(paths).size).toBe(193);
-    expect(new Set(routes.map((route) => `${route.method}:${route.path}`)).size).toBe(252);
+    expect(new Set(paths).size).toBe(207);
+    expect(new Set(routes.map((route) => `${route.method}:${route.path}`)).size).toBe(269);
     expect(routeFor("POST", "/sessions/session-1/sandbox-memory/search")).toMatchObject({
       authentication: { kind: "sandbox" },
+      supportedScmProviders: "all",
+      cacheControl: "private, no-store",
+    });
+  });
+
+  it("requires an audited human settings writer to revoke personal MCP connections", () => {
+    expect(routeFor("POST", "/mcp-servers/server-1/revoke-connections")).toMatchObject({
+      authentication: { kind: "user" },
+      authorization: {
+        kind: "active-user",
+        allOf: [{ kind: "permission", permission: "mcp_servers.manage" }],
+        service: { kind: "deny" },
+        auditAllowed: true,
+      },
       supportedScmProviders: "all",
       cacheControl: "private, no-store",
     });
@@ -588,6 +603,8 @@ describe("route policy table", () => {
     ["GET", "/sessions/session-1/skills"],
     ["POST", "/skills"],
     ["POST", "/skills/import"],
+    ["POST", "/skills/import/bulk/preview"],
+    ["POST", "/skills/import/bulk"],
     ["POST", "/skills/skill-1/reimport"],
     ["GET", "/skill-profiles"],
   ])("owns the human-user restriction for %s %s", (method, path) => {
@@ -801,7 +818,7 @@ describe("route principal policy", () => {
       { kind: "service", service: "linear-bot", actor: null } as const,
     ],
   ])("accepts matching principals for %o", (authentication, principal) => {
-    expect(enforceRoutePrincipal(authentication, principal, "GET")).toBeNull();
+    expect(enforceRoutePrincipal({ authentication }, principal)).toBeNull();
   });
 
   it.each([
@@ -818,146 +835,145 @@ describe("route principal policy", () => {
     ],
     [{ kind: "service" } as const, { kind: "user", userId: "user-1" } as const, 403],
   ])("rejects mismatched principals for %o", (authentication, principal, status) => {
-    expect(enforceRoutePrincipal(authentication, principal, "GET")?.response.status).toBe(status);
+    expect(enforceRoutePrincipal({ authentication }, principal)?.response.status).toBe(status);
   });
 
-  const tokenPrincipal = {
-    kind: "access-token",
+  const token = {
+    kind: "personal-access-token",
     userId: "user-1",
     tokenId: "token-1",
+    grant: ["sessions.read"],
   } as const;
-  const readRoute = { kind: "user-or-service" } as const;
 
-  it.each(["GET", "HEAD", "get"])("lets an access token read (%s)", (method) => {
-    expect(enforceRoutePrincipal(readRoute, tokenPrincipal, method)).toBeNull();
-  });
-
-  it.each(["POST", "PUT", "PATCH", "DELETE"])(
-    "refuses an access token every mutating method (%s), whatever the route policy allows",
-    (method) => {
-      // The trust boundary for the read-only claim: the route itself accepts
-      // any user-or-service principal, so only this check stands between a
-      // leaked token and DELETE /sessions/:id.
-      expect(enforceRoutePrincipal(readRoute, tokenPrincipal, method)?.response.status).toBe(403);
+  it.each([
+    { kind: "user" },
+    { kind: "user-or-service" },
+    { kind: "web-service" },
+    { kind: "service" },
+  ] as const)(
+    "refuses a personal access token on a %o route that does not accept one",
+    async (authentication) => {
+      const failure = enforceRoutePrincipal({ authentication }, token);
+      expect(failure?.response.status).toBe(403);
+      await expect(failure?.response.json()).resolves.toMatchObject({
+        code: "personal_access_token_not_accepted",
+      });
+      expect(failure?.decision).toMatchObject({ reasonCode: "personal_access_token_not_accepted" });
     }
   );
 
-  it("keeps human-only routes human-only, so a token cannot mint another token", () => {
-    // /access-tokens is a { kind: "user" } route. An access token reaching it
-    // would make revocation meaningless.
-    expect(enforceRoutePrincipal({ kind: "user" }, tokenPrincipal, "GET")?.response.status).toBe(
-      403
-    );
-  });
-
-  it("leaves services unrestricted by method", () => {
-    const bot = { kind: "service", service: "linear-bot", actor: null } as const;
-    expect(enforceRoutePrincipal(readRoute, bot, "DELETE")).toBeNull();
-  });
-
-  it.each(["POST", "PUT", "PATCH", "DELETE"])(
-    "lets a token use %s on a route that declares accessTokenWrites",
-    (method) => {
+  it.each([{ kind: "user" }, { kind: "user-or-service" }] as const)(
+    "admits a personal access token on a %o route that accepts one",
+    (authentication) => {
       expect(
-        enforceRoutePrincipal(readRoute, tokenPrincipal, method, undefined, "allow")
+        enforceRoutePrincipal({ authentication, personalAccessTokens: "accept" }, token)
       ).toBeNull();
     }
   );
 
-  it("admits a token to a human-only route it declares token writes for", () => {
-    // Skill import is a { kind: "user" } route: without this the token would
-    // be refused for its principal kind before the method was ever considered.
+  it("never admits a browser user or service through the token opt-in alone", () => {
     expect(
-      enforceRoutePrincipal({ kind: "user" }, tokenPrincipal, "POST", undefined, "allow")
-    ).toBeNull();
-  });
-
-  it("keeps the declaration route-local, so a neighbouring route stays read-only", () => {
-    expect(
-      enforceRoutePrincipal(readRoute, tokenPrincipal, "DELETE", undefined, "deny")?.response.status
+      enforceRoutePrincipal(
+        { authentication: { kind: "service" }, personalAccessTokens: "accept" },
+        { kind: "user", userId: "user-1" }
+      )?.response.status
     ).toBe(403);
-    expect(enforceRoutePrincipal(readRoute, tokenPrincipal, "DELETE")?.response.status).toBe(403);
   });
 });
 
-describe("access-token write declarations", () => {
-  it("is declared by the skill import and additive automation routes and nothing else", () => {
-    // The read-only claim is only as good as this list is short. A new route
-    // opting in has to change this test, which is where the reviewer looks.
-    // Every entry is additive — it adds a skill revision, an automation, or a
-    // run — which is the bar for joining it.
-    const declared = routes
-      .filter((route) => route.accessTokenWrites === "allow")
-      .map((route) => `${route.method} ${route.path}`)
-      .sort();
-
-    expect(declared).toEqual([
-      "POST /automations",
-      "POST /automations/:id/trigger",
-      "POST /skills/:id/reimport",
-      "POST /skills/:id/reimport/preview",
-      "POST /skills/import",
-      "POST /skills/import/preview",
-    ]);
+describe("personal access token reach", () => {
+  it("admits tokens on exactly the routes the MCP server's tools use", () => {
+    // Adding a route here widens what every personal access token can reach. Each one must be
+    // gated by permissions a grant can narrow, which admit() enforces when the app is built.
+    expect(
+      routes
+        .filter((route) => route.personalAccessTokens === "accept")
+        .map((route) => `${route.method} ${route.path}`)
+        .sort()
+    ).toEqual(
+      [
+        "GET /automations",
+        "GET /automations/:id",
+        "GET /automations/:id/invocations",
+        "GET /automations/:id/runs/:runId",
+        "GET /sessions",
+        "GET /sessions/:id/diff",
+        "GET /sessions/:id/diff/:revisionId/files/:fileId",
+        "GET /sessions/:id/events",
+        "GET /sessions/:id/messages",
+        "GET /skills",
+        "GET /skills/:id",
+        "POST /automations",
+        "POST /automations/:id/trigger",
+        "POST /skills/:id/reimport",
+        "POST /skills/:id/reimport/preview",
+        "POST /skills/import",
+        "POST /skills/import/preview",
+      ].sort()
+    );
   });
 
-  it("still requires the automation permissions, so the token widens the credential and not the user", () => {
-    expect(
-      routes.find((entry) => entry.method === "POST" && entry.path === "/automations")
-        ?.authorization
-    ).toMatchObject({
-      kind: "active-user",
-      allOf: [
-        { kind: "permission", permission: "automations.create" },
-        { kind: "permission", permission: "sessions.create" },
-      ],
-    });
-    expect(
-      routes.find((entry) => entry.method === "POST" && entry.path === "/automations/:id/trigger")
-        ?.authorization
-    ).toMatchObject({
-      kind: "active-user",
-      allOf: [{ kind: "automation", operation: "trigger" }],
-    });
-  });
-
-  it("leaves the automation routes that rewrite or silence one human-only", () => {
-    // Delete and update replace an automation other people may depend on;
-    // pause and resume decide whether its schedule fires at all. None of the
-    // four is recoverable from a run history the way an added row is.
+  it("keeps destructive and administrative neighbours of opted-in routes closed to tokens", () => {
     for (const [method, path] of [
-      ["PUT", "/automations/:id"],
-      ["DELETE", "/automations/:id"],
-      ["POST", "/automations/:id/pause"],
-      ["POST", "/automations/:id/resume"],
-      ["POST", "/automations/:id/regenerate-key"],
+      ["PUT", "/automations/auto-1"],
+      ["DELETE", "/automations/auto-1"],
+      ["POST", "/automations/auto-1/pause"],
+      ["POST", "/automations/auto-1/resume"],
+      ["POST", "/skills/import/bulk"],
+      ["DELETE", "/skills/skill-1"],
+      ["PUT", "/skills/skill-1"],
+      ["POST", "/skills/preview"],
+      ["POST", "/sessions"],
+      ["GET", "/sessions/session-1/tunnel-urls"],
+      ["GET", "/sessions/session-1/sandbox-access"],
+      ["GET", "/integration-settings/slack/watched-channels"],
     ] as const) {
-      const route = routes.find((entry) => entry.method === method && entry.path === path);
-      expect(route, `${method} ${path}`).toBeDefined();
-      expect(route?.accessTokenWrites, `${method} ${path}`).toBeUndefined();
+      expect(routeFor(method, path)?.personalAccessTokens, `${method} ${path}`).toBeUndefined();
     }
   });
 
-  it("still requires skills.manage, so the token widens the credential and not the user", () => {
-    for (const path of ["/skills/import", "/skills/:id/reimport"]) {
-      const route = routes.find((entry) => entry.method === "POST" && entry.path === path);
-      expect(route?.authorization).toMatchObject({
-        kind: "active-user",
-        allOf: [{ kind: "permission", permission: "skills.manage" }],
+  it("gates workspace token governance on its own permission, for humans only", () => {
+    for (const [method, path] of [
+      ["GET", "/settings/personal-access-token-policy"],
+      ["PUT", "/settings/personal-access-token-policy"],
+      ["GET", "/settings/personal-access-tokens"],
+      ["DELETE", "/settings/personal-access-tokens/token-1"],
+      ["DELETE", "/members/user-1/personal-access-tokens"],
+    ] as const) {
+      const route = routeFor(method, path);
+      expect(route, `${method} ${path}`).toMatchObject({
+        authentication: { kind: "user" },
+        authorization: {
+          kind: "active-user",
+          allOf: [{ kind: "permission", permission: "workspace.personal_access_tokens.manage" }],
+          service: { kind: "deny" },
+        },
+        cacheControl: "private, no-store",
       });
+      expect(route?.personalAccessTokens).toBeUndefined();
     }
+    expect(routeFor("GET", "/personal-access-tokens/policy")).toMatchObject({
+      authentication: { kind: "user" },
+      authorization: { kind: "active-self" },
+    });
   });
 
-  it("leaves the destructive skill routes human-only", () => {
-    for (const [method, path] of [
-      ["DELETE", "/skills/:id"],
-      ["PUT", "/skills/:id"],
-      ["PATCH", "/skills/:id"],
-      ["POST", "/skills"],
-    ] as const) {
-      const route = routes.find((entry) => entry.method === method && entry.path === path);
-      expect(route, `${method} ${path}`).toBeDefined();
-      expect(route?.accessTokenWrites, `${method} ${path}`).toBeUndefined();
+  it("keeps token management human-only", () => {
+    for (const method of ["GET", "POST"]) {
+      expect(routeFor(method, "/personal-access-tokens")).toMatchObject({
+        authentication: { kind: "user" },
+        authorization: { kind: "active-self" },
+        cacheControl: "private, no-store",
+      });
+      expect(routeFor(method, "/personal-access-tokens")?.personalAccessTokens).toBeUndefined();
     }
+    expect(routeFor("DELETE", "/personal-access-tokens/token-1")).toMatchObject({
+      authentication: { kind: "user" },
+      authorization: { kind: "active-self" },
+      cacheControl: "private, no-store",
+    });
+    expect(
+      routeFor("DELETE", "/personal-access-tokens/token-1")?.personalAccessTokens
+    ).toBeUndefined();
   });
 });

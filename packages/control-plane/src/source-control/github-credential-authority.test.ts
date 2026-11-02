@@ -184,16 +184,21 @@ describe("resolveGitHubCredentialAuthority", () => {
     expect(getUserAuth).not.toHaveBeenCalled();
   });
 
-  it("authorizes access-token principals without browser-session provenance", async () => {
+  it("authorizes a personal access token from the stored user record, without Better Auth", async () => {
     const getUserAuth = vi.fn(() => {
-      throw new Error("At least one sign-in provider must be configured");
+      throw new Error("Better Auth must not be consulted for a token");
     });
 
     await expect(
       resolveGitHubCredentialAuthority(
         createContext({
-          principal: { kind: "access-token", userId: "user-1", tokenId: "token-1" },
           getUserAuth,
+          principal: {
+            kind: "personal-access-token",
+            userId: "user-1",
+            tokenId: "token-1",
+            grant: ["automations.trigger.own"],
+          },
         }),
         BROWSER_HEADERS
       )

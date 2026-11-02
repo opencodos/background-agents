@@ -1,8 +1,8 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { ACCESS_TOKEN_PREFIX } from "@open-inspect/shared/types/access-tokens";
+import { PERSONAL_ACCESS_TOKEN_PREFIX } from "@open-inspect/shared/types/personal-access-tokens";
 import { ControlPlaneClient, ControlPlaneError } from "./client";
 
-const TOKEN = `${ACCESS_TOKEN_PREFIX}${"a".repeat(64)}`;
+const TOKEN = `${PERSONAL_ACCESS_TOKEN_PREFIX}${"a".repeat(64)}`;
 const BASE_URL = "https://control-plane.example.com";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -24,7 +24,7 @@ describe("ControlPlaneClient", () => {
     vi.unstubAllGlobals();
   });
 
-  it("presents the access token as a bearer credential", async () => {
+  it("presents the personal access token as a bearer credential", async () => {
     fetchMock.mockResolvedValue(jsonResponse({ sessions: [] }));
     await new ControlPlaneClient({ baseUrl: BASE_URL, token: TOKEN }).get("/sessions");
 
@@ -41,7 +41,7 @@ describe("ControlPlaneClient", () => {
     expect(headers["X-OpenInspect-Service-Signature"]).toBeUndefined();
   });
 
-  it("sends GET and never a mutating method", async () => {
+  it("reads with GET", async () => {
     fetchMock.mockResolvedValue(jsonResponse({}));
     await new ControlPlaneClient({ baseUrl: BASE_URL, token: TOKEN }).get("/sessions/s1/events");
 
@@ -74,6 +74,79 @@ describe("ControlPlaneClient", () => {
     const client = new ControlPlaneClient({ baseUrl: BASE_URL, token: TOKEN });
 
     await expect(client.get("/sessions")).rejects.toThrow(/ECONNREFUSED/);
+  });
+
+  it.each(["GET", "POST"])("does not dispatch an already-cancelled %s", async (method) => {
+    const controller = new AbortController();
+    const reason = new Error("MCP request cancelled");
+    controller.abort(reason);
+    const client = new ControlPlaneClient({ baseUrl: BASE_URL, token: TOKEN }).withSignal(
+      controller.signal
+    );
+
+    await expect(
+      method === "GET" ? client.get("/skills") : client.post("/skills/import", {})
+    ).rejects.toBe(reason);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["headers", "body"])("propagates cancellation while waiting for %s", async (stage) => {
+    const controller = new AbortController();
+    const reason = new Error("MCP request cancelled");
+    let bodyReadStarted!: () => void;
+    const bodyRead = new Promise<void>((resolve) => {
+      bodyReadStarted = resolve;
+    });
+    fetchMock.mockImplementation(async (_url: string, init: { signal: AbortSignal }) => {
+      if (stage === "headers") {
+        return new Promise<Response>((_resolve, reject) => {
+          init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
+        });
+      }
+      return new Response(
+        new ReadableStream(
+          {
+            start(stream) {
+              init.signal.addEventListener("abort", () => stream.error(init.signal.reason), {
+                once: true,
+              });
+            },
+            pull() {
+              bodyReadStarted();
+            },
+          },
+          // Disable prefetch so pull signals an actual pending reader.read().
+          { highWaterMark: 0 }
+        )
+      );
+    });
+    const client = new ControlPlaneClient({ baseUrl: BASE_URL, token: TOKEN }).withSignal(
+      controller.signal
+    );
+
+    const rejected = expect(client.get("/skills")).rejects.toBe(reason);
+    if (stage === "body") await bodyRead;
+    controller.abort(reason);
+    await rejected;
+    expect(fetchMock.mock.calls[0][1].signal.aborted).toBe(true);
+  });
+
+  it("preserves the timeout on a request-bound client", async () => {
+    const controller = new AbortController();
+    fetchMock.mockImplementation(
+      async (_url: string, init: { signal: AbortSignal }) =>
+        new Promise<Response>((_resolve, reject) => {
+          init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
+        })
+    );
+    const client = new ControlPlaneClient({
+      baseUrl: BASE_URL,
+      token: TOKEN,
+      timeoutMs: 10,
+    }).withSignal(controller.signal);
+
+    await expect(client.get("/skills")).rejects.toThrow(/timed out after 10ms/);
+    expect(controller.signal.aborted).toBe(false);
   });
 
   it("keeps the timeout running while the body is read, not just the headers", async () => {
@@ -180,5 +253,64 @@ describe("ControlPlaneClient", () => {
   it("refuses a base URL that is not a URL at all", () => {
     const malformed = { baseUrl: "control-plane.example.com", token: TOKEN };
     expect(() => new ControlPlaneClient(malformed)).toThrow(/not a valid URL/);
+  });
+
+  it("refuses a base URL with a query, which every request would otherwise inherit", () => {
+    const withQuery = { baseUrl: `${BASE_URL}/?redirect=evil`, token: TOKEN };
+    expect(() => new ControlPlaneClient(withQuery)).toThrow(/query or fragment/);
+  });
+
+  it("refuses a value that is not a personal access token, without echoing it", () => {
+    const pasted = "ghp_notourtokenbutstillasecret";
+    let message = "";
+    try {
+      new ControlPlaneClient({ baseUrl: BASE_URL, token: pasted });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toMatch(/not a personal access token/);
+    expect(message).not.toContain(pasted);
+  });
+
+  it("refuses to follow a redirect, which would carry the token elsewhere", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({}));
+    await new ControlPlaneClient({ baseUrl: BASE_URL, token: TOKEN }).get("/sessions");
+
+    expect(fetchMock.mock.calls[0][1].redirect).toBe("error");
+  });
+
+  it("says what to do when the token is rejected", async () => {
+    fetchMock.mockImplementation(async () => new Response("Unauthorized", { status: 401 }));
+    const client = new ControlPlaneClient({ baseUrl: BASE_URL, token: TOKEN });
+
+    await expect(client.get("/sessions")).rejects.toThrow(/mistyped, revoked, or expired/);
+  });
+
+  it("points at the tool's grant when a resource route refuses for a missing permission", async () => {
+    fetchMock.mockImplementation(async () =>
+      jsonResponse(
+        { error: "Forbidden", code: "automation_action_denied", reason_code: "missing_permission" },
+        403
+      )
+    );
+    const client = new ControlPlaneClient({ baseUrl: BASE_URL, token: TOKEN });
+
+    await expect(client.post("/automations/a1/trigger", {})).rejects.toThrow(
+      /lacks a permission this action needs/
+    );
+  });
+
+  it("names the permission a token was not granted", async () => {
+    fetchMock.mockImplementation(async () =>
+      jsonResponse(
+        { error: "Forbidden", code: "permission_required", permission: "skills.manage" },
+        403
+      )
+    );
+    const client = new ControlPlaneClient({ baseUrl: BASE_URL, token: TOKEN });
+
+    await expect(client.post("/skills/import", {})).rejects.toThrow(
+      /This token was not granted skills\.manage/
+    );
   });
 });

@@ -1,19 +1,16 @@
 /**
  * Control-plane client for the MCP server.
  *
- * Authenticates with a personal access token the user issued to themselves in
- * the web UI. The control plane resolves it to that user, so requests are
- * attributable to a person and revocable by them.
+ * Authenticates with a personal access token the user issued to themselves in the web UI. The
+ * control plane resolves it to that user and narrows the user's permissions to the token's grant,
+ * so what this client can do is decided there, not here: a route refuses the token unless it
+ * accepts tokens, and a permission check fails unless the token was granted the permission.
  *
- * Reads go anywhere the owner's role allows. Writes reach only the routes that
- * declare `accessTokenWrites` — skill import and re-import, automation create,
- * and manual automation trigger — because the control plane refuses an
- * access-token principal every other mutating method whatever this client
- * sends.
- *
- * The token is a bearer credential on every request, so the base URL has to be
- * `https:` — or a loopback host, where nothing leaves the machine.
+ * The token is a bearer credential on every request, so the base URL has to be `https:`, or a
+ * loopback host where nothing leaves the machine, and redirects are refused rather than followed.
  */
+
+import { isPersonalAccessTokenFormat } from "@open-inspect/shared/types/personal-access-tokens";
 
 /** Longest control-plane response this client will buffer. */
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
@@ -36,18 +33,23 @@ export interface ControlPlaneClientConfig {
   timeoutMs?: number;
 }
 
-/**
- * Hosts for which plain `http:` is accepted. The access token travels in an
- * `Authorization` header on every request, so cleartext is only ever safe
- * when the request cannot leave the machine — which is exactly the local
- * development case that would otherwise have no way to run this server.
- */
-const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+interface RequestOptions {
+  query?: Record<string, string | number | undefined>;
+  body?: unknown;
+  headers?: Record<string, string>;
+}
 
 /**
- * Resolve the configured base URL, refusing one that would transmit the token
- * in cleartext. Checked before it is stored rather than at each `fetch`, so a
- * misconfigured server fails at startup instead of leaking on its first call.
+ * Hosts for which plain `http:` is accepted. The token travels in an `Authorization` header on
+ * every request, so cleartext is only safe when the request cannot leave the machine. `URL`
+ * reports an IPv6 host with its brackets.
+ */
+const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * Resolve the configured base URL, refusing one that would transmit the token in cleartext.
+ * Checked before it is stored rather than at each `fetch`, so a misconfigured server fails at
+ * startup instead of leaking on its first call.
  */
 function requireSecureBaseUrl(value: string): string {
   let url: URL;
@@ -64,7 +66,49 @@ function requireSecureBaseUrl(value: string): string {
       null
     );
   }
-  return value.replace(/\/+$/, "");
+  if (url.search || url.hash) {
+    throw new ControlPlaneError(
+      `Control plane URL must not have a query or fragment: ${value}`,
+      null
+    );
+  }
+  return `${url.origin}${url.pathname}`.replace(/\/+$/, "");
+}
+
+/** Refusal codes the control plane answers with, and what the user can do about each. */
+function refusalHint(status: number, body: string): string | null {
+  if (status === 401) {
+    return "The token was rejected: it is mistyped, revoked, or expired. Issue a new one under Settings > Access tokens.";
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const { code, permission, reason_code } = parsed as {
+    code?: unknown;
+    permission?: unknown;
+    reason_code?: unknown;
+  };
+  if (code === "permission_required" && typeof permission === "string") {
+    return (
+      `This token was not granted ${permission}, or its owner no longer holds it. ` +
+      "Issue a token that includes it under Settings > Access tokens."
+    );
+  }
+  if (reason_code === "missing_permission") {
+    // Resource routes refuse without naming the permission; the tool description names it.
+    return (
+      "This token lacks a permission this action needs, or its owner no longer holds it. " +
+      "The tool's description says which; issue a token that includes it under Settings > Access tokens."
+    );
+  }
+  if (code === "personal_access_token_not_accepted") {
+    return "This part of the API does not accept personal access tokens.";
+  }
+  return null;
 }
 
 export class ControlPlaneClient {
@@ -72,47 +116,76 @@ export class ControlPlaneClient {
   private readonly token: string;
   private readonly timeoutMs: number;
 
-  constructor(config: ControlPlaneClientConfig) {
+  constructor(
+    config: ControlPlaneClientConfig,
+    private readonly signal?: AbortSignal
+  ) {
     this.baseUrl = requireSecureBaseUrl(config.baseUrl);
+    if (!isPersonalAccessTokenFormat(config.token)) {
+      // The value itself is never echoed: it may be a real credential pasted into the wrong place.
+      throw new ControlPlaneError(
+        "OPEN_INSPECT_TOKEN is not a personal access token (expected oi_pat_ followed by 64 hex characters)",
+        null
+      );
+    }
     this.token = config.token;
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   }
 
-  /** GET a control-plane path and parse the JSON body. */
-  get(path: string, query?: Record<string, string | number | undefined>): Promise<unknown> {
-    return this.send("GET", path, { query });
+  /** Bind every HTTP step of one tool call without affecting concurrent calls. */
+  withSignal(signal: AbortSignal): ControlPlaneClient {
+    return new ControlPlaneClient(
+      { baseUrl: this.baseUrl, token: this.token, timeoutMs: this.timeoutMs },
+      signal
+    );
   }
 
-  /**
-   * POST a JSON body to a control-plane path and parse the JSON response.
-   *
-   * Reaches only the routes that opted an access token into writing; anywhere
-   * else the control plane answers 403 whatever this client sends
-   * (`principalMayUseMethod` in the control plane's `auth/principal.ts`).
-   */
+  /** GET a control-plane path and parse the JSON body. */
+  get(path: string, query?: Record<string, string | number | undefined>): Promise<unknown> {
+    return this.sendJson("GET", path, { query });
+  }
+
+  /** GET a control-plane path and return its text body unchanged. */
+  async getText(path: string): Promise<string> {
+    const { body } = await this.send("GET", path, { headers: { Accept: "text/*" } });
+    return body;
+  }
+
+  /** POST a JSON body to a control-plane path and parse the JSON response. */
   post(
     path: string,
     body: unknown,
     options?: { headers?: Record<string, string> }
   ): Promise<unknown> {
-    return this.send("POST", path, { body, headers: options?.headers });
+    return this.sendJson("POST", path, { body, headers: options?.headers });
+  }
+
+  private async sendJson(
+    method: "GET" | "POST",
+    path: string,
+    options: RequestOptions
+  ): Promise<unknown> {
+    const { body, status } = await this.send(method, path, options);
+    try {
+      return JSON.parse(body);
+    } catch {
+      throw new ControlPlaneError(
+        `${method} ${path} returned non-JSON: ${body.slice(0, 200)}`,
+        status
+      );
+    }
   }
 
   private async send(
     method: "GET" | "POST",
     path: string,
-    options: {
-      query?: Record<string, string | number | undefined>;
-      body?: unknown;
-      headers?: Record<string, string>;
-    }
-  ): Promise<unknown> {
+    options: RequestOptions
+  ): Promise<{ body: string; status: number }> {
     const url = new URL(`${this.baseUrl}${path}`);
     for (const [key, value] of Object.entries(options.query ?? {})) {
       if (value !== undefined) url.searchParams.set(key, String(value));
     }
 
-    const request = { method, url: url.toString() };
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.token}`,
       Accept: "application/json",
@@ -125,60 +198,54 @@ export class ControlPlaneClient {
     let response: Response;
     let body: string;
     try {
-      response = await fetch(request.url, {
+      // A late response to an earlier step must not dispatch a cancelled write.
+      this.signal?.throwIfAborted();
+      response = await fetch(url.toString(), {
         method,
         headers,
         ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
-        signal: controller.signal,
+        // A redirect would carry the bearer token to wherever the response points. The control
+        // plane never redirects an API call, so one means something in between is misbehaving.
+        redirect: "error",
+        signal: this.signal ? AbortSignal.any([this.signal, controller.signal]) : controller.signal,
       });
-      // Inside the same timer as the fetch: `fetch` resolves on headers, so a
-      // control plane that sends headers and then stalls the body would hang
-      // the tool call forever if the timeout ended here.
+      // Inside the same timer as the fetch: `fetch` resolves on headers, so a control plane that
+      // sends headers and then stalls the body would hang the tool call if the timeout ended here.
       body = await readCapped(response);
     } catch (cause) {
-      // A cap breach already says exactly what happened; rewrapping it as a
-      // transport failure would hide the one detail that matters.
+      this.signal?.throwIfAborted();
+      // A cap breach already says exactly what happened; rewrapping it would hide that.
       if (cause instanceof ControlPlaneError) throw cause;
       const reason = controller.signal.aborted
         ? `timed out after ${this.timeoutMs}ms`
         : cause instanceof Error
           ? cause.message
           : String(cause);
-      throw new ControlPlaneError(`${request.method} ${path} failed: ${reason}`, null);
+      throw new ControlPlaneError(`${method} ${path} failed: ${reason}`, null);
     } finally {
       clearTimeout(timer);
     }
 
     if (!response.ok) {
-      // 401 here means the token was rejected: mistyped, revoked, or expired.
-      // Issue a new one in the web UI under Settings -> Access tokens.
+      const hint = refusalHint(response.status, body);
       throw new ControlPlaneError(
-        `${request.method} ${path} returned ${response.status}: ${body.slice(0, 500)}`,
+        `${method} ${path} returned ${response.status}: ${body.slice(0, 500)}` +
+          (hint ? `\n${hint}` : ""),
         response.status
       );
     }
 
-    try {
-      return JSON.parse(body);
-    } catch {
-      throw new ControlPlaneError(
-        `${request.method} ${path} returned non-JSON: ${body.slice(0, 200)}`,
-        response.status
-      );
-    }
+    return { body, status: response.status };
   }
 }
 
 /**
  * Read a response body, refusing to buffer more than `MAX_RESPONSE_BYTES`.
  *
- * Streamed rather than `response.text()`-then-measured: the cap has to bound
- * what is allocated, and a session diff can be arbitrarily large. Counting is
- * in bytes off the wire, not string length — `String.length` is UTF-16 code
- * units, which undercounts every multi-byte character.
- *
- * An oversized body is an error rather than a truncation, because truncated
- * JSON only resurfaces later as a parse failure that blames the wrong thing.
+ * Streamed rather than `response.text()`-then-measured: the cap has to bound what is allocated,
+ * and a session diff can be arbitrarily large. Counting is in bytes off the wire, not string
+ * length. An oversized body is an error rather than a truncation, because truncated JSON only
+ * resurfaces later as a parse failure that blames the wrong thing.
  */
 async function readCapped(response: Response): Promise<string> {
   if (!response.body) return "";
@@ -201,8 +268,7 @@ async function readCapped(response: Response): Promise<string> {
       text += decoder.decode(value, { stream: true });
     }
   } finally {
-    // An abort or an over-cap throw leaves the stream open; cancelling lets
-    // the socket close rather than leaking it for the process's lifetime.
+    // An abort or an over-cap throw leaves the stream open; cancelling lets the socket close.
     void reader.cancel().catch(() => {});
   }
   return text + decoder.decode();
