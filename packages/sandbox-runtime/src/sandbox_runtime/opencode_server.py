@@ -298,19 +298,15 @@ class OpenCodeServer:
         return installed
 
     def _setup_managed_oauth(self) -> None:
-        """Sync OpenCode auth entries with the control-plane-managed providers.
-
-        Writes an OAuth sentinel for every provider the control plane brokers,
-        and drops sentinels for providers it no longer brokers. The removal
-        matters on snapshot restores: OpenCode prefers an OAuth entry over a
-        provider's API key env var, so a leftover sentinel would shadow a key
-        the operator installed to replace the subscription.
-        """
+        """Write OpenCode OAuth sentinels for control-plane-managed providers."""
         openai_managed = os.environ.get("OPENAI_OAUTH_MANAGED")
         xai_managed = os.environ.get("XAI_OAUTH_MANAGED")
+        if not openai_managed and not xai_managed:
+            return
 
         try:
             auth_dir = Path.home() / ".local" / "share" / "opencode"
+            auth_dir.mkdir(parents=True, exist_ok=True)
 
             oauth_entry = {
                 "type": "oauth",
@@ -327,7 +323,7 @@ class OpenCodeServer:
             auth_file = auth_dir / "auth.json"
             tmp_file = auth_dir / ".auth.json.tmp"
 
-            existing_entries: dict[str, Any] = {}
+            existing_entries = {}
             if auth_file.exists():
                 try:
                     existing = json.loads(auth_file.read_text())
@@ -335,7 +331,7 @@ class OpenCodeServer:
                         existing_entries = existing
                 except (OSError, json.JSONDecodeError):
                     self.log.warn("managed_oauth.existing_auth_invalid")
-            retained = {
+            existing_entries = {
                 key: value
                 for key, value in existing_entries.items()
                 if not (
@@ -344,11 +340,7 @@ class OpenCodeServer:
                     and key not in entries
                 )
             }
-            merged = {**retained, **entries}
-            if not entries and merged == existing_entries:
-                return
-            entries = merged
-            auth_dir.mkdir(parents=True, exist_ok=True)
+            entries = {**existing_entries, **entries}
 
             # Write to a temp file created with 0o600 from the start, then
             # atomically rename so the target is never world-readable.

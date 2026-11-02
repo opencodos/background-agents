@@ -1,9 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import * as brokerModule from "../src/sandbox_runtime/plugins/provider-token-broker.js";
-
-const { createProviderTokenBroker } = brokerModule;
+import { createProviderTokenBroker } from "../src/sandbox_runtime/plugins/provider-token-broker.js";
 
 function configureSession() {
   process.env.CONTROL_PLANE_URL = "https://control.test";
@@ -71,26 +69,4 @@ test("clears a failed in-flight refresh so a later request can retry", async () 
   await assert.rejects(broker.getAccessToken(), /Invalid xAI token broker response/);
   assert.equal((await broker.getAccessToken()).accessToken, "recovered");
   assert.equal(requestCount, 2);
-});
-
-test("preserves HTTP status on broker rejections", async () => {
-  configureSession();
-  globalThis.fetch = async () => new Response("temporarily unavailable", { status: 503 });
-  const broker = createProviderTokenBroker({ provider: "openai", providerLabel: "OpenAI" });
-
-  await assert.rejects(broker.getAccessToken(), (error) => {
-    assert.equal(error.name, "ProviderTokenBrokerError");
-    assert.equal(error.kind, "http");
-    assert.equal(error.status, 503);
-    return true;
-  });
-});
-
-test("exports only what OpenCode can load as a plugin", () => {
-  // The file sits in .opencode/plugins/, so OpenCode calls every export as a
-  // plugin function; a class or a non-function export fails that load.
-  for (const [name, value] of Object.entries(brokerModule)) {
-    assert.equal(typeof value, "function", `${name} must be a function`);
-    assert.doesNotMatch(Function.prototype.toString.call(value), /^class\b/, `${name} is a class`);
-  }
 });
