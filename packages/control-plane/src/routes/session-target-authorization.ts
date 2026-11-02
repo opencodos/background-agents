@@ -1,5 +1,4 @@
 import type { PermissionId } from "@open-inspect/shared/rbac";
-import { isSelfActingPrincipal } from "../auth/principal";
 import {
   evaluateEnvironmentAdmission,
   ownedResourceAdmissionResponse,
@@ -31,9 +30,9 @@ export async function authorizeSessionTarget(
       ? "repositories.use"
       : null;
 
-  // An access token is its owner, so it faces the checks that owner would: skipping them would
-  // let the credential aim an automation at repositories and environments the user may not use.
-  if (permission && (isSelfActingPrincipal(ctx.principal) || ctx.principal?.kind === "service")) {
+  // Sandboxes act within their session's own target; every other principal, including a personal
+  // access token, must hold the permission itself.
+  if (permission && ctx.principal && ctx.principal.kind !== "sandbox") {
     if (
       ctx.principal.kind === "service" &&
       !serviceAllowsPermission(ctx.principal.service, permission)

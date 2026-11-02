@@ -23,8 +23,8 @@ import {
   sessionListResponseSchema,
   sessionReadActionSchema,
 } from "@open-inspect/shared/types/sessions";
-import { canonicalUserIdOf } from "../auth/principal";
 import { isCanonicalUserId } from "@open-inspect/shared/user-id";
+import { canonicalUserIdOf } from "../auth/principal";
 import { SessionIndexStore } from "../db/session-index";
 import {
   error,
@@ -136,7 +136,7 @@ export async function handleListSessions(
     visibility,
     scope,
   } = parsedQuery.data;
-  const viewerUserId = canonicalUserIdOf(ctx.principal) ?? ctx.authorization?.userId ?? undefined;
+  const viewerUserId = canonicalUserIdOf(ctx.principal) ?? ctx.authorization?.userId;
   const legacyStarted =
     ownerFilter === undefined &&
     createdBy.length === 1 &&
@@ -471,7 +471,11 @@ export const sessionIndexRoutes = new Hono<ControlPlaneHonoEnv>();
 
 sessionIndexRoutes.get(
   "/sessions",
-  admit({ ...GITHUB_USER_OR_SERVICE_ROUTE, authorization: requirePermission("sessions.read") }),
+  admit({
+    ...GITHUB_USER_OR_SERVICE_ROUTE,
+    authorization: requirePermission("sessions.read"),
+    personalAccessTokens: "accept",
+  }),
   (c) => dispatch(c, handleListSessions)
 );
 sessionIndexRoutes.get(

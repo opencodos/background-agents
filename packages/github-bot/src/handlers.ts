@@ -15,6 +15,11 @@ import { reviewPromptFields } from "./review-start";
 
 export type { HandlerResult } from "./session-startup";
 
+/** GitHub logins are case-insensitive. */
+function isBotLogin(login: string | undefined, botUsername: string): boolean {
+  return login?.toLowerCase() === botUsername.toLowerCase();
+}
+
 /**
  * The logins a review request may name to reach this bot: the webhook App itself and, when a
  * second App submits the reviews, that App too — it is the one GitHub lists as the reviewer, so
@@ -34,7 +39,7 @@ export function isReviewRequestedForBot(
   const parsed = requestedReviewerPayloadSchema.safeParse(payload);
   if (!parsed.success) return false;
   const login = parsed.data.requested_reviewer?.login;
-  return login !== undefined && acceptedLogins.includes(login);
+  return acceptedLogins.some((accepted) => isBotLogin(login, accepted));
 }
 
 export async function handleReviewRequested(
@@ -45,7 +50,7 @@ export async function handleReviewRequested(
 ): Promise<HandlerResult> {
   const { pull_request: pr, repository: repo, requested_reviewer, sender } = payload;
 
-  if (!requested_reviewer || !reviewRequestLogins(env).includes(requested_reviewer.login)) {
+  if (!reviewRequestLogins(env).some((login) => isBotLogin(requested_reviewer?.login, login))) {
     log.debug("handler.review_not_for_bot", {
       trace_id: traceId,
       requested_reviewer: requested_reviewer?.login,
@@ -138,7 +143,7 @@ export async function handleIssueComment(
     return { outcome: "skipped", skip_reason: "no_mention" };
   }
 
-  if (sender.login === env.GITHUB_BOT_USERNAME) {
+  if (isBotLogin(sender.login, env.GITHUB_BOT_USERNAME)) {
     log.debug("handler.self_comment_ignored", { trace_id: traceId });
     return { outcome: "skipped", skip_reason: "self_comment" };
   }
@@ -185,7 +190,7 @@ export async function handleReviewComment(
     return { outcome: "skipped", skip_reason: "no_mention" };
   }
 
-  if (sender.login === env.GITHUB_BOT_USERNAME) {
+  if (isBotLogin(sender.login, env.GITHUB_BOT_USERNAME)) {
     log.debug("handler.self_comment_ignored", { trace_id: traceId });
     return { outcome: "skipped", skip_reason: "self_comment" };
   }

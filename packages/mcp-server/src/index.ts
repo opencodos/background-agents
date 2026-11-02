@@ -1,24 +1,21 @@
 /**
  * MCP server over the Open-Inspect control plane.
  *
- * Runs locally over stdio and authenticates with a personal access token, so
- * every request is attributable to the user who issued it. Reads are bounded
- * by that user's role; the writes are skill import and re-import, automation
- * create, and manual automation trigger, whose routes opt a token in
- * explicitly. The control plane refuses an access-token principal every other
- * mutating method, whatever this server sends.
+ * Runs locally over stdio and authenticates with a personal access token, so every request is
+ * attributable to the user who issued it and bounded by the permissions the token was granted.
+ * The control plane enforces that bound; this server only presents the tools.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
 import { ControlPlaneClient, ControlPlaneError } from "./client";
 import { TOOLS } from "./tools";
 
 function requireEnv(name: string): string {
   const value = process.env[name]?.trim();
   if (!value) {
-    // stderr, not stdout: stdout is the MCP transport and any stray byte
-    // there corrupts the protocol stream.
+    // stderr, not stdout: stdout is the MCP transport and any stray byte there corrupts it.
     console.error(`open-inspect-mcp: ${name} is required`);
     process.exit(1);
   }
@@ -33,30 +30,37 @@ export function createServer(client: ControlPlaneClient): McpServer {
       tool.name,
       {
         title: tool.title,
-        description: tool.description,
-        inputSchema: tool.inputSchema,
+        description: `${tool.description} Requires a token granted ${tool.requires}.`,
+        // The SDK types its schemas with the workspace's hoisted zod, which a test dependency pins
+        // below the zod these schemas and shared's are built with. Both are zod 4, converted and
+        // validated through the schema objects' own methods, so only the declared types differ;
+        // tools.test.ts lists and calls every tool over a real transport to keep that true.
+        inputSchema: tool.inputSchema as unknown as ZodRawShapeCompat,
         annotations: {
           readOnlyHint: tool.readOnly,
-          // Additive unless the tool says otherwise: a client uses this to
-          // decide how hard to prompt, so a write that replaces what future
+          // A client uses this to decide how hard to prompt, so a write that replaces what later
           // readers act on has to declare itself even when it is recoverable.
           destructiveHint: tool.destructive ?? false,
           openWorldHint: true,
         },
       },
-      async (args: Record<string, unknown>) => {
+      async (args: Record<string, unknown>, extra) => {
         try {
-          const result = await tool.run(client, args);
-          return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+          const result = await tool.run(client.withSignal(extra.signal), args);
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: typeof result === "string" ? result : JSON.stringify(result, null, 2),
+              },
+            ],
+          };
         } catch (error) {
-          // Surface the failure to the model as tool output rather than
-          // throwing: a 401 or a 404 is information it can act on.
+          // A refusal is information the model can act on, so it is tool output, not a throw.
           const detail =
-            error instanceof ControlPlaneError
+            error instanceof ControlPlaneError || error instanceof Error
               ? error.message
-              : error instanceof Error
-                ? error.message
-                : String(error);
+              : String(error);
           return { content: [{ type: "text" as const, text: detail }], isError: true };
         }
       }
@@ -67,15 +71,21 @@ export function createServer(client: ControlPlaneClient): McpServer {
 }
 
 async function main(): Promise<void> {
-  const client = new ControlPlaneClient({
-    baseUrl: requireEnv("OPEN_INSPECT_CONTROL_PLANE_URL"),
-    token: requireEnv("OPEN_INSPECT_TOKEN"),
-  });
+  let client: ControlPlaneClient;
+  try {
+    client = new ControlPlaneClient({
+      baseUrl: requireEnv("OPEN_INSPECT_CONTROL_PLANE_URL"),
+      token: requireEnv("OPEN_INSPECT_TOKEN"),
+    });
+  } catch (error) {
+    console.error(`open-inspect-mcp: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
   await createServer(client).connect(new StdioServerTransport());
 }
 
-// Skipped under test, where the module is imported for createServer alone.
-if (process.env.NODE_ENV !== "test") {
+// Imported for createServer alone by the tests, which set VITEST.
+if (!process.env.VITEST) {
   main().catch((error: unknown) => {
     console.error("open-inspect-mcp: fatal:", error);
     process.exit(1);

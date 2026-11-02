@@ -101,14 +101,10 @@ type EnforcedIdentity<R extends IdentityRoute> = R extends RequiresUserRoute
 export function deriveIdentity(principal: Principal | undefined): DerivedIdentity | null {
   if (!principal) return null;
   switch (principal.kind) {
-    // An access token is its owner: it carries the same canonical user id a
-    // browser session would. Of the routes here it reaches only automation
-    // create, whose policy opts the credential into writing; session create
-    // and the ws-token route declare nothing and stay refused, so deriving
-    // `user` here describes the identity without widening what the token can
-    // do.
+    // A personal access token acts as its owner, so it implies the same identity a browser
+    // session would; whether a token may reach an identity route at all is the route's opt-in.
     case "user":
-    case "access-token":
+    case "personal-access-token":
       return {
         participantUserId: principal.userId,
         canonicalUserId: principal.userId,

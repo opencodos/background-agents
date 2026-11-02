@@ -228,10 +228,26 @@ describe("AuditLogSettings", () => {
     ["team.binding_added", "Team channel binding added"],
     ["team.binding_removed", "Team channel binding removed"],
     ["automation.executor_changed", "Automation executor changed"],
+    ["personal_access_token.created", "Personal access token created"],
+    ["personal_access_token.revoked", "Personal access token revoked"],
+    ["workspace.personal_access_token_policy_updated", "Access token policy updated"],
   ])("labels %s as an operation in the workspace audit viewer", (action, label) => {
     const article = renderSingle(createEvent("applied", { action }));
     expect(article.getByText(label)).toBeInTheDocument();
     expect(article.getByText("Applied")).toBeInTheDocument();
+  });
+
+  it("attributes a token-authorized request to the token and its owner", () => {
+    const article = renderSingle({
+      ...createAuthorizationEvent("authorization.request_allowed", "applied", {
+        ...decisionMetadata(200),
+        personalAccessTokenId: "token-1",
+      }),
+      principalKind: "personal-access-token",
+    });
+    expect(
+      article.getByText("Personal access token / token-1 / User / actor-snapshot-id")
+    ).toBeInTheDocument();
   });
 
   it("labels private session break-glass reads as operations", () => {
@@ -495,16 +511,6 @@ describe("AuditLogSettings", () => {
 
     expect(card.getByText("Allowed")).toBeInTheDocument();
     expect(card.getByText("Not recorded")).toBeInTheDocument();
-  });
-
-  it("names an access token that recorded no actor", () => {
-    // With no actor snapshot, the principal kind is all the card can show, so
-    // every kind needs its own label rather than a derived one.
-    const card = renderSingle(
-      createEvent("applied", { principalKind: "access-token", actorUserIdSnapshot: null })
-    );
-
-    expect(card.getByText("Access token principal")).toBeInTheDocument();
   });
 
   it("keeps the raw operation result and metadata inspectable", async () => {

@@ -27,7 +27,7 @@ interface AuthorizationDecisionEvidence {
 export type RouteAuthorizationDecision =
   | (AuthorizationDecisionEvidence & {
       kind: "allowed";
-      admission: "user" | "service" | "sandbox";
+      admission: "user" | "service" | "sandbox" | "personal-access-token";
       auditAllowed: boolean;
       shadowReason?: string;
       shadowDenials?: readonly { sessionId: string; reason: string }[];
@@ -77,9 +77,6 @@ export async function auditRouteAuthorizationDecision(input: {
   const allowed = decision.kind === "allowed";
   const requiredPermission =
     decision.kind === "allowed" ? decision.effectivePermissions[0] : decision.failedPermission;
-  // An access token acts as its owner, so the audit row names that person.
-  // `canonicalUserIdOf` keeps this the same resolution the admission path
-  // uses; only the service fallback onto a loaded authorization is local.
   const actorUserId =
     principal.kind === "service"
       ? (principal.actor?.canonicalUserId ?? input.ctx.authorization?.userId ?? null)
@@ -145,6 +142,9 @@ export async function auditRouteAuthorizationDecision(input: {
         }
       : {}),
     ...(principal.kind === "sandbox" ? { sessionId: principal.sessionId } : {}),
+    ...(principal.kind === "personal-access-token"
+      ? { personalAccessTokenId: principal.tokenId }
+      : {}),
   } satisfies AuthorizationDecisionMetadataV1;
 
   try {
@@ -208,7 +208,14 @@ export async function auditPrivateSessionBreakGlass(
       sessionId,
       teamId,
       "session.private_break_glass",
-      JSON.stringify({ before: {}, requested: {}, after: {} })
+      JSON.stringify({
+        before: {},
+        requested: {},
+        after: {},
+        ...(principal.kind === "personal-access-token"
+          ? { personalAccessTokenId: principal.tokenId }
+          : {}),
+      })
     )
     .run();
 }
