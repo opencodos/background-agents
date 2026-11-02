@@ -1,22 +1,3 @@
-// Not exported: OpenCode installs this file beside the auth plugins and calls
-// every export of a plugin file as a plugin, and a class cannot be called
-// without `new`. Callers recognize the error by its name instead.
-class ProviderTokenBrokerError extends Error {
-  constructor(message, { kind, status = null, providerCode = null }) {
-    super(message);
-    this.name = "ProviderTokenBrokerError";
-    this.kind = kind;
-    this.status = status;
-    /**
-     * The control plane's own error code when it sent one. An HTTP status
-     * cannot separate a credential that needs reconnection from transient
-     * exchange contention — both answer 409 — so callers deciding whether to
-     * abandon a subscription must read this instead.
-     */
-    this.providerCode = providerCode;
-  }
-}
-
 const REFRESH_BUFFER_MS = 5 * 60 * 1000;
 const TOKEN_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_EXPIRES_IN_SECONDS = 3600;
@@ -40,9 +21,7 @@ function validateBrokerResponse(result, providerLabel) {
         !Number.isFinite(result.expiresIn) ||
         result.expiresIn <= 0))
   ) {
-    throw new ProviderTokenBrokerError(`Invalid ${providerLabel} token broker response`, {
-      kind: "invalid_response",
-    });
+    throw new Error(`Invalid ${providerLabel} token broker response`);
   }
 }
 
@@ -60,9 +39,7 @@ export function createProviderTokenBroker({ provider, providerLabel }) {
     const authToken = process.env.SANDBOX_AUTH_TOKEN;
     const sessionId = getSessionId();
     if (!controlPlaneUrl || !authToken || !sessionId) {
-      throw new ProviderTokenBrokerError(`Missing environment for ${providerLabel} token refresh`, {
-        kind: "configuration",
-      });
+      throw new Error(`Missing environment for ${providerLabel} token refresh`);
     }
 
     const response = await fetch(
@@ -74,18 +51,8 @@ export function createProviderTokenBroker({ provider, providerLabel }) {
       }
     );
     if (!response.ok) {
-      const raw = (await response.text()).slice(0, 200);
-      let providerCode = null;
-      try {
-        const parsed = JSON.parse(raw);
-        if (typeof parsed?.code === "string" && parsed.code) providerCode = parsed.code;
-      } catch {
-        // A non-JSON body carries no code; the status still classifies it.
-      }
-      throw new ProviderTokenBrokerError(
-        `${providerLabel} token refresh failed (${response.status}): ${raw}`,
-        { kind: "http", status: response.status, providerCode }
-      );
+      const body = (await response.text()).slice(0, 200);
+      throw new Error(`${providerLabel} token refresh failed (${response.status}): ${body}`);
     }
 
     const result = await response.json();
