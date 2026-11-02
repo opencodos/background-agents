@@ -776,9 +776,10 @@ scoped OAuth. New sessions use an explicit choice, then a provider-account defau
 retain legacy scoped OAuth or API-key behavior. Setting a default affects only future sessions;
 operators may remove legacy keys after legacy-bound sessions are no longer needed. See
 [Using OpenAI Models](./OPENAI_MODELS.md) and
-[Using Grok with a SuperGrok Subscription](./GROK_MODELS.md). A plain provider API key visible to
-the session (`OPENAI_API_KEY`, `XAI_API_KEY`) disables broker mode for that provider and is injected
-into the sandbox like any other secret, because OpenCode reads those variables directly.
+[Using Grok with a SuperGrok Subscription](./GROK_MODELS.md). The session's resolved authentication
+mode, not the presence of a key, decides broker mode: when a provider is brokered, the control plane
+strips its plain API key (`OPENAI_API_KEY`, `XAI_API_KEY`) from the sandbox env; in API-key mode the
+key is injected like any other secret, because OpenCode reads those variables directly.
 
 > **LLM API keys** (e.g., `ANTHROPIC_API_KEY` for Claude models) are added as global secrets. A
 > deployment can instead configure `anthropic_api_key` in Terraform to inject one fleet-wide key

@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect } from "vitest";
+import { parseRepositoryFullName } from "@open-inspect/shared/types/repositories";
 import { buildCodeReviewPrompt, buildCommentActionPrompt } from "../src/prompts";
 
 /**
@@ -56,6 +57,7 @@ function runReviewSubmission(
     });
     return {
       status: result.status,
+      stderr: result.stderr,
       curlCalls: existsSync(curlLog) ? readFileSync(curlLog, "utf8") : "",
       ghCalls: existsSync(ghLog) ? readFileSync(ghLog, "utf8") : "",
     };
@@ -209,7 +211,7 @@ describe("buildCodeReviewPrompt", () => {
       expect(run.status).toBe(0);
       expect(run.curlCalls.split("\n").map((line) => line.split(" https://")[1])).toEqual([
         "cp.test/sessions/sess-1/review-ownership",
-        "cp.test/sessions/sess-1/review-token",
+        "cp.test/sessions/sess-1/review-token?repository=acme%2Fwidgets",
         "cp.test/sessions/sess-1/review-ownership",
         undefined,
       ]);
@@ -221,11 +223,32 @@ describe("buildCodeReviewPrompt", () => {
       expect(run.ghCalls).toContain("\n api repos/acme/widgets/statuses/abc123 --method POST");
     });
 
+    it("names a nested-namespace repository the control plane parses back unchanged", () => {
+      const run = runReviewSubmission(
+        buildCodeReviewPrompt({ ...baseParams, owner: "group/subgroup", hasReviewerApp: true }),
+        0
+      );
+
+      expect(run.status).toBe(0);
+      const url = run.curlCalls
+        .split("\n")
+        .map((line) => line.split(" ").find((arg) => arg.includes("/review-token")))
+        .find(Boolean);
+      const repository = new URL(url!).searchParams.get("repository");
+      expect(parseRepositoryFullName(repository!)).toEqual({
+        repoOwner: "group/subgroup",
+        repoName: "widgets",
+      });
+    });
+
     // 22 is curl -f's exit on an HTTP error such as the 404 from a control
     // plane without reviewer credentials; 18 is a transfer cut short after a
     // complete body arrived. Neither may fall through to another identity.
     it.each([22, 18])("releases the lease and writes nothing when curl exits %i", (curlExit) => {
       const run = runReviewSubmission(prompt, curlExit);
+
+      // The agent's final response must say the review was not submitted, so the script says why.
+      expect(run.stderr).toContain("review not submitted: the reviewer token could not be fetched");
 
       expect(run.curlCalls).toContain("https://cp.test/sessions/sess-1/review-token");
       expect(run.curlCalls).toContain("-X DELETE");
@@ -240,6 +263,21 @@ describe("buildCodeReviewPrompt", () => {
       expect(run.ghCalls).not.toContain("/statuses/");
       expect(run.curlCalls).toContain("-X DELETE");
     });
+
+    // The `&&` chain only stops this one command; the agent could still retry the POST
+    // by hand under the webhook App's credential, so the prompt forbids it outright.
+    it("forbids resubmitting with any other credential after a token-fetch failure", () => {
+      const guidance = prompt.replace(/\s+/g, " ");
+
+      expect(guidance).toContain(
+        "If fetching the review token fails, do not submit the review with any other credential: " +
+          'never rerun the review POST without the `GH_TOKEN="$review_token"` prefix or with another token.'
+      );
+      expect(guidance).toContain(
+        "Stop, submit nothing to GitHub, and end with a final response stating that the review " +
+          "was not submitted because the reviewer token could not be fetched, including the error output."
+      );
+    });
   });
 
   it("leaves the review POST on the default credential without a reviewer App", () => {
@@ -247,6 +285,7 @@ describe("buildCodeReviewPrompt", () => {
 
     expect(prompt).not.toContain("review-token");
     expect(prompt).not.toContain("GH_TOKEN");
+    expect(prompt).not.toContain("If fetching the review token fails");
     const run = runReviewSubmission(prompt, 0);
     expect(run.ghCalls).toContain(
       "\n api repos/acme/widgets/pulls/42/reviews --method POST --input /tmp/review.json"

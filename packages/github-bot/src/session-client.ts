@@ -32,6 +32,10 @@ export async function createSession(
     scmLogin: string;
     scmUserId: string;
     scmAvatarUrl: string;
+    /**
+     * A PR review's generation fence. Only review sessions carry one, and only they may mint the
+     * reviewer App's token.
+     */
     githubReview?: GitHubReviewFence;
   }
 ): Promise<SessionCreationResult> {

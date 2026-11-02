@@ -51,6 +51,14 @@ run "reviewer_app_disabled_by_default" {
     condition     = var.github_reviewer_username == "" && var.github_reviewer_app_id == ""
     error_message = "Existing deployments must not need a reviewer App."
   }
+  assert {
+    condition = (
+      !contains(module.control_plane_worker.secret_binding_names, "GITHUB_REVIEWER_APP_ID") &&
+      !contains(module.control_plane_worker.secret_binding_names, "GITHUB_REVIEWER_APP_PRIVATE_KEY") &&
+      !contains(module.control_plane_worker.secret_binding_names, "GITHUB_REVIEWER_APP_INSTALLATION_ID")
+    )
+    error_message = "Without a reviewer App, the control plane must bind no empty reviewer secrets."
+  }
 }
 
 run "reviewer_app_coexists_with_main_app" {

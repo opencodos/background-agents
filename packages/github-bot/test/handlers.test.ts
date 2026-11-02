@@ -2164,6 +2164,53 @@ describe("handleReviewRequested", () => {
   });
 });
 
+describe("review session marking", () => {
+  // Only a fenced review session may mint the reviewer App's token, so a mention answered on
+  // the PR or in a review thread can never approve under that App.
+  it.each([
+    {
+      action: "review",
+      fenced: true,
+      run: (env: Env) =>
+        handleReviewRequested(env, createMockLogger(), reviewRequestedPayload, "trace-mark"),
+    },
+    {
+      action: "auto_review",
+      fenced: true,
+      run: (env: Env) =>
+        handlePullRequestReviewTrigger(
+          env,
+          createMockLogger(),
+          pullRequestReviewTriggerPayload,
+          "trace-mark"
+        ),
+    },
+    {
+      action: "comment",
+      fenced: false,
+      run: (env: Env) =>
+        handleIssueComment(env, createMockLogger(), issueCommentPayload, "trace-mark"),
+    },
+    {
+      action: "review_comment",
+      fenced: false,
+      run: (env: Env) =>
+        handleReviewComment(env, createMockLogger(), reviewCommentPayload, "trace-mark"),
+    },
+  ])("fences a $action session only when it is a review: $fenced", async ({ fenced, run }) => {
+    const env = createMockEnv();
+
+    await run(env);
+
+    const { githubReview } = sessionCreateBody(getControlPlaneFetch(env));
+    if (fenced) {
+      expect(githubReview).toMatchObject({ prNumber: 42, headSha: expect.any(String) });
+    } else {
+      expect(githubReview).toBeUndefined();
+    }
+  });
+});
+
 describe("bot login matching", () => {
   const recasedBotLogin = "Test-Bot[bot]";
   const recasedBotSender = {
@@ -2181,6 +2228,43 @@ describe("bot login matching", () => {
     expect(isReviewRequestedForBot({ requested_reviewer: { login } }, ["test-bot[bot]"])).toBe(
       forBot
     );
+  });
+
+  it("routes a review request for the reviewer App when its configured login differs in case", async () => {
+    const env = { ...createMockEnv(), GITHUB_REVIEWER_USERNAME: "Test-Reviewer[bot]" } as Env;
+    const logins = reviewRequestLogins(env);
+    const payload = {
+      ...reviewRequestedPayload,
+      requested_reviewer: { login: "test-reviewer[bot]" },
+    };
+
+    expect(isReviewRequestedForBot(payload, logins)).toBe(true);
+    const result = await handleReviewRequested(env, createMockLogger(), payload, "trace-case");
+    expect(result).toMatchObject({ outcome: "processed", handler_action: "review" });
+  });
+
+  it("comments on a PR the reviewer App opened when its configured login differs in case", async () => {
+    vi.mocked(getGitHubConfig).mockResolvedValue({
+      ...defaultConfig,
+      allowedTriggerUsers: ["test-reviewer[bot]"],
+    });
+    const env = { ...createMockEnv(), GITHUB_REVIEWER_USERNAME: "Test-Reviewer[bot]" } as Env;
+    const payload: PullRequestReviewTriggerPayload = {
+      ...pullRequestReviewTriggerPayload,
+      pull_request: {
+        ...pullRequestReviewTriggerPayload.pull_request,
+        user: { login: "test-reviewer[bot]" },
+      },
+      sender: {
+        login: "test-reviewer[bot]",
+        id: 1005,
+        avatar_url: "https://avatars.githubusercontent.com/u/1005",
+      },
+    };
+
+    await handlePullRequestReviewTrigger(env, createMockLogger(), payload, "trace-case");
+
+    expect(promptSendBody(getControlPlaneFetch(env)).content).toContain('"event": "COMMENT"');
   });
 
   it("reviews when the requested reviewer differs from the bot login only in case", async () => {

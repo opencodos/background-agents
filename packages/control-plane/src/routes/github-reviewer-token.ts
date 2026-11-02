@@ -8,20 +8,40 @@
  * no-store prevents downstream caching of the write credential.
  *
  * Admission alone would hand the token to any session's sandbox, so the handler
- * also requires the session to have been spawned by the GitHub bot: the only
- * spawner whose prompt submits reviews. `spawn_source` comes from the
- * authenticated creating principal, not from anything the sandbox controls.
+ * also requires a GitHub bot review session: spawned by the GitHub bot (the only
+ * spawner whose prompt submits reviews) for a review request or auto-review, not
+ * for a PR comment or review-thread mention, whose prompt must not approve.
+ * `spawn_source` comes from the authenticated creating principal and
+ * `github_review` from that principal's create request; the sandbox controls
+ * neither. A review session stays open to collaborators' follow-up prompts, so
+ * the token is further issued only while the session is processing the GitHub
+ * bot's own prompt: a collaborator cannot steer the agent into approving under
+ * the reviewer App.
+ *
+ * The token covers only the repository the sandbox names as the one under
+ * review (or, when it names none, the repository its review fence records), and
+ * only when that repository is the fenced one and a member of the session within
+ * the owner team's current grants. Nothing persisted records which member is under
+ * review (an environment launch orders members by the environment), and
+ * requesting the session's other repositories would fail wherever the
+ * reviewer App is not installed on them.
  */
 
 import { resolveAppName } from "@open-inspect/shared/app-name";
+import { parseRepositoryFullName } from "@open-inspect/shared/types/repositories";
 import { Hono } from "hono";
 import { getCachedInstallationToken, getGitHubReviewerAppConfig } from "../auth/github-app";
 import { SessionIndexStore } from "../db/session-index";
-import { readCachedInstallationRepositories } from "../repos/cache";
+import { SessionRepositoryStore } from "../db/session-repositories";
 import { createLogger } from "../logger";
-import { admit, dispatch } from "../routing/admit";
-import { resolveRepositoryCredentialScope } from "../source-control/repository-scope";
+import { readCachedInstallationRepositories } from "../repos/cache";
+import { admit } from "../routing/admit";
 import type { ControlPlaneHonoEnv } from "../routing/hono-env";
+import { activePromptAuthorSchema } from "../session/active-prompt-author";
+import { SessionInternalPaths } from "../session/contracts";
+import type { SessionRuntimeClient } from "../session/runtime-client";
+import { resolveRepositoryCredentialScope } from "../source-control/repository-scope";
+import { readHeldReviewFence, type HeldReviewFence } from "./github-reviews";
 import type { Env } from "../types";
 import {
   error,
@@ -30,74 +50,208 @@ import {
   SCM_AGNOSTIC_SANDBOX_ROUTE,
   type SandboxRouteContext,
 } from "./shared";
+import { dispatchSession } from "./session-route";
 
 const logger = createLogger("router:github-reviewer-token");
 
+/**
+ * The only permission the review POST needs. Requesting it narrows the minted
+ * token below whatever the reviewer App's installation was granted.
+ */
+export const REVIEWER_TOKEN_PERMISSIONS = { pull_requests: "write" } as const;
+
 export const githubReviewerTokenRoutes = new Hono<ControlPlaneHonoEnv>();
 
+type ReviewerTokenContext = SandboxRouteContext & { sessionRuntime: SessionRuntimeClient };
+
+/**
+ * Whether the session is processing the GitHub bot's own prompt right now. The
+ * source alone is caller-chosen, so the author must also be a `github:` actor:
+ * only the GitHub bot's service principal may assert that namespace. A
+ * collaborator's follow-up prompt (web, PAT, Slack, Linear) or an agent's never
+ * qualifies, and no processing prompt at all fails closed.
+ */
+async function activePromptOrigin(
+  ctx: ReviewerTokenContext,
+  sessionId: string
+): Promise<{ isGitHubBotPrompt: boolean; source: string | null }> {
+  const response = await ctx.sessionRuntime.fetch(
+    sessionId,
+    SessionInternalPaths.activePromptAuthor
+  );
+  if (!response.ok) return { isGitHubBotPrompt: false, source: null };
+  const parsed = activePromptAuthorSchema.safeParse(await response.json());
+  if (!parsed.success) return { isGitHubBotPrompt: false, source: null };
+  const { source, userId } = parsed.data;
+  return {
+    isGitHubBotPrompt: source === "github" && userId.startsWith("github:"),
+    source: source ?? null,
+  };
+}
+
+/**
+ * Whether the session member is the repository the review's fence names: by GitHub repository id,
+ * or, for a member recorded without one, by the owner and name the fence recorded.
+ */
+function isFencedRepository(
+  member: { repoOwner: string; repoName: string; repoId: number | null },
+  fence: HeldReviewFence
+): boolean {
+  if (member.repoId !== null) return member.repoId === fence.repoId;
+  return (
+    fence.repoOwner !== null &&
+    fence.repoName !== null &&
+    member.repoOwner.toLowerCase() === fence.repoOwner.toLowerCase() &&
+    member.repoName.toLowerCase() === fence.repoName.toLowerCase()
+  );
+}
+
+function leaseLost(): Response {
+  return error(
+    "Reviewer token is only issued while the review holds its submission lease at the latest generation",
+    403
+  );
+}
+
+/** Whether the session still holds its review's lease, for the repository it held it for. */
+async function stillHoldsFence(
+  ctx: ReviewerTokenContext,
+  sessionId: string,
+  heldFence: HeldReviewFence,
+  stage: "before_mint" | "after_mint"
+): Promise<boolean> {
+  const current = await readHeldReviewFence(ctx.db, sessionId);
+  if (current?.repoId === heldFence.repoId) return true;
+  logger.warn(`review_token.lease_lost_${stage}`, {
+    event: `review_token.lease_lost_${stage}`,
+    session_id: sessionId,
+    request_id: ctx.request_id,
+    trace_id: ctx.trace_id,
+  });
+  return false;
+}
+
 async function handleReviewerToken(
-  _request: Request,
+  request: Request,
   env: Env,
   params: { id: string },
-  ctx: SandboxRouteContext
+  ctx: ReviewerTokenContext
 ): Promise<Response> {
   const reviewerAppConfig = getGitHubReviewerAppConfig(env);
   if (!reviewerAppConfig) {
     return error("No reviewer app configured", 404);
   }
 
-  const session = await new SessionIndexStore(ctx.db).get(params.id);
-  if (session?.spawnSource !== "github-bot") {
+  const sessions = new SessionIndexStore(ctx.db);
+  const session = await sessions.get(params.id);
+  // Fork-only (#1370 supersession): the review fence row, readable only while this session is its
+  // PR's latest generation and holds the PR's submission lease. A held fence also proves a GitHub
+  // bot review session, so a session created before sessions.github_review was written still
+  // qualifies.
+  const heldFence = await readHeldReviewFence(ctx.db, params.id);
+  const githubReview =
+    session?.spawnSource === "github-bot" &&
+    (heldFence !== null || (await sessions.isGitHubReview(params.id)));
+  if (!session || !githubReview) {
     logger.warn("review_token.session_not_eligible", {
       event: "review_token.session_not_eligible",
       session_id: params.id,
       spawn_source: session?.spawnSource ?? null,
+      github_review: githubReview,
       request_id: ctx.request_id,
       trace_id: ctx.trace_id,
     });
-    return error("Reviewer token is only issued to GitHub bot sessions", 403);
+    return error("Reviewer token is only issued to GitHub bot review sessions", 403);
   }
 
-  // Fork-only, depends on #1370's github_review_sessions: GitHub bot sessions also answer
-  // comments and never submit a review there, so only a registered review session (one with a
-  // review fence row) gets the reviewer credential. Goes upstream once #1370 and #1862 merge.
-  const reviewFence = await ctx.db
-    .prepare("SELECT repo_id FROM github_review_sessions WHERE session_id = ? LIMIT 1")
-    .bind(params.id)
-    .first<{ repo_id: number }>();
-  if (!reviewFence) {
-    logger.warn("review_token.session_not_eligible", {
-      event: "review_token.session_not_eligible",
+  const activePrompt = await activePromptOrigin(ctx, params.id);
+  if (!activePrompt.isGitHubBotPrompt) {
+    logger.warn("review_token.prompt_not_eligible", {
+      event: "review_token.prompt_not_eligible",
       session_id: params.id,
-      spawn_source: session.spawnSource,
-      review_fence: false,
+      prompt_source: activePrompt.source,
       request_id: ctx.request_id,
       trace_id: ctx.trace_id,
     });
-    return error("Reviewer token is only issued to GitHub review sessions", 403);
+    return error("Reviewer token is only issued during the GitHub bot's review prompt", 403);
+  }
+
+  // Fork-only (#1370 supersession): the lease is what makes a review's GitHub writes its own, so a
+  // superseded generation, a closed-out turn, or a session that has not taken the lease gets no
+  // token, even while the bot's prompt is still processing.
+  if (!heldFence) {
+    logger.warn("review_token.lease_not_held", {
+      event: "review_token.lease_not_held",
+      session_id: params.id,
+      request_id: ctx.request_id,
+      trace_id: ctx.trace_id,
+    });
+    return leaseLost();
+  }
+
+  // A sandbox started before `repository` existed (an older bot's submission script) omits it;
+  // the fence already names the review's repository, so that request asks for the fenced one.
+  const repositoryParam = new URL(request.url).searchParams.get("repository");
+  const requested = repositoryParam === null ? null : parseRepositoryFullName(repositoryParam);
+  if (repositoryParam !== null && !requested) {
+    return error("repository must name the reviewed repository as owner/name", 400);
+  }
+
+  const members = await new SessionRepositoryStore(ctx.db).listRepositoryIds(params.id);
+  const repositories = members.length
+    ? members
+    : session.repoOwner && session.repoName
+      ? [{ repoOwner: session.repoOwner, repoName: session.repoName, repoId: null }]
+      : [];
+  const member = requested
+    ? repositories.find(
+        (repository) =>
+          repository.repoOwner.toLowerCase() === requested.repoOwner.toLowerCase() &&
+          repository.repoName.toLowerCase() === requested.repoName.toLowerCase()
+      )
+    : repositories.find((repository) => isFencedRepository(repository, heldFence));
+  // Fork-only (#1370 supersession): the review's own repository is the one its fence names, not
+  // whichever session member the sandbox names.
+  const reviewed =
+    member && isFencedRepository(member, heldFence)
+      ? { ...member, repoId: heldFence.repoId }
+      : undefined;
+  if (!reviewed) {
+    logger.warn("review_token.repository_not_in_session", {
+      event: "review_token.repository_not_in_session",
+      session_id: params.id,
+      repository: requested ? `${requested.repoOwner}/${requested.repoName}`.toLowerCase() : null,
+      request_id: ctx.request_id,
+      trace_id: ctx.trace_id,
+    });
+    return error("Reviewer token is only issued for a repository of this session", 403);
   }
 
   try {
-    // The review POST targets the reviewed repository alone, so the token covers only that one,
-    // still intersected with the session owner team's current grants. Requesting the session's
-    // other repositories would fail wherever the reviewer App is not installed on them.
     const scope = await resolveRepositoryCredentialScope(
       ctx.db,
-      [
-        {
-          repoOwner: session.repoOwner ?? "",
-          repoName: session.repoName ?? "",
-          repoId: reviewFence.repo_id,
-        },
-      ],
+      [reviewed],
       session.ownerTeamId,
       () => readCachedInstallationRepositories(env)
     );
+    // Fork-only (#1370 supersession): the lease can expire and pass to a newer generation while
+    // the prompt and scope lookups above run, and again while the token exchange below awaits the
+    // cache or GitHub. The fence is therefore read before minting (so a lost lease costs no
+    // exchange) and again after it, immediately before returning: a token is returned only if the
+    // lease is still held, for the same repository, once the token is in hand. The token itself
+    // outlives the lease (GitHub installation tokens last up to an hour); the lease bounds who may
+    // fetch one, not how long a fetched token stays valid.
+    if (!(await stillHoldsFence(ctx, params.id, heldFence, "before_mint"))) {
+      return leaseLost();
+    }
     const token = await getCachedInstallationToken(
       reviewerAppConfig,
       { cacheStore: env.REPOS_CACHE, userAgent: resolveAppName(env) },
-      { scope }
+      { scope, permissions: REVIEWER_TOKEN_PERMISSIONS }
     );
+    if (!(await stillHoldsFence(ctx, params.id, heldFence, "after_mint"))) {
+      return leaseLost();
+    }
     return json({ token });
   } catch (cause) {
     logger.error("review_token.mint_failed", {
@@ -118,5 +272,5 @@ githubReviewerTokenRoutes.get(
     cacheControl: "no-store",
     authorization: NO_AUTHORIZATION,
   }),
-  (c) => dispatch(c, handleReviewerToken)
+  (c) => dispatchSession(c, handleReviewerToken)
 );

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { afterEach } from "node:test";
 
 const PLUGIN_PATH = "../src/sandbox_runtime/plugins/codex-auth-plugin.js";
 const MODEL_REQUEST_URL = "https://api.openai.com/v1/responses";
@@ -32,10 +32,32 @@ async function loadProxy(tag) {
 /**
  * Route stubbed traffic by path: the control-plane broker always mints a token
  * unless `broker` overrides it, the usage endpoint answers with `usage`, the
- * Codex backend with `codex`, and the platform API always succeeds.
+ * Codex backend with `codex`, and the two platform generation endpoints with
+ * `platform` (success by default). `other` answers any further destination a
+ * case names explicitly. Any other destination, and any route whose
+ * stub the case did not supply, is recorded and fails the case afterwards
+ * rather than being answered with a convenient 200.
  */
-function stubFetch({ codex, broker, usage, platform } = {}) {
+const PLATFORM_ENDPOINTS = new Set([
+  "https://api.openai.com/v1/responses",
+  "https://api.openai.com/v1/chat/completions",
+]);
+let unexpectedCalls = [];
+
+afterEach(() => {
+  const unexpected = unexpectedCalls;
+  unexpectedCalls = [];
+  assert.deepEqual(unexpected, [], "every outbound call reaches a stubbed route");
+});
+
+function unexpectedCall(target) {
+  unexpectedCalls.push(target);
+  return new Response(`unexpected call to ${target}`, { status: 599 });
+}
+
+function stubFetch({ codex, broker, usage, platform, other } = {}) {
   const calls = [];
+  unexpectedCalls = [];
   globalThis.fetch = async (url, init) => {
     // A non-generation call is dispatched as a Request so its own options
     // survive, so the stub must read either shape.
@@ -50,7 +72,7 @@ function stubFetch({ codex, broker, usage, platform } = {}) {
       init: init ?? {},
       request,
     });
-    if (target.includes("/provider-auth/openai/access-token")) {
+    if (target === "https://control.test/sessions/session-1/provider-auth/openai/access-token") {
       return (
         broker?.() ??
         Response.json({
@@ -60,11 +82,16 @@ function stubFetch({ codex, broker, usage, platform } = {}) {
         })
       );
     }
-    if (target.includes("/wham/usage")) {
-      return usage?.(init) ?? new Response("no usage stub", { status: 404 });
+    if (target === "https://chatgpt.com/backend-api/wham/usage") {
+      return usage ? usage(init) : unexpectedCall(target);
     }
-    if (target.startsWith("https://chatgpt.com/")) return codex(calls.length);
-    return platform?.(target, init) ?? new Response("platform-ok", { status: 200 });
+    if (target === "https://chatgpt.com/backend-api/codex/responses") {
+      return codex ? codex(calls.length) : unexpectedCall(target);
+    }
+    if (PLATFORM_ENDPOINTS.has(target)) {
+      return platform?.(target, init) ?? new Response("platform-ok", { status: 200 });
+    }
+    return other ? other(target, init) : unexpectedCall(target);
   };
   return calls;
 }
@@ -582,7 +609,8 @@ test("retries the subscription after a fallback chosen by the preflight fails", 
 });
 
 test("inherits the source body when an init passes a null body", async () => {
-  delete process.env.OPENAI_API_KEY_FALLBACK;
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
   const calls = stubFetch({ codex: () => new Response("codex-ok", { status: 200 }) });
   const loaded = await loadProxy("null-body-override");
 
@@ -776,30 +804,116 @@ test("a spillover drops entity headers that described the original body", async 
   assert.equal(spilloverCall.headers.get("content-encoding"), null);
 });
 
-test("leaves a response-retrieval path on its own origin", async () => {
-  delete process.env.OPENAI_API_KEY_FALLBACK;
-  const calls = stubFetch({ codex: () => new Response("codex-ok", { status: 200 }) });
-  const loaded = await loadProxy("retrieval-path");
-
-  // Only the generation endpoints may be rewritten onto the Codex backend;
-  // retrieving an earlier response must reach api.openai.com unchanged.
-  const retrievalUrl = "https://api.openai.com/v1/responses/resp_123";
-  await loaded.fetch(retrievalUrl, { method: "GET", headers: {} });
-  assert.equal(calls.filter((call) => call.url.startsWith("https://chatgpt.com/")).length, 0);
-  assert.equal(calls.at(-1).url, retrievalUrl);
-
-  // A path that merely starts with the endpoint name is not this API at all.
-  const lookalike = "https://api.openai.com/v1/chat/completionsXYZ";
-  await loaded.fetch(lookalike, { method: "POST", body: "{}", headers: {} });
-  assert.equal(calls.at(-1).url, lookalike);
-
-  // A proxied base URL that prefixes the generation path is still rewritten.
-  await loaded.fetch("https://gateway.test/openai/v1/responses", {
-    method: "POST",
-    body: JSON.stringify({ model: "gpt-5.4", input: "hi" }),
-    headers: {},
+test("never spends the fallback key on a non-generation request", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
+  let latched = false;
+  const calls = stubFetch({
+    codex: () => (latched ? new Response("codex-ok", { status: 200 }) : usageLimitResponse()),
+    other: () => new Response("retrieved", { status: 200 }),
   });
-  assert.equal(calls.filter((call) => call.url.startsWith("https://chatgpt.com/")).length, 1);
+  const loaded = await loadProxy("non-generation-latched");
+
+  assert.equal(await (await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT)).text(), "platform-ok");
+  latched = true;
+
+  // Retrieving an earlier response is not a generation call, so even a latched
+  // sandbox sends it to its own URL on the subscription's credential rather than
+  // replaying it on the paid key or rewriting it to the Codex endpoint.
+  const before = calls.length;
+  const response = await loaded.fetch("https://api.openai.com/v1/responses/resp_123", {
+    method: "GET",
+  });
+  assert.equal(await response.text(), "retrieved");
+  const sent = calls.slice(before).filter((call) => !call.url.startsWith("https://control.test/"));
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].url, "https://api.openai.com/v1/responses/resp_123");
+  assert.equal(sent[0].method, "GET");
+  assert.equal(sent[0].headers.get("authorization"), "Bearer cp-access");
+});
+
+test("with a fallback key, a lookalike of a generation path is not one", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
+  const calls = stubFetch({ other: () => new Response("lookalike", { status: 200 }) });
+  const loaded = await loadProxy("non-generation-lookalike");
+
+  const response = await loaded.fetch("https://api.openai.com/v1/chat/completionsXYZ", {
+    method: "POST",
+    body: "{}",
+  });
+  assert.equal(await response.text(), "lookalike");
+  const sent = calls.filter((call) => !call.url.startsWith("https://control.test/"));
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].url, "https://api.openai.com/v1/chat/completionsXYZ");
+  assert.equal(sent[0].headers.get("authorization"), "Bearer cp-access");
+});
+
+test("with a fallback key, a non-generation call drops an inherited account id", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
+  const calls = stubFetch({
+    broker: () => Response.json({ accessToken: "cp-access", expiresIn: 3600 }),
+    other: () => new Response("retrieved", { status: 200 }),
+  });
+  const loaded = await loadProxy("non-generation-stale-account");
+
+  // The broker answered without an account id, so a copied header would send
+  // this token against someone else's account.
+  await loaded.fetch("https://api.openai.com/v1/responses/resp_123", {
+    method: "GET",
+    headers: {
+      authorization: "Bearer opencode-oauth-dummy-key",
+      "chatgpt-account-id": "acct-stale",
+    },
+  });
+  const call = calls.at(-1);
+  assert.equal(call.url, "https://api.openai.com/v1/responses/resp_123");
+  assert.equal(call.headers.get("authorization"), "Bearer cp-access");
+  assert.equal(call.headers.get("chatgpt-account-id"), null);
+});
+
+test("with a fallback key, a non-generation call keeps fetch's own timeout", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
+  const calls = stubFetch({ other: () => new Response("retrieved", { status: 200 }) });
+  const loaded = await loadProxy("non-generation-timeout");
+
+  // No generation stream here, so OpenCode's stream timeout does not bound it:
+  // disabling Bun's idle timer would let a stalled call hang forever.
+  await loaded.fetch("https://api.openai.com/v1/responses/resp_123", { method: "GET" });
+  const call = calls.at(-1);
+  assert.equal(call.url, "https://api.openai.com/v1/responses/resp_123");
+  assert.notEqual(call.init.timeout, false);
+});
+
+// Pins upstream's subscription proxy, which the no-key path keeps byte for byte:
+// its substring match rewrites these to the Codex endpoint with Bun's idle timer
+// off, and keeps an inherited account id when the broker returns none.
+test("without a fallback key, non-generation calls take upstream's proxy as is", async () => {
+  delete process.env.OPENAI_API_KEY_FALLBACK;
+  delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
+  const calls = stubFetch({
+    codex: () => new Response("codex-ok", { status: 200 }),
+    broker: () => Response.json({ accessToken: "cp-access", expiresIn: 3600 }),
+  });
+  const loaded = await loadProxy("no-key-non-generation");
+
+  await loaded.fetch("https://api.openai.com/v1/responses/resp_123", {
+    method: "GET",
+    headers: { "chatgpt-account-id": "acct-stale" },
+  });
+  await loaded.fetch("https://api.openai.com/v1/chat/completionsXYZ", {
+    method: "POST",
+    body: "{}",
+  });
+  const sent = codexCalls(calls);
+  assert.equal(sent.length, 2);
+  for (const call of sent) {
+    assert.deepEqual(call.init, { timeout: false });
+    assert.equal(call.headers.get("authorization"), "Bearer cp-access");
+  }
+  assert.equal(sent[0].headers.get("chatgpt-account-id"), "acct-stale");
 });
 
 test("a fallback that cannot be sent releases the latch", async () => {
@@ -834,8 +948,12 @@ test("a fallback that cannot be sent releases the latch", async () => {
 });
 
 test("dispatches a non-generation Request without reshaping it", async () => {
-  delete process.env.OPENAI_API_KEY_FALLBACK;
-  const calls = stubFetch({ codex: () => new Response("codex-ok", { status: 200 }) });
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
+  const calls = stubFetch({
+    codex: () => new Response("codex-ok", { status: 200 }),
+    other: () => new Response("files-ok", { status: 200 }),
+  });
   const loaded = await loadProxy("passthrough-request");
 
   // Flattening this would UTF-8-decode the body and drop Request-level
@@ -856,11 +974,11 @@ test("dispatches a non-generation Request without reshaping it", async () => {
   assert.equal(call.request.headers.get("authorization"), "Bearer cp-access");
   const sent = new Uint8Array(await call.request.arrayBuffer());
   assert.deepEqual([...sent], [...body], "the body bytes are untouched");
-  assert.equal(call.init.timeout, undefined, "Bun's fetch timeout stays in force");
 });
 
 test("cancels a stalled streaming body when the caller aborts", async () => {
-  delete process.env.OPENAI_API_KEY_FALLBACK;
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
   stubFetch({ codex: () => new Response("codex-ok", { status: 200 }) });
   const loaded = await loadProxy("stalled-body-abort");
 
@@ -944,7 +1062,8 @@ test("carries every Request-level option onto the reconstructed legs", async () 
 });
 
 test("never pairs a fresh token with an inherited account id", async () => {
-  delete process.env.OPENAI_API_KEY_FALLBACK;
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
   const calls = stubFetch({
     codex: () => new Response("codex-ok", { status: 200 }),
     broker: () => Response.json({ accessToken: "cp-access", expiresIn: 3600 }),
@@ -958,9 +1077,6 @@ test("never pairs a fresh token with an inherited account id", async () => {
     "chatgpt-account-id": "acct-stale",
   };
   await loaded.fetch(MODEL_REQUEST_URL, { ...REQUEST_INIT, headers });
-  assert.equal(calls.at(-1).headers.get("chatgpt-account-id"), null);
-
-  await loaded.fetch(new Request("https://api.openai.com/v1/files", { method: "GET", headers }));
   assert.equal(calls.at(-1).headers.get("chatgpt-account-id"), null);
 });
 
@@ -1033,6 +1149,357 @@ test("stays on the subscription when the usage probe fails", async () => {
 
   assert.equal(await (await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT)).text(), "codex-ok");
   assert.equal(calls.filter((call) => call.url.includes("/codex/responses")).length, 1);
+});
+
+const platformCalls = (calls) => calls.filter((call) => PLATFORM_ENDPOINTS.has(call.url));
+const codexCalls = (calls) =>
+  calls.filter((call) => call.url === "https://chatgpt.com/backend-api/codex/responses");
+
+test("without a fallback key, requests and responses pass through unchanged", async () => {
+  delete process.env.OPENAI_API_KEY_FALLBACK;
+  process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT = "50";
+  const codexResponse = usageLimitResponse();
+  const calls = stubFetch({ codex: () => codexResponse });
+  const loaded = await loadProxy("no-key-passthrough");
+
+  const body = new Uint8Array([0xff, 0x00, 0x7b]);
+  const response = await loaded.fetch(MODEL_REQUEST_URL, {
+    method: "POST",
+    body,
+    redirect: "manual",
+    headers: [
+      ["authorization", "Bearer opencode-oauth-dummy-key"],
+      ["x-repeated", "a"],
+      ["x-repeated", "b"],
+      ["content-type", "application/json"],
+    ],
+  });
+
+  assert.equal(response, codexResponse, "the subscription's response object itself is returned");
+  const [call] = codexCalls(calls);
+  assert.ok(call.request, "the request is forwarded as a Request, as before spillover existed");
+  assert.deepEqual(call.init, { timeout: false });
+  assert.equal(call.request.method, "POST");
+  assert.equal(call.request.redirect, "manual");
+  assert.equal(call.request.headers.get("x-repeated"), "a, b");
+  assert.equal(call.request.headers.get("authorization"), "Bearer cp-access");
+  assert.equal(call.request.headers.get("chatgpt-account-id"), "acct-1");
+  assert.deepEqual([...new Uint8Array(await call.request.arrayBuffer())], [...body]);
+  assert.equal(platformCalls(calls).length, 0);
+  assert.equal(
+    calls.filter((entry) => entry.url.includes("/wham/usage")).length,
+    0,
+    "a ceiling without a fallback key measures nothing"
+  );
+  delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
+});
+
+// Each 429 quota detector, proven on its own: the response carries exactly one
+// quota signal, so removing that detector leaves the 429 on the subscription.
+for (const [name, makeResponse] of [
+  [
+    "a rate-limit-reached header",
+    () =>
+      new Response("slow down", {
+        status: 429,
+        headers: { "x-codex-rate-limit-reached-type": "primary" },
+      }),
+  ],
+  [
+    "a window at the ceiling",
+    () =>
+      new Response("slow down", {
+        status: 429,
+        headers: { "x-codex-secondary-used-percent": "100" },
+      }),
+  ],
+  [
+    "a usage-limit message",
+    () =>
+      new Response(JSON.stringify({ error: { message: "The usage limit has been reached" } }), {
+        status: 429,
+      }),
+  ],
+]) {
+  test(`spills a 429 over on ${name} alone`, async () => {
+    process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+    delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
+    const calls = stubFetch({ codex: makeResponse });
+    const loaded = await loadProxy(`detector-${name.replaceAll(" ", "-")}`);
+
+    const response = await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT);
+    assert.equal(await response.text(), "platform-ok");
+    assert.equal(platformCalls(calls).length, 1);
+    assert.equal(platformCalls(calls)[0].headers.get("authorization"), "Bearer sk-fallback");
+  });
+}
+
+test("returns a 429 that stays on the subscription exactly as it arrived", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
+  const headers = new Headers({ "retry-after": "7", "content-type": "text/plain" });
+  headers.append("set-cookie", "a=1");
+  headers.append("set-cookie", "b=2");
+  const bytes = new Uint8Array([0x73, 0x6c, 0x6f, 0x77, 0xff]);
+  const calls = stubFetch({
+    codex: () => new Response(bytes, { status: 429, statusText: "Too Many Requests", headers }),
+  });
+  const loaded = await loadProxy("throttle-fidelity");
+
+  const response = await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT);
+  assert.equal(response.status, 429);
+  assert.equal(response.statusText, "Too Many Requests");
+  assert.equal(response.headers.get("retry-after"), "7");
+  assert.deepEqual(response.headers.getSetCookie(), ["a=1", "b=2"]);
+  assert.deepEqual([...new Uint8Array(await response.arrayBuffer())], [...bytes]);
+  assert.equal(platformCalls(calls).length, 0);
+});
+
+test("a 429 body that fails to read is an error, not an empty 429", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
+  const calls = stubFetch({
+    codex: () =>
+      new Response(
+        new ReadableStream({
+          pull(controller) {
+            controller.error(new Error("stream reset"));
+          },
+        }),
+        { status: 429 }
+      ),
+  });
+  const loaded = await loadProxy("throttle-body-error");
+
+  await assert.rejects(loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT), /stream reset/);
+  assert.equal(platformCalls(calls).length, 0);
+});
+
+test("keeps repeated header tuples on both legs", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
+  const calls = stubFetch({ codex: () => usageLimitResponse() });
+  const loaded = await loadProxy("repeated-headers");
+
+  await loaded.fetch(MODEL_REQUEST_URL, {
+    ...REQUEST_INIT,
+    headers: [
+      ["authorization", "Bearer opencode-oauth-dummy-key"],
+      ["x-repeated", "a"],
+      ["x-repeated", "b"],
+    ],
+  });
+  assert.equal(codexCalls(calls)[0].headers.get("x-repeated"), "a, b");
+  assert.equal(platformCalls(calls)[0].headers.get("x-repeated"), "a, b");
+});
+
+test("a rejected fallback key fails one turn, then the subscription serves", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-rejected";
+  process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT = "80";
+  const calls = stubFetch({
+    codex: () =>
+      new Response("codex-ok", {
+        status: 200,
+        headers: { "x-codex-secondary-used-percent": "85" },
+      }),
+    usage: () => usageResponse(10, 85),
+    platform: () =>
+      Response.json({ error: { message: "Incorrect API key provided" } }, { status: 401 }),
+  });
+  const loaded = await loadProxy("rejected-key");
+
+  // 85% against an 80% ceiling sends the first turn to the platform, which
+  // refuses the key. That turn fails once, with an error naming the key.
+  const first = await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT);
+  assert.equal(first.status, 401);
+  const error = (await first.json()).error;
+  assert.equal(error.code, "fallback_key_rejected");
+  assert.match(error.message, /OPENAI_API_KEY_FALLBACK/);
+
+  // Later turns do not alternate between the subscription and the refused key:
+  // the key is out of play for the rest of the sandbox.
+  for (let turn = 0; turn < 3; turn += 1) {
+    const response = await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT);
+    assert.equal(await response.text(), "codex-ok");
+  }
+  assert.equal(platformCalls(calls).length, 1, "the refused key is tried exactly once");
+  assert.equal(codexCalls(calls).length, 3);
+  delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
+});
+
+test("a fallback key refused while latched is not tried again", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-revoked";
+  delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
+  let platformStatus = 200;
+  const calls = stubFetch({
+    codex: () => (codexCalls(calls).length === 1 ? usageLimitResponse() : new Response("codex-ok")),
+    platform: () => new Response("platform", { status: platformStatus }),
+  });
+  const loaded = await loadProxy("revoked-while-latched");
+
+  assert.equal((await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT)).status, 200);
+  platformStatus = 401;
+  const refused = await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT);
+  assert.equal(refused.status, 401);
+  assert.equal((await refused.json()).error.code, "fallback_key_rejected");
+  assert.equal(await (await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT)).text(), "codex-ok");
+  assert.equal(platformCalls(calls).length, 2);
+});
+
+test("a 403 arriving while latched is returned as it arrived and keeps the key", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
+  let platformStatus = 200;
+  const calls = stubFetch({
+    codex: () => (codexCalls(calls).length === 1 ? usageLimitResponse() : new Response("codex-ok")),
+    platform: () =>
+      new Response("model access denied", {
+        status: platformStatus,
+        headers: { "x-platform": "403-body" },
+      }),
+  });
+  const loaded = await loadProxy("forbidden-while-latched");
+
+  assert.equal((await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT)).status, 200);
+  platformStatus = 403;
+  const forbidden = await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT);
+  assert.equal(forbidden.status, 403);
+  assert.equal(forbidden.headers.get("x-platform"), "403-body");
+  assert.equal(await forbidden.text(), "model access denied");
+  // Like any other platform failure, the 403 clears the latch: the next turn
+  // retries the subscription rather than staying on a failing paid path.
+  assert.equal(await (await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT)).text(), "codex-ok");
+  assert.equal(platformCalls(calls).length, 2);
+});
+
+test("a 403 for one request leaves the key usable for the next spillover", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
+  const calls = stubFetch({
+    codex: () => usageLimitResponse(),
+    platform: () =>
+      platformCalls(calls).length === 1
+        ? new Response("model access denied", { status: 403 })
+        : new Response("platform-ok"),
+  });
+  const loaded = await loadProxy("forbidden-then-ok");
+
+  const forbidden = await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT);
+  assert.equal(forbidden.status, 403);
+  assert.equal(await forbidden.text(), "model access denied");
+
+  const next = await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT);
+  assert.equal(next.status, 200);
+  assert.equal(await next.text(), "platform-ok");
+  assert.equal(platformCalls(calls).length, 2);
+  assert.equal(platformCalls(calls)[1].headers.get("authorization"), "Bearer sk-fallback");
+});
+
+test("a key refused by one request is not sent by a request already in flight", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-rejected";
+  process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT = "80";
+  const calls = stubFetch({
+    codex: () => new Response("codex-ok", { status: 200 }),
+    usage: () => usageResponse(10, 85),
+    platform: () =>
+      Response.json({ error: { message: "Incorrect API key provided" } }, { status: 401 }),
+  });
+  const loaded = await loadProxy("rejected-key-in-flight");
+
+  // B reads the key, then waits on its own streamed body while A runs the
+  // whole 85%-against-80% path and has the key refused.
+  let finishBody;
+  const bodyReady = new Promise((resolve) => (finishBody = resolve));
+  const streamed = new ReadableStream({
+    async start(controller) {
+      await bodyReady;
+      controller.enqueue(new TextEncoder().encode(REQUEST_INIT.body));
+      controller.close();
+    },
+  });
+  const pendingB = loaded.fetch(
+    new Request(MODEL_REQUEST_URL, {
+      method: "POST",
+      body: streamed,
+      duplex: "half",
+      headers: REQUEST_INIT.headers,
+    })
+  );
+
+  const a = await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT);
+  assert.equal((await a.json()).error.code, "fallback_key_rejected");
+
+  finishBody();
+  const b = await pendingB;
+  assert.equal(await b.text(), "codex-ok", "B goes to the subscription instead");
+  assert.equal(platformCalls(calls).length, 1, "the refused key is sent exactly once");
+  assert.equal(codexCalls(calls)[0].body, REQUEST_INIT.body);
+  delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
+});
+
+test("a streamed body sent to the subscription is never resent on a 429", async () => {
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
+  const calls = stubFetch({ codex: () => usageLimitResponse() });
+  const loaded = await loadProxy("streamed-init-body");
+
+  // A URL-shaped call hands its stream to the subscription leg as is, so the
+  // stream is spent once that leg is sent and a spillover could only send an
+  // empty or locked body. The 429 is returned instead.
+  const response = await loaded.fetch(MODEL_REQUEST_URL, {
+    method: "POST",
+    duplex: "half",
+    headers: REQUEST_INIT.headers,
+    body: new Response(REQUEST_INIT.body).body,
+  });
+  assert.equal(response.status, 429);
+  assert.equal(codexCalls(calls).length, 1);
+  assert.equal(platformCalls(calls).length, 0);
+});
+
+/**
+ * Every control-plane broker error code, classified. Read from the control
+ * plane's own union so a new code fails here until someone decides whether it
+ * may spend the fallback key.
+ */
+const BROKER_CODE_CLASSIFICATION = {
+  account_not_found: "permanent",
+  account_inactive: "permanent",
+  account_archived: "permanent",
+  provider_mismatch: "permanent",
+  provider_unavailable: "transient",
+  credential_not_found: "permanent",
+  credential_invalid: "permanent",
+  exchange_busy: "transient",
+  deadline_exceeded: "transient",
+  reconnect_required: "permanent",
+  upstream_retry_safe: "transient",
+};
+
+test("classifies every control-plane broker error code", async () => {
+  const source = await readFile(
+    new URL("../../control-plane/src/auth/model-provider-account-broker.ts", import.meta.url),
+    "utf8"
+  );
+  const union = source.match(/export type ModelProviderAccountBrokerErrorCode =([^;]+);/);
+  assert.ok(union, "the control plane still declares the broker error code union");
+  const codes = [...union[1].matchAll(/"([a-z_]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(codes.toSorted(), Object.keys(BROKER_CODE_CLASSIFICATION).toSorted());
+
+  process.env.OPENAI_API_KEY_FALLBACK = "sk-fallback";
+  delete process.env.OPENAI_SUBSCRIPTION_MAX_PERCENT;
+  for (const [code, kind] of Object.entries(BROKER_CODE_CLASSIFICATION)) {
+    const calls = stubFetch({
+      broker: () => Response.json({ error: code, code }, { status: 409 }),
+    });
+    const loaded = await loadProxy(`broker-code-${code}`);
+    const outcome = await loaded.fetch(MODEL_REQUEST_URL, REQUEST_INIT).then(
+      () => "permanent",
+      () => "transient"
+    );
+    assert.equal(outcome, kind, `${code} is ${kind}`);
+    assert.equal(platformCalls(calls).length, kind === "permanent" ? 1 : 0, code);
+  }
 });
 
 async function withCatalog(models, run) {
