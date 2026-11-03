@@ -1,0 +1,96 @@
+name: Dependabot auto-merge
+
+# Merges a Dependabot pull request whose highest bump is a minor or a patch once every other check
+# on its head commit has finished and none failed. A major, or a bump whose type Dependabot does
+# not report, is left for a person. `main`'s ruleset requires no status checks (`ci.yml` and
+# `ci-python.yml` are path-filtered, so a required job would never report on most pull requests),
+# so this job waits for the checks itself instead of arming GitHub's auto-merge.
+#
+# A merge to `main` deploys production directly, with no staging soak in between, so the checks
+# on the pull request are the only gate.
+#
+# Approval and merge run on a token of the `open-inspect-codos` app, never `GITHUB_TOKEN`: a merge
+# made with `GITHUB_TOKEN` fires no `push` workflow, so the deploy workflows would never see the
+# commit. The app needs Workflows: write as well, or GitHub refuses to merge the github-actions
+# bumps.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions: {}
+
+# A newer push to the same pull request supersedes the wait on the older head commit.
+concurrency:
+  group: dependabot-automerge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  # Must equal the job name below; the wait loop skips this job's own check.
+  SELF_CHECK: Merge when green
+
+jobs:
+  auto-merge:
+    name: Merge when green
+    # The private key is a Dependabot secret, which reaches only runs Dependabot itself triggered;
+    # a person's push to a Dependabot branch skips this job.
+    if: github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      checks: read
+      contents: read
+      pull-requests: read
+      statuses: read
+    steps:
+      - id: metadata
+        uses: dependabot/fetch-metadata@v3
+      - name: Wait for checks
+        id: wait
+        if: contains(fromJSON('["version-update:semver-minor", "version-update:semver-patch"]'), steps.metadata.outputs.update-type)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          # Give every workflow the pull request triggered time to register its checks.
+          sleep 60
+          while :; do
+            checks=$(gh pr checks "$PR_URL" --json name,bucket --jq "map(select(.name != env.SELF_CHECK))")
+            total=$(jq length <<<"$checks")
+            pending=$(jq '[.[] | select(.bucket == "pending")] | length' <<<"$checks")
+            failed=$(jq -r '.[] | select(.bucket == "fail" or .bucket == "cancel") | .name' <<<"$checks")
+            if [ -n "$failed" ]; then
+              echo "::notice::Not merging; these checks did not pass:"
+              echo "$failed"
+              exit 0
+            fi
+            if [ "$total" -eq 0 ]; then
+              echo "::error::No checks reported on the pull request, so nothing vouches for it"
+              exit 1
+            fi
+            if [ "$pending" -eq 0 ]; then
+              echo "green=true" >>"$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "$pending of $total checks still running"
+            sleep 30
+          done
+      # Minted after the wait, since an app token expires after an hour.
+      - id: token
+        if: steps.wait.outputs.green == 'true'
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: Iv23liuYCN196Fz5FlO6
+          private-key: ${{ secrets.AUTOMERGE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
+      - name: Approve and merge
+        if: steps.wait.outputs.green == 'true'
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          gh pr review --approve "$PR_URL"
+          gh pr merge --merge --match-head-commit "$HEAD_SHA" "$PR_URL"
